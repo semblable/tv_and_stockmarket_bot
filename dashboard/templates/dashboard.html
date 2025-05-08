@@ -35,7 +35,7 @@
         <h2>Bot Dashboard</h2>
         <ul>
             <li><a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' else '' }}">Home</a></li>
-            <li><a href="{{ url_for('tv_shows_view') if 'tv_shows_view' in config['ROUTES'] else '#' }}" class="{{ 'active' if request.endpoint == 'tv_shows_view' else '' }}">TV Shows</a></li>
+            <li><a href="{{ url_for('tv_shows_view') }}" class="{{ 'active' if request.endpoint == 'tv_shows_view' else '' }}">TV Shows</a></li>
             <li><a href="#">Movies</a></li>
             <li><a href="#">Tracked Stocks</a></li>
             <li><a href="#">Stock Alerts</a></li>
