@@ -1,4 +1,4 @@
-from flask import Flask, redirect, url_for, session, request, render_template
+from flask import Flask, redirect, url_for, session, request, render_template, flash
 from functools import wraps
 import requests
 from requests_oauthlib import OAuth2Session
@@ -111,7 +111,74 @@ def callback():
 @login_required
 def dashboard():
     user = session.get('discord_user')
-    return render_template('dashboard.html', user=user)
+    # Pass app.config to make it available in templates, e.g. for conditional route checks
+    return render_template('dashboard.html', user=user, config=app.config)
+
+@app.route('/tv_shows')
+@login_required
+def tv_shows_view():
+    user = session.get('discord_user')
+    tv_shows_data = []
+    error_message = None
+
+    if not Config.BOT_INTERNAL_API_URL or not Config.INTERNAL_API_KEY:
+        flash("Internal API is not configured. Cannot fetch TV shows.", "error")
+        return render_template('tv_shows.html', user=user, tv_shows=tv_shows_data, error_message="Internal API not configured.", config=app.config)
+
+    if not user or 'id' not in user:
+        flash("User session not found or invalid. Please log in again.", "error")
+        return redirect(url_for('login'))
+
+    api_url = f"{Config.BOT_INTERNAL_API_URL.rstrip('/')}/user/{user['id']}/tv_shows"
+    headers = {
+        'X-Internal-API-Key': Config.INTERNAL_API_KEY
+    }
+
+    try:
+        response = requests.get(api_url, headers=headers, timeout=10) # Added timeout
+        response.raise_for_status()  # Raises an HTTPError for bad responses (4XX or 5XX)
+        
+        # It's good practice to check content type before parsing JSON
+        if 'application/json' in response.headers.get('Content-Type', ''):
+            tv_shows_data = response.json()
+            if not isinstance(tv_shows_data, list): # Assuming the API returns a list of shows
+                # If the API returns a dict like {"shows": []}, adjust accordingly
+                # For now, expecting a direct list.
+                flash("Received unexpected data format from internal API for TV shows.", "error")
+                error_message = "Unexpected data format from API."
+                tv_shows_data = [] # Reset to empty list
+        else:
+            flash("Internal API did not return JSON data for TV shows.", "error")
+            error_message = "API did not return JSON."
+            
+    except requests.exceptions.HTTPError as errh:
+        error_message = f"Internal API HTTP Error: {errh.response.status_code}"
+        if errh.response.status_code == 404:
+             error_message += " (User data not found or TV shows endpoint not available for this user)"
+        elif errh.response.status_code == 401 or errh.response.status_code == 403:
+            error_message += " (Authentication with internal API failed. Check INTERNAL_API_KEY)"
+        else:
+            try: # Try to get more details from API error response
+                api_err_details = errh.response.json().get('error', 'No details provided.')
+                error_message += f" - Details: {api_err_details}"
+            except ValueError: # If response is not JSON
+                error_message += " - Could not parse error details from API."
+        flash(error_message, "error")
+    except requests.exceptions.ConnectionError as errc:
+        error_message = "Could not connect to the internal Bot API. Please ensure it's running and accessible."
+        flash(error_message, "error")
+    except requests.exceptions.Timeout as errt:
+        error_message = "Request to the internal Bot API timed out."
+        flash(error_message, "error")
+    except requests.exceptions.RequestException as err:
+        error_message = f"An unexpected error occurred while fetching TV shows: {err}"
+        flash(error_message, "error")
+    except ValueError: # JSONDecodeError inherits from ValueError
+        error_message = "Failed to decode JSON response from the internal API."
+        flash(error_message, "error")
+
+
+    return render_template('tv_shows.html', user=user, tv_shows=tv_shows_data, error_message=error_message, config=app.config)
 
 @app.route('/logout')
 def logout():
