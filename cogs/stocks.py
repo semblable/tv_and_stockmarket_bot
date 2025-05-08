@@ -3,7 +3,7 @@
 import discord
 from discord.ext import commands
 from api_clients import alpha_vantage_client
-from ..data_manager import add_tracked_stock, remove_tracked_stock, get_user_tracked_stocks
+from data_manager import add_tracked_stock, remove_tracked_stock, get_user_tracked_stocks
 
 class Stocks(commands.Cog):
     def __init__(self, bot):

@@ -17,7 +17,7 @@ intents = discord.Intents.default()
 intents.message_content = True # Enable message content intent for potential future use
 
 # Create a Bot instance
-bot = commands.Bot(command_prefix="/", intents=intents) # Using "/" as prefix for slash commands
+bot = commands.Bot(command_prefix="!", intents=intents) # Using "!" as prefix for traditional commands
 
 # --- Cog Loading ---
 INITIAL_EXTENSIONS = [
