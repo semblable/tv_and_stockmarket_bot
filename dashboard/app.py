@@ -3,11 +3,21 @@ from functools import wraps
 import requests
 from requests_oauthlib import OAuth2Session
 import os
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import Config
 
 app = Flask(__name__)
 app.config.from_object(Config)
+
+# Apply ProxyFix to handle X-Forwarded-Proto and other headers correctly
+# This is important for OAuth2 callbacks when running behind a reverse proxy (like on Render)
+# It ensures that url_for generates HTTPS URLs when the proxy terminates SSL.
+# x_for=1 means trust X-Forwarded-For (client IP)
+# x_proto=1 means trust X-Forwarded-Proto (http/https)
+# x_host=1 means trust X-Forwarded-Host
+# x_prefix=1 means trust X-Forwarded-Prefix (if app is under a subpath)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
 # Ensure the templates and static folders exist, Flask might not create them.
 # However, write_to_file will create parent directories if they don't exist.
