@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Bot Control Panel</title>
+    <style>
+        body { font-family: sans-serif; margin: 0; padding: 0; background-color: #f4f4f4; color: #333; }
+        .navbar { background-color: #333; padding: 1em; text-align: right; }
+        .navbar a { color: white; text-decoration: none; margin-left: 1em; }
+        .navbar .user-info { color: #ddd; margin-right: auto; float: left; display: flex; align-items: center;}
+        .navbar .user-info img { border-radius: 50%; width: 30px; height: 30px; margin-right: 10px; }
+        .container { padding: 2em; }
+        h1 { color: #5865F2; }
+        .logout-btn {
+            background-color: #dc3545;
+            color: white;
+            padding: 8px 15px;
+            border: none;
+            border-radius: 5px;
+            text-decoration: none;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .logout-btn:hover {
+            background-color: #c82333;
+        }
+    </style>
+</head>
+<body>
+    <div class="navbar">
+        {% if user %}
+            <div class="user-info">
+                {% if user.avatar_url %}
+                    <img src="{{ user.avatar_url }}" alt="{{ user.username }}'s avatar">
+                {% endif %}
+                <span>Welcome, {{ user.username }}#{{ user.discriminator }}!</span>
+            </div>
+            <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a>
+        {% else %}
+            <a href="{{ url_for('login') }}">Login</a>
+        {% endif %}
+    </div>
+
+    <div class="container">
+        <h1>Bot Dashboard</h1>
+        <p>This is a placeholder for the main dashboard content.</p>
+        <p>You are logged in and can see this page.</p>
+        
+        {% if user %}
+            <h2>User Details (from session):</h2>
+            <ul>
+                <li>ID: {{ user.id }}</li>
+                <li>Email: {{ user.email }}</li>
+            </ul>
+        {% endif %}
+    </div>
+</body>
+</html>
