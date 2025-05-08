@@ -122,10 +122,12 @@ def tv_shows_view():
     error_message = None
 
     if not Config.BOT_INTERNAL_API_URL or not Config.INTERNAL_API_KEY:
+        app.logger.error("CRITICAL: BOT_INTERNAL_API_URL or INTERNAL_API_KEY is not configured!")
         flash("Internal API is not configured. Cannot fetch TV shows.", "error")
         return render_template('tv_shows.html', user=user, tv_shows=tv_shows_data, error_message="Internal API not configured.", config=app.config)
 
     if not user or 'id' not in user:
+        app.logger.error(f"User session issue: user_defined={user is not None}, user_id_present={'id' in user if user else False}")
         flash("User session not found or invalid. Please log in again.", "error")
         return redirect(url_for('login'))
 
@@ -133,8 +135,14 @@ def tv_shows_view():
     headers = {
         'X-Internal-API-Key': Config.INTERNAL_API_KEY
     }
+    
+    app.logger.info(f"Attempting to fetch TV shows for user {user['id']}")
+    app.logger.info(f"  Configured BOT_INTERNAL_API_URL: {Config.BOT_INTERNAL_API_URL}")
+    app.logger.info(f"  Constructed API URL: {api_url}")
+    app.logger.info(f"  Request Headers: {headers.keys()}") # Log keys, not values for security
 
     try:
+        app.logger.info(f"Making GET request to: {api_url}")
         response = requests.get(api_url, headers=headers, timeout=10) # Added timeout
         response.raise_for_status()  # Raises an HTTPError for bad responses (4XX or 5XX)
         
@@ -166,6 +174,11 @@ def tv_shows_view():
         flash(error_message, "error")
     except requests.exceptions.ConnectionError as errc:
         error_message = "Could not connect to the internal Bot API. Please ensure it's running and accessible."
+        app.logger.error(f"ConnectionError when trying to reach {api_url}: {errc}")
+        # errc itself can be quite verbose and might contain the underlying OS error
+        app.logger.error(f"  Detailed ConnectionError: {type(errc)} {errc.args}")
+        if errc.request:
+            app.logger.error(f"  Request that failed: {errc.request.method} {errc.request.url}")
         flash(error_message, "error")
     except requests.exceptions.Timeout as errt:
         error_message = "Request to the internal Bot API timed out."
