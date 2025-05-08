@@ -1,0 +1,20 @@
+# Environment variables
+.env
+*.env.*
+!/.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data files (if you want to keep user data private)
+data/
+# If you want to commit example data or an empty data directory structure,
+# you can add specific exceptions or commit an empty .gitkeep file in the data/ directory.
+
+# IDE and editor specific files
+.vscode/
+.idea/
+*.swp
+*.swo
