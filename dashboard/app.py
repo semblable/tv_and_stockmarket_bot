@@ -126,6 +126,7 @@ def dashboard():
         errors['tv_shows'] = tv_error
         flash(f"Error fetching TV shows: {tv_error}", "error")
     data['tv_shows'] = tv_subs if tv_subs else []
+    print(f"Fetched TV Shows for dashboard: {tv_subs}")
 
     # Fetch Movie Subscriptions
     movie_subs, movie_error = internal_api_client.get_movie_subscriptions(user_id)
@@ -133,6 +134,7 @@ def dashboard():
         errors['movies'] = movie_error
         flash(f"Error fetching movies: {movie_error}", "error")
     data['movies'] = movie_subs if movie_subs else []
+    print(f"Fetched Movie Subscriptions for dashboard: {movie_subs}")
 
     # Fetch Tracked Stocks
     tracked_stocks, stocks_error = internal_api_client.get_tracked_stocks(user_id)
@@ -140,6 +142,7 @@ def dashboard():
         errors['stocks'] = stocks_error
         flash(f"Error fetching stocks: {stocks_error}", "error")
     data['stocks'] = tracked_stocks if tracked_stocks else []
+    print(f"Fetched Tracked Stocks for dashboard: {tracked_stocks}")
 
     # Fetch Stock Alerts
     stock_alerts, alerts_error = internal_api_client.get_stock_alerts(user_id)
@@ -147,6 +150,7 @@ def dashboard():
         errors['stock_alerts'] = alerts_error
         flash(f"Error fetching stock alerts: {alerts_error}", "error")
     data['stock_alerts'] = stock_alerts if stock_alerts else []
+    print(f"Fetched Stock Alerts for dashboard: {stock_alerts}")
     
     # Fetch User Settings
     user_settings, settings_error = internal_api_client.get_user_settings(user_id)
@@ -154,6 +158,7 @@ def dashboard():
         errors['settings'] = settings_error
         flash(f"Error fetching settings: {settings_error}", "error")
     data['settings'] = user_settings if user_settings else {}
+    print(f"Fetched User Settings for dashboard: {user_settings}")
 
 
     return render_template('dashboard.html', user=user, data=data, errors=errors, config=app.config)
