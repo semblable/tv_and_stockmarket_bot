@@ -7,20 +7,25 @@ import data_manager
 from datetime import datetime, date, timedelta, time
 import requests
 import asyncio
+import logging # Import logging
+
+logger = logging.getLogger(__name__)
 
 NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"] # Unicode: \u0031\uFE0F\u20E3, etc.
 
 class TVShows(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        logger.info("TVShows Cog: Initializing and starting check_new_episodes task.")
         self.check_new_episodes.start() # Start the background task
 
     def cog_unload(self):
+        logger.info("TVShows Cog: Unloading and cancelling check_new_episodes task.")
         self.check_new_episodes.cancel() # Stop the background task when cog is unloaded
 
     @commands.Cog.listener()
     async def on_ready(self):
-        print("TVShows Cog is ready.")
+        logger.info("TVShows Cog is ready and listener has been triggered.")
 
     @commands.hybrid_command(name="tv_subscribe", description="Subscribe to TV show notifications.")
     @discord.app_commands.describe(show_name="The name of the TV show to subscribe to")

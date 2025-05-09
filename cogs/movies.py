@@ -7,6 +7,9 @@ import data_manager # Will be used for subscription commands
 from datetime import datetime, date, timedelta, time
 import asyncio
 import re # For parsing director from credits
+import logging # Import logging
+
+logger = logging.getLogger(__name__)
 
 NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
@@ -22,14 +25,16 @@ def format_runtime(minutes):
 class MoviesCog(commands.Cog, name="Movies"):
     def __init__(self, bot):
         self.bot = bot
+        logger.info("MoviesCog: Initializing and starting check_movie_releases task.")
         self.check_movie_releases.start()
 
     def cog_unload(self):
+        logger.info("MoviesCog: Unloading and cancelling check_movie_releases task.")
         self.check_movie_releases.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self):
-        print("MoviesCog is ready.")
+        logger.info("MoviesCog is ready and listener has been triggered.")
 
     @commands.hybrid_command(name="movie_info", description="Get detailed information about a movie.")
     @discord.app_commands.describe(movie_name="The name of the movie to get information for")
@@ -625,3 +630,6 @@ Usage examples:
 async def setup(bot):
     await bot.add_cog(MoviesCog(bot))
     print("MoviesCog added to bot.")
+async def setup(bot: commands.Bot):
+    await bot.add_cog(MoviesCog(bot))
+    logger.info("MoviesCog has been loaded.")

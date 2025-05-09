@@ -4,6 +4,7 @@ from discord.ext import commands
 from discord import app_commands # Required for @app_commands.describe
 import config  # For loading the bot token
 import os
+import logging # Import logging
 from cogs.help import MyCustomHelpCommand # Import the custom help command
 import asyncio
 from flask import Flask, request, jsonify
@@ -11,10 +12,18 @@ from threading import Thread
 from functools import wraps
 import data_manager # For API endpoints
 
+# --- Basic Logging Setup ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s', handlers=[logging.StreamHandler()])
+logger = logging.getLogger(__name__)
+logger.info("Bot script started. Basic logging configured.")
+
 # Check if the token was loaded correctly
 if config.DISCORD_BOT_TOKEN is None:
-    print("Error: DISCORD_BOT_TOKEN is not set. Please create a .env file with your bot token.")
+    logger.error("CRITICAL: DISCORD_BOT_TOKEN is not set in config.py. The bot cannot start.")
+    # It's possible config.py's print also didn't show, so log here too.
+    # The original print in config.py should ideally handle the .env part.
     exit() # Exit if the token is not found
+logger.info("DISCORD_BOT_TOKEN found in config.")
 
 # Define intents
 intents = discord.Intents.default()
@@ -37,9 +46,9 @@ async def load_extensions():
     for extension in INITIAL_EXTENSIONS:
         try:
             await bot.load_extension(extension)
-            print(f"Successfully loaded extension: {extension}")
+            logger.info(f"Successfully loaded extension: {extension}")
         except Exception as e:
-            print(f"Failed to load extension {extension}: {e}")
+            logger.error(f"Failed to load extension {extension}:", exc_info=True) # Log with traceback
             # Optionally, re-raise or handle more gracefully
             # raise e 
 
@@ -255,13 +264,14 @@ async def on_ready():
     """
     Called when the bot is successfully logged in and ready.
     """
-    print(f"Bot is ready and logged in as {bot.user}")
+    logger.info(f"Bot is ready and logged in as {bot.user}")
     try:
         # Sync the application commands (slash commands) to Discord
+        logger.info("Attempting to sync application commands...")
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
+        logger.info(f"Synced {len(synced)} command(s)")
     except Exception as e:
-        print(f"Error syncing commands: {e}")
+        logger.error("Error syncing application commands:", exc_info=True)
 
 # --- Basic Slash Command (Example) ---
 @bot.hybrid_command(name="ping", description="Checks bot latency and responds with Pong!")
@@ -283,31 +293,35 @@ async def ping(ctx: commands.Context, ephemeral_response: bool = False):
 
 # --- Main Execution ---
 async def main():
+    logger.info("Async main() function started.")
     # Start Flask app in a new thread
     # Daemon threads exit when the main program exits
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print("Flask thread started.")
+    logger.info("Flask thread started.")
 
     # Load cogs
+    logger.info("Attempting to load extensions (cogs)...")
     await load_extensions()
+    logger.info("Finished attempting to load extensions.")
     
     # Start the bot
-    print("Starting Discord bot...")
-    if config.DISCORD_BOT_TOKEN:
+    logger.info("Starting Discord bot...")
+    if config.DISCORD_BOT_TOKEN: # This check is a bit redundant due to the one at the top, but safe
         await bot.start(config.DISCORD_BOT_TOKEN)
     else:
         # This case should ideally be caught by the check at the top,
         # but it's good practice to have a fallback.
-        print("Critical Error: Bot token not found. Cannot start the bot.")
+        logger.critical("Bot token not found at the point of starting the bot. This should have been caught earlier.")
 
 if __name__ == "__main__":
+    logger.info("Starting bot execution from __main__.")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Bot shutting down...")
+        logger.info("Bot shutting down due to KeyboardInterrupt.")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        logger.error("An unexpected error occurred in __main__:", exc_info=True)
     finally:
         # Consider cleanup tasks if necessary, though bot.close() is handled by bot.start() on exit
-        print("Bot has shut down.")
+        logger.info("Bot has shut down.")

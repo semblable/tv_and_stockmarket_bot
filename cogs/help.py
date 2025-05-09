@@ -31,7 +31,7 @@ class MyCustomHelpCommand(commands.HelpCommand):
         listed_command_names = set() # To avoid listing hybrid commands twice
 
         for cog, commands_in_cog in mapping.items():
-            filtered_commands = await self.filter_commands(commands_in_cog, sort=True, hidden=True)
+            filtered_commands = await self.filter_commands(commands_in_cog, sort=True)
             if not filtered_commands:
                 continue
 
@@ -105,7 +105,7 @@ class MyCustomHelpCommand(commands.HelpCommand):
         if cog.description:
             embed.description = cog.description
 
-        filtered_commands = await self.filter_commands(cog.get_commands(), sort=True, hidden=True)
+        filtered_commands = await self.filter_commands(cog.get_commands(), sort=True)
         if not filtered_commands:
             final_desc = (embed.description + "\n" if embed.description else "") + "No commands in this category."
             embed.description = final_desc
@@ -136,7 +136,7 @@ class MyCustomHelpCommand(commands.HelpCommand):
         if group.aliases:
             embed.add_field(name="Aliases", value=", ".join([f"`{ctx.prefix}{alias}`" for alias in group.aliases]), inline=False)
 
-        subcommands = await self.filter_commands(group.commands, sort=True, hidden=True)
+        subcommands = await self.filter_commands(group.commands, sort=True)
         if subcommands:
             sub_list_text = []
             for cmd in subcommands:

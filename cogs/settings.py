@@ -3,8 +3,11 @@ import discord
 from discord.ext import commands
 import re # For DND time validation
 from datetime import datetime, time # For DND time checking (though not used in this file directly yet)
+import logging # Import logging
 
 import data_manager
+
+logger = logging.getLogger(__name__)
 
 # Helper to create a consistent embed for settings
 def create_settings_embed(ctx, user_preferences):
@@ -138,4 +141,4 @@ class SettingsCog(commands.Cog, name="Settings"):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SettingsCog(bot))
-    print("SettingsCog loaded.")
+    logger.info("SettingsCog has been loaded.")
