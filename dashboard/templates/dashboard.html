@@ -4,42 +4,20 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Bot Dashboard{% endblock %}</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; display: flex; min-height: 100vh; background-color: #f8f9fa; }
-        .sidebar { width: 220px; background-color: #343a40; color: white; padding-top: 20px; position: fixed; height: 100%; }
-        .sidebar h2 { text-align: center; color: #adb5bd; margin-bottom: 20px; font-size: 1.2em; }
-        .sidebar ul { list-style-type: none; padding: 0; }
-        .sidebar ul li a { display: block; color: #dee2e6; padding: 12px 20px; text-decoration: none; transition: background-color 0.2s ease, color 0.2s ease; }
-        .sidebar ul li a:hover, .sidebar ul li a.active { background-color: #495057; color: white; }
-        .main-content { margin-left: 220px; flex-grow: 1; padding: 0; display: flex; flex-direction: column; }
-        .top-navbar { background-color: #ffffff; padding: 0.8em 1.5em; display: flex; justify-content: flex-end; align-items: center; border-bottom: 1px solid #dee2e6; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        .top-navbar .user-info { color: #495057; margin-right: 1em; display: flex; align-items: center; }
-        .top-navbar .user-info img { border-radius: 50%; width: 30px; height: 30px; margin-right: 10px; border: 1px solid #dee2e6;}
-        .logout-btn {
-            background-color: #007bff; color: white; padding: 8px 15px; border: none; border-radius: 5px;
-            text-decoration: none; font-size: 0.9em; cursor: pointer; transition: background-color 0.2s ease;
-        }
-        .logout-btn:hover { background-color: #0056b3; }
-        .content-area { padding: 2em; background-color: #ffffff; flex-grow: 1; }
-        h1, h2 { color: #343a40; }
-        .flash-messages { list-style: none; padding: 0; margin: 0 0 1em 0; }
-        .flash-messages li { padding: 0.75em; margin-bottom: 0.5em; border-radius: 4px; }
-        .flash-messages .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .flash-messages .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .flash-messages .info { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
     {% block head_extra %}{% endblock %}
 </head>
 <body>
     <div class="sidebar">
         <h2>Bot Dashboard</h2>
         <ul>
-            <li><a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' else '' }}">Home</a></li>
-            <li><a href="{{ url_for('tv_shows_view') }}" class="{{ 'active' if request.endpoint == 'tv_shows_view' else '' }}">TV Shows</a></li>
-            <li><a href="#">Movies</a></li>
-            <li><a href="#">Tracked Stocks</a></li>
-            <li><a href="#">Stock Alerts</a></li>
-            <li><a href="#">User Settings</a></li>
+            <li><a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' else '' }}">Home / Overview</a></li>
+            {# Remove direct links to specific data types for now, as they are on this page #}
+            {# <li><a href="#tv_shows">TV Shows</a></li> #}
+            {# <li><a href="#movies">Movies</a></li> #}
+            {# <li><a href="#stocks">Tracked Stocks</a></li> #}
+            {# <li><a href="#stock_alerts">Stock Alerts</a></li> #}
+            {# <li><a href="#settings">User Settings</a></li> #}
         </ul>
     </div>
 
@@ -68,15 +46,97 @@
                 {% endif %}
             {% endwith %}
             {% block content %}
-                <h1>Welcome to the Dashboard!</h1>
-                <p>This is the main landing page. Select an option from the sidebar to manage your settings.</p>
-                {% if user %}
-                    <h2>Your Details (from session):</h2>
-                    <ul>
-                        <li>ID: {{ user.id }}</li>
-                        <li>Email: {{ user.email }}</li>
-                    </ul>
+                <h1>Your Dashboard Overview</h1>
+                <p>Here's a summary of your subscriptions, tracked items, and settings.</p>
+
+                {% if errors %}
+                    <div class="errors-summary">
+                        <h3>API Data Issues:</h3>
+                        <ul>
+                            {% for section, error_msg in errors.items() %}
+                                {% if error_msg %}
+                                    <li><strong>{{ section|replace('_', ' ')|title }}:</strong> {{ error_msg }}</li>
+                                {% endif %}
+                            {% endfor %}
+                        </ul>
+                    </div>
                 {% endif %}
+
+                <section id="tv_shows">
+                    <h2>TV Show Subscriptions</h2>
+                    {% if data.tv_shows %}
+                        <ul>
+                        {% for show in data.tv_shows %}
+                            <li>{{ show.get('name', 'N/A') }} (ID: {{ show.get('id', 'N/A') }}) - Next Ep: {{ show.get('next_episode_to_air', {}).get('air_date', 'N/A') }}</li>
+                        {% else %}
+                            <li>No TV show subscriptions found.</li>
+                        {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p>No TV show subscriptions found or data could not be loaded.</p>
+                    {% endif %}
+                </section>
+
+                <section id="movies">
+                    <h2>Movie Subscriptions (Watchlist)</h2>
+                    {% if data.movies %}
+                        <ul>
+                        {% for movie in data.movies %}
+                            <li>{{ movie.get('title', 'N/A') }} (ID: {{ movie.get('id', 'N/A') }}) - Release: {{ movie.get('release_date', 'N/A') }}</li>
+                        {% else %}
+                            <li>No movie subscriptions found.</li>
+                        {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p>No movie subscriptions found or data could not be loaded.</p>
+                    {% endif %}
+                </section>
+
+                <section id="stocks">
+                    <h2>Tracked Stocks</h2>
+                    {% if data.stocks %}
+                        <ul>
+                        {% for stock in data.stocks %}
+                            <li>{{ stock.get('symbol', 'N/A') }} - Last Price: {{ stock.get('price', 'N/A') }} ({{ stock.get('timestamp', 'N/A') }})</li>
+                        {% else %}
+                            <li>No tracked stocks found.</li>
+                        {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p>No tracked stocks found or data could not be loaded.</p>
+                    {% endif %}
+                </section>
+
+                <section id="stock_alerts">
+                    <h2>Stock Alerts</h2>
+                    {% if data.stock_alerts %}
+                        <ul>
+                        {% for alert in data.stock_alerts %}
+                            <li>{{ alert.get('symbol', 'N/A') }} - Target: {{ alert.get('target_price', 'N/A') }} (Type: {{ alert.get('alert_type', 'N/A') }})</li>
+                        {% else %}
+                            <li>No stock alerts found.</li>
+                        {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p>No stock alerts found or data could not be loaded.</p>
+                    {% endif %}
+                </section>
+
+                <section id="settings">
+                    <h2>User Settings</h2>
+                    {% if data.settings %}
+                        <ul>
+                        {% for key, value in data.settings.items() %}
+                            <li><strong>{{ key|replace('_', ' ')|title }}:</strong> {{ value }}</li>
+                        {% else %}
+                            <li>No user settings found.</li>
+                        {% endfor %}
+                        </ul>
+                    {% else %}
+                        <p>No user settings found or data could not be loaded.</p>
+                    {% endif %}
+                </section>
+
             {% endblock %}
         </div>
     </div>
