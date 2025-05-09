@@ -433,10 +433,10 @@ class Stocks(commands.Cog):
     @commands.hybrid_command(name="stock_alert", description="Set, update, or clear a price alert for a tracked stock.")
     @discord.app_commands.describe(
         symbol="The stock symbol (e.g., AAPL). Must be already tracked.",
-        above="Price target: Notify when price > value. E.g., '150.50' or 'clear'.",
-        below="Price target: Notify when price < value. E.g., '120.75' or 'clear'.",
-        dpc_above="Daily % Change: Notify if % above prev close. E.g., '5' for +5%, '2.5', or 'clear'.",
-        dpc_below="Daily % Change: Notify if % below prev close. E.g., '5' for -5%, '2.5', or 'clear'."
+        above_target="Price target: Notify when price > value. E.g., '150.50' or 'clear'.",
+        below_target="Price target: Notify when price < value. E.g., '120.75' or 'clear'.",
+        dpc_above_target="Daily % Change: Notify if % above prev close. E.g., '5' for +5%, '2.5', or 'clear'.",
+        dpc_below_target="Daily % Change: Notify if % below prev close. E.g., '5' for -5%, '2.5', or 'clear'."
     )
     @discord.app_commands.rename(
         above_target='above',
