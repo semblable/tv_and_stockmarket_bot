@@ -38,7 +38,7 @@ INITIAL_EXTENSIONS = [
     "cogs.stocks",
     "cogs.utility",
     "cogs.settings",
-    "cogs.movies" # Added the new Movies Cog
+    "cogs.movies" # Added the new Movies Cog#
     # "cogs.help" # Not loaded as a cog, but assigned directly
 ]
 
