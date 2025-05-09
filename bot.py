@@ -84,6 +84,39 @@ def get_tv_subscriptions(discord_user_id):
     except Exception as e:
         flask_app.logger.error(f"[BOT API LOGGER] Error in /tv_subscriptions for discord_user_id {discord_user_id}: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
+@flask_app.route('/api/internal/user/<discord_user_id>/tv_show', methods=['POST'])
+@require_internal_api_key
+def add_user_tv_show(discord_user_id):
+    flask_app.logger.info(f"[BOT API LOGGER] Attempting to add TV show for discord_user_id: {discord_user_id}")
+    try:
+        user_id = int(discord_user_id)
+    except ValueError:
+        flask_app.logger.error(f"[BOT API LOGGER] ValueError converting discord_user_id '{discord_user_id}' to int for add TV show.")
+        return jsonify({"error": "Invalid user ID format"}), 400
+
+    if not request.is_json:
+        flask_app.logger.warning(f"[BOT API LOGGER] Add TV show request for user_id {user_id} is not JSON.")
+        return jsonify({"error": "Invalid payload: request must be JSON"}), 400
+
+    data = request.get_json()
+    tmdb_id = data.get('tmdb_id')
+    title = data.get('title')
+    poster_path = data.get('poster_path')
+
+    if not all([isinstance(tmdb_id, int), isinstance(title, str), isinstance(poster_path, str)]):
+        flask_app.logger.warning(f"[BOT API LOGGER] Invalid payload for add TV show for user_id {user_id}. Payload: {data}")
+        return jsonify({"error": "Invalid payload: missing or incorrect type for tmdb_id, title, or poster_path"}), 400
+
+    flask_app.logger.info(f"[BOT API LOGGER] Calling data_manager.add_tv_show_subscription for user_id {user_id}, tmdb_id {tmdb_id}")
+    success = data_manager.add_tv_show_subscription(user_id, tmdb_id, title, poster_path)
+
+    if success:
+        flask_app.logger.info(f"[BOT API LOGGER] Successfully added/found TV show (tmdb_id: {tmdb_id}) for user_id {user_id}.")
+        return jsonify({"message": "TV show added successfully"}), 201
+    else:
+        # This 'else' implies a database error from _save_json, as duplicates are handled as success.
+        flask_app.logger.error(f"[BOT API LOGGER] Failed to add TV show (tmdb_id: {tmdb_id}) for user_id {user_id} due to data_manager failure.")
+        return jsonify({"error": "Failed to add TV show"}), 500
 
 @flask_app.route('/api/internal/user/<discord_user_id>/movie_subscriptions', methods=['GET'])
 @require_internal_api_key

@@ -1,4 +1,4 @@
-from flask import Flask, redirect, url_for, session, request, render_template, flash
+from flask import Flask, redirect, url_for, session, request, render_template, flash, jsonify
 from functools import wraps
 import requests
 from requests_oauthlib import OAuth2Session
@@ -7,6 +7,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .config import Config
 from dashboard import internal_api_client # Import the new API client
+from api_clients import tmdb_client # Import the TMDB client
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -166,6 +167,64 @@ def dashboard():
 # The /tv_shows route is removed as data is now fetched and displayed on the main /dashboard.
 # If specific pages are needed later, they can be added.
 
+@app.route('/dashboard/add_tv_show', methods=['POST'])
+@login_required
+def add_tv_show():
+    user = session.get('discord_user')
+    if not user or 'id' not in user:
+        flash("User session not found or invalid. Please log in again.", "error")
+        return redirect(url_for('login'))
+
+    user_id = user['id']
+    tmdb_id_str = request.form.get('tmdb_id')
+    title = request.form.get('title')
+    poster_path = request.form.get('poster_path')
+
+    if not tmdb_id_str or not title: # poster_path can be optional (empty string)
+        flash("Missing tmdb_id or title for the TV show.", "error")
+        return redirect(url_for('dashboard'))
+
+    try:
+        tmdb_id = int(tmdb_id_str)
+    except ValueError:
+        flash("Invalid TMDB ID format.", "error")
+        return redirect(url_for('dashboard'))
+
+    response_json, error_message = internal_api_client.add_tv_show_subscription(
+        user_id=user_id,
+        tmdb_id=tmdb_id,
+        title=title,
+        poster_path=poster_path if poster_path else "" # Ensure poster_path is a string
+    )
+
+    if error_message:
+        flash(f"Error adding TV show: {error_message}", "error")
+    else:
+        # Assuming the API returns a success message or the created object
+        flash(f"TV show '{title}' added successfully!", "success")
+        
+    return redirect(url_for('dashboard'))
+
+@app.route('/dashboard/search_tv_shows', methods=['GET'])
+@login_required
+def search_tv_shows_route():
+    user = session.get('discord_user')
+    if not user or 'id' not in user:
+        return jsonify({"error": "User session not found or invalid. Please log in again."}), 401
+
+    query = request.args.get('query')
+    if not query:
+        return jsonify({"error": "Missing search query parameter."}), 400
+
+    results = tmdb_client.search_tv_shows(query)
+
+    if results is None: # Should be an empty list on error from tmdb_client
+        return jsonify({"error": "An error occurred while searching for TV shows."}), 500
+    
+    # The tmdb_client.search_tv_shows is expected to return a list of dicts
+    # or an empty list if no results or an error occurred.
+    # So, we can directly return it.
+    return jsonify(results)
 @app.route('/logout')
 def logout():
     session.pop('discord_user', None)

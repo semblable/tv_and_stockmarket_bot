@@ -4,7 +4,7 @@ from flask import current_app
 
 from dashboard.config import Config
 
-def _make_request(endpoint: str, user_id: str):
+def _make_api_call(method: str, endpoint: str, user_id: str, payload: dict | None = None) -> tuple[dict | None, str | None]:
     """Helper function to make requests to the internal API."""
     base_url = Config.BOT_INTERNAL_API_URL
     api_key = Config.INTERNAL_API_KEY
@@ -26,11 +26,18 @@ def _make_request(endpoint: str, user_id: str):
     else:
         url = f"{base_url}{endpoint.format(user_id=user_id)}"
 
-    current_app.logger.info(f"Making internal API request to: {url}")
+    current_app.logger.info(f"Making internal API {method} request to: {url} with payload: {payload}")
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.request(method, url, headers=headers, json=payload, timeout=10)
         response.raise_for_status()  # Raises an HTTPError for bad responses (4XX or 5XX)
+        
+        # Handle cases where response might be empty (e.g., 204 No Content for a successful POST/DELETE)
+        if response.status_code == 204:
+            return {}, None # Return empty dict for successful no-content responses
+        if not response.content: # Check if content is empty before trying to parse JSON
+             return {}, None # Or handle as an error if JSON is always expected
+
         return response.json(), None
     except requests.exceptions.ConnectionError as e:
         current_app.logger.error(f"Connection error calling internal API: {e}")
@@ -39,14 +46,35 @@ def _make_request(endpoint: str, user_id: str):
         current_app.logger.error(f"Timeout error calling internal API: {e}")
         return None, "Internal API request timed out."
     except requests.exceptions.HTTPError as e:
-        current_app.logger.error(f"HTTP error calling internal API: {e}. Response: {e.response.text}")
-        return None, f"Internal API returned an error: {e.response.status_code}"
+        current_app.logger.error(f"HTTP error calling internal API: {e}. Response: {e.response.text if e.response else 'No response body'}")
+        error_detail = ""
+        if e.response is not None:
+            try:
+                error_json = e.response.json()
+                error_detail = error_json.get("detail", e.response.text)
+            except json.JSONDecodeError:
+                error_detail = e.response.text
+        return None, f"Internal API returned an error: {e.response.status_code if e.response else 'Unknown'}. {error_detail}".strip()
     except json.JSONDecodeError as e:
-        current_app.logger.error(f"JSON decode error from internal API: {e}")
+        current_app.logger.error(f"JSON decode error from internal API: {e}. Response text: {response.text if 'response' in locals() else 'Response object not available'}")
         return None, "Invalid JSON response from internal API."
     except Exception as e:
         current_app.logger.error(f"An unexpected error occurred calling internal API: {e}")
         return None, "An unexpected error occurred."
+
+def _make_request(endpoint: str, user_id: str):
+    """Helper function to make GET requests to the internal API."""
+    return _make_api_call(method="GET", endpoint=endpoint, user_id=user_id)
+
+def add_tv_show_subscription(user_id: str, tmdb_id: int, title: str, poster_path: str) -> tuple[dict | None, str | None]:
+    """Adds a TV show subscription for a user."""
+    endpoint = "/api/internal/user/{user_id}/tv_show"
+    payload = {
+        "tmdb_id": tmdb_id,
+        "title": title,
+        "poster_path": poster_path
+    }
+    return _make_api_call(method="POST", endpoint=endpoint, user_id=user_id, payload=payload)
 
 def get_tv_subscriptions(user_id: str):
     """Fetches TV subscriptions for a user."""

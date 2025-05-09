@@ -91,6 +91,29 @@ def update_last_notified_episode_details(user_id, show_id, episode_details):
     if updated:
         return _save_json(TV_SUBSCRIPTIONS_FILE, subscriptions)
     return False
+def add_tv_show_subscription(user_id: int, tmdb_id: int, title: str, poster_path: str) -> bool:
+    """Adds a TV show subscription for a user using TMDB ID, title, and poster path.
+    Prevents adding duplicate (user_id, tmdb_id) entries.
+    Returns True if the operation was successful (show added or already existed), False otherwise.
+    """
+    user_id_str = str(user_id)  # JSON keys must be strings
+    subscriptions = _load_json(TV_SUBSCRIPTIONS_FILE)
+
+    if user_id_str not in subscriptions:
+        subscriptions[user_id_str] = []
+
+    # Check if a subscription with the given tmdb_id already exists for this user
+    if any(sub.get('tmdb_id') == tmdb_id for sub in subscriptions[user_id_str]):
+        return True  # Already subscribed, idempotent success
+
+    subscriptions[user_id_str].append({
+        "tmdb_id": tmdb_id,
+        "title": title,
+        "poster_path": poster_path,
+        "last_notified_episode_details": None  # Maintain consistency with existing fields
+    })
+    
+    return _save_json(TV_SUBSCRIPTIONS_FILE, subscriptions)
 
 # --- Movie Subscriptions ---
 

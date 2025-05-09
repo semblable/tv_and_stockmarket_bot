@@ -6,10 +6,11 @@ import config # To access TMDB_API_KEY
 TMDB_API_KEY = config.TMDB_API_KEY
 BASE_URL = "https://api.themoviedb.org/3"
 
-def search_tv_show(query):
+def search_tv_shows(query: str) -> list[dict]:
     """
-    Searches for a TV show on TMDB.
-    Returns a list of show dictionaries or an empty list on error/no results.
+    Searches for TV shows on TMDB.
+    Returns a list of show dictionaries (each with id, name, poster_path)
+    or an empty list on error or no results.
     """
     if not TMDB_API_KEY:
         print("Error: TMDB_API_KEY not configured.")
@@ -41,13 +42,13 @@ def search_tv_show(query):
                     results.append(show_info)
         return results
     except requests.exceptions.HTTPError as e:
-        print(f"HTTP error during TMDB API request (search_tv_show): {e} - Response: {e.response.text if e.response else 'N/A'}")
+        print(f"HTTP error during TMDB API request (search_tv_shows): {e} - Response: {e.response.text if e.response else 'N/A'}")
         return []
     except requests.exceptions.RequestException as e:
-        print(f"Error during TMDB API request (search_tv_show): {e}")
+        print(f"Error during TMDB API request (search_tv_shows): {e}")
         return []
     except ValueError as e: # Includes JSONDecodeError
-        print(f"Error parsing JSON response from TMDB (search_tv_show): {e}")
+        print(f"Error parsing JSON response from TMDB (search_tv_shows): {e}")
         return []
 
 def get_show_details(show_id, append_to_response='next_episode_to_air,last_episode_to_air'):
@@ -349,7 +350,7 @@ if __name__ == '__main__':
         # Test search_tv_show
         search_query = "The Simpsons"
         print(f"\nSearching for TV show: '{search_query}'...")
-        shows = search_tv_show(search_query)
+        shows = search_tv_shows(search_query)
         
         if shows:
             print(f"Found {len(shows)} show(s) for '{search_query}'.")
@@ -441,7 +442,7 @@ if __name__ == '__main__':
         print("\n--- Another Search Example: Non-existent show ---")
         non_existent_query = "ThisShowDoesNotExistRandomString123"
         print(f"\nSearching for TV show: '{non_existent_query}'...")
-        shows_non_existent = search_tv_show(non_existent_query)
+        shows_non_existent = search_tv_shows(non_existent_query)
         if not shows_non_existent:
             print(f"Correctly found no results for '{non_existent_query}'.")
         else:

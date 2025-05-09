@@ -62,6 +62,24 @@
                     </div>
                 {% endif %}
 
+<section id="add_tv_show_form">
+                    <h2>Add New TV Show</h2>
+                    <form method="POST" action="{{ url_for('add_tv_show') }}">
+                        <div class="form-group">
+                            <label for="tmdb_id">TMDB ID:</label>
+                            <input type="number" id="tmdb_id" name="tmdb_id" placeholder="TMDB ID" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="title">Title:</label>
+                            <input type="text" id="title" name="title" placeholder="TV Show Title" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="poster_path">Poster Path (optional):</label>
+                            <input type="text" id="poster_path" name="poster_path" placeholder="e.g., /xyz.jpg">
+                        </div>
+                        <button type="submit">Add TV Show</button>
+                    </form>
+                </section>
                 <section id="tv_shows">
                     <h2>TV Show Subscriptions</h2>
                     {% if data.tv_shows %}
