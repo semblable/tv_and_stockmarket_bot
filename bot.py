@@ -32,7 +32,7 @@ intents.message_content = True # Enable message content intent for potential fut
 # Create a Bot instance
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=MyCustomHelpCommand()) # Using "!" as prefix for traditional commands and custom help
 
-# --- Cog Loading ---
+## --- Cog Loading ---
 INITIAL_EXTENSIONS = [
     "cogs.tv_shows",
     "cogs.stocks",
