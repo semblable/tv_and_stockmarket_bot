@@ -150,7 +150,7 @@ class Utility(commands.Cog):
         wind_str = f"{wind_speed_ms} m/s" if wind_speed_ms is not None else "N/A"
         if wind_speed_kmh is not None:
             wind_str += f" ({wind_speed_kmh:.1f} km/h)"
-        # if wind_speed_mph is not None: # Optional: add mph
+        ## if wind_speed_mph is not None: # Optional: add mph
         #     wind_str += f" / {wind_speed_mph:.1f} mph"
         embed.add_field(name="💨 Wind", value=wind_str, inline=True)
 
