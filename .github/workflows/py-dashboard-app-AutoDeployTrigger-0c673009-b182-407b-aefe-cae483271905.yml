@@ -24,6 +24,15 @@ jobs:
       - name: Checkout to the branch
         uses: actions/checkout@v2
 
+      - name: Debug Azure Credentials Secret
+        run: |
+          echo "Attempting to parse PYDASHBOARDAPP_AZURE_CREDENTIALS..."
+          echo "Raw Secret Content (first 50 chars): ${{ toJSON(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS) }}"
+          echo "Parsed clientId: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}"
+          echo "Parsed tenantId: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).tenantId }}"
+          echo "Parsed subscriptionId: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).subscriptionId }}"
+          # Do NOT echo clientSecret for security reasons
+
       - name: Azure Login
         uses: azure/login@v1
         with:
