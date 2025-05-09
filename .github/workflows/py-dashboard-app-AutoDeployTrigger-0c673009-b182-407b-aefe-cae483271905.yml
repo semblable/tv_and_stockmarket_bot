@@ -27,7 +27,11 @@ jobs:
       - name: Azure Login
         uses: azure/login@v1
         with:
-          creds: ${{ secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS }}
+          auth-type: SERVICE_PRINCIPAL
+          client-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}
+          tenant-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).tenantId }}
+          subscription-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).subscriptionId }}
+          client-secret: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientSecret }}
 
       - name: Build and push container image to registry
         uses: azure/container-apps-deploy-action@v2
