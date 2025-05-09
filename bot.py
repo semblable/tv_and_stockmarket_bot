@@ -67,21 +67,21 @@ def require_internal_api_key(f):
 @flask_app.route('/api/internal/user/<discord_user_id>/tv_subscriptions', methods=['GET'])
 @require_internal_api_key
 def get_tv_subscriptions(discord_user_id):
-    print(f"[BOT API] Attempting to get TV subscriptions for discord_user_id: {discord_user_id}")
+    flask_app.logger.info(f"[BOT API LOGGER] Attempting to get TV subscriptions for discord_user_id: {discord_user_id}")
     try:
         user_id = int(discord_user_id)
-        print(f"[BOT API] Converted discord_user_id to int user_id: {user_id}")
+        flask_app.logger.info(f"[BOT API LOGGER] Converted discord_user_id to int user_id: {user_id}")
         subscriptions = data_manager.get_user_tv_subscriptions(user_id)
-        print(f"[BOT API] Data manager returned TV subscriptions for user_id {user_id}: {subscriptions}")
+        flask_app.logger.info(f"[BOT API LOGGER] Data manager returned TV subscriptions for user_id {user_id}: {subscriptions}")
         if subscriptions is None:
-            print(f"[BOT API] No TV subscriptions found for user_id {user_id} (subscriptions is None), returning empty list.")
+            flask_app.logger.info(f"[BOT API LOGGER] No TV subscriptions found for user_id {user_id} (subscriptions is None), returning empty list.")
             return jsonify([]), 200 # Return empty list if no subscriptions found for a valid user
         return jsonify(subscriptions), 200
     except ValueError:
-        print(f"[BOT API] ValueError converting discord_user_id '{discord_user_id}' to int.")
+        flask_app.logger.error(f"[BOT API LOGGER] ValueError converting discord_user_id '{discord_user_id}' to int.")
         return jsonify({"error": "Invalid user ID format"}), 400
     except Exception as e:
-        print(f"[BOT API] Error in /tv_subscriptions for discord_user_id {discord_user_id}: {e}")
+        flask_app.logger.error(f"[BOT API LOGGER] Error in /tv_subscriptions for discord_user_id {discord_user_id}: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 @flask_app.route('/api/internal/user/<discord_user_id>/movie_subscriptions', methods=['GET'])
