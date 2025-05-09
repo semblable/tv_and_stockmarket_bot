@@ -76,6 +76,20 @@ def add_tv_show_subscription(user_id: str, tmdb_id: int, title: str, poster_path
     }
     return _make_api_call(method="POST", endpoint=endpoint, user_id=user_id, payload=payload)
 
+def add_movie_subscription(user_id: str, tmdb_id: int, title: str, poster_path: str) -> tuple[dict | None, str | None]:
+    """Adds a movie subscription for a user."""
+    endpoint = "/api/internal/user/{user_id}/movie"
+    payload = {
+        "tmdb_id": tmdb_id,
+        "title": title,
+        "poster_path": poster_path
+    }
+    return _make_api_call(method="POST", endpoint=endpoint, user_id=user_id, payload=payload)
+def remove_tv_show_subscription(user_id: str, tmdb_id: int) -> tuple[dict | None, str | None]:
+    """Removes a TV show subscription for a user."""
+    # The endpoint needs user_id to be formatted by _make_api_call, and tmdb_id pre-formatted.
+    endpoint = f"/api/internal/user/{{user_id}}/tv_show/{tmdb_id}"
+    return _make_api_call(method="DELETE", endpoint=endpoint, user_id=user_id)
 def get_tv_subscriptions(user_id: str):
     """Fetches TV subscriptions for a user."""
     endpoint = "/api/internal/user/{user_id}/tv_subscriptions"

@@ -62,6 +62,18 @@
                     </div>
                 {% endif %}
 
+                <section id="search_tmdb_tv_shows">
+                    <h2>Search TV Shows on TMDB</h2>
+                    <div class="form-group">
+                        <label for="tvShowSearchQuery">Search Query:</label>
+                        <input type="text" id="tvShowSearchQuery" placeholder="Enter TV show name">
+                    </div>
+                    <button type="button" id="searchTvShowButton">Search</button>
+                    <div id="tvShowSearchResults" style="margin-top: 15px;">
+                        <!-- Search results will be displayed here -->
+                    </div>
+                </section>
+
 <section id="add_tv_show_form">
                     <h2>Add New TV Show</h2>
                     <form method="POST" action="{{ url_for('add_tv_show') }}">
@@ -80,12 +92,36 @@
                         <button type="submit">Add TV Show</button>
                     </form>
                 </section>
+
+                <section id="add_movie_form">
+                    <h2>Add New Movie</h2>
+                    <form method="POST" action="{{ url_for('add_movie') }}">
+                        <div class="form-group">
+                            <label for="movie_tmdb_id">TMDB ID:</label>
+                            <input type="number" id="movie_tmdb_id" name="tmdb_id" placeholder="Movie TMDB ID" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="movie_title">Title:</label>
+                            <input type="text" id="movie_title" name="title" placeholder="Movie Title" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="movie_poster_path">Poster Path (optional):</label>
+                            <input type="text" id="movie_poster_path" name="poster_path" placeholder="e.g., /xyz.jpg">
+                        </div>
+                        <button type="submit">Add Movie</button>
+                    </form>
+                </section>
+
                 <section id="tv_shows">
                     <h2>TV Show Subscriptions</h2>
                     {% if data.tv_shows %}
                         <ul>
                         {% for show in data.tv_shows %}
-                            <li>{{ show.get('name', 'N/A') }} (ID: {{ show.get('id', 'N/A') }}) - Next Ep: {{ show.get('next_episode_to_air', {}).get('air_date', 'N/A') }}</li>
+                            <li>{{ show.get('title', 'N/A') }} (ID: {{ show.get('tmdb_id', 'N/A') }}) - Next Ep: {{ show.get('last_notified_episode_details', {}).get('air_date', 'N/A') if show.get('last_notified_episode_details') else 'N/A' }}
+                                <form method="POST" action="{{ url_for('remove_tv_show', tmdb_id=show.get('tmdb_id')) }}" style="display: inline;">
+                                    <button type="submit" class="remove-button">Remove</button>
+                                </form>
+                            </li>
                         {% else %}
                             <li>No TV show subscriptions found.</li>
                         {% endfor %}
@@ -158,5 +194,105 @@
             {% endblock %}
         </div>
     </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const searchButton = document.getElementById('searchTvShowButton');
+            const searchQueryInput = document.getElementById('tvShowSearchQuery');
+            const searchResultsDiv = document.getElementById('tvShowSearchResults');
+
+            // For populating the existing form
+            const addFormTmdbIdInput = document.getElementById('tmdb_id');
+            const addFormTitleInput = document.getElementById('title');
+            const addFormPosterPathInput = document.getElementById('poster_path');
+
+            if (searchButton) {
+                searchButton.addEventListener('click', function () {
+                    const query = searchQueryInput.value.trim();
+                    if (!query) {
+                        searchResultsDiv.innerHTML = '<p>Please enter a search term.</p>';
+                        return;
+                    }
+
+                    searchResultsDiv.innerHTML = '<p>Searching...</p>';
+
+                    fetch(`{{ url_for('search_tv_shows_route') }}?query=${encodeURIComponent(query)}`)
+                        .then(response => {
+                            if (!response.ok) {
+                                throw new Error(`HTTP error! status: ${response.status}`);
+                            }
+                            return response.json();
+                        })
+                        .then(data => {
+                            searchResultsDiv.innerHTML = ''; // Clear previous results
+                            console.log('Received data from search API:', data);
+                            console.log('Is data an array?', Array.isArray(data));
+                            if (Array.isArray(data)) {
+                                console.log('Data array length:', data.length);
+                            }
+                            if (data.error) {
+                                searchResultsDiv.innerHTML = `<p>Error: ${data.error}</p>`;
+                                console.error('Search error:', data.error);
+                                return;
+                            }
+                            if (Array.isArray(data) && data.length > 0) {
+                                const ul = document.createElement('ul');
+                                data.forEach(show => {
+                                    const li = document.createElement('li');
+                                    let posterDisplay = '';
+                                    if (show.poster_path) {
+                                        // Assuming poster_path might be a full URL or just a path.
+                                        // If it's a path, TMDB usually requires a base URL like 'https://image.tmdb.org/t/p/w92'
+                                        // For simplicity, we'll display it as text or use it as src if it looks like a URL.
+                                        // A more robust solution would involve knowing the TMDB image base URL.
+                                        if (show.poster_path.startsWith('http') || show.poster_path.startsWith('/')) {
+                                            posterDisplay = `<img src="${show.poster_path}" alt="${show.name}" style="width: 50px; height: auto; margin-right: 10px;">`;
+                                        } else {
+                                            posterDisplay = ` (Poster: ${show.poster_path})`;
+                                        }
+                                    }
+
+                                    li.innerHTML = `
+                                        ${posterDisplay}
+                                        <strong>${show.name}</strong> (ID: ${show.id})
+                                        <button type="button" class="add-searched-show-btn"
+                                                data-tmdb-id="${show.id}"
+                                                data-title="${encodeURIComponent(show.name)}"
+                                                data-poster-path="${show.poster_path || ''}">
+                                            Add this Show
+                                        </button>
+                                    `;
+                                    ul.appendChild(li);
+                                });
+                                searchResultsDiv.appendChild(ul);
+
+                                // Add event listeners to the new "Add this Show" buttons
+                                document.querySelectorAll('.add-searched-show-btn').forEach(button => {
+                                    button.addEventListener('click', function () {
+                                        const tmdbId = this.dataset.tmdbId;
+                                        const title = decodeURIComponent(this.dataset.title);
+                                        const posterPath = this.dataset.posterPath;
+
+                                        if (addFormTmdbIdInput) addFormTmdbIdInput.value = tmdbId;
+                                        if (addFormTitleInput) addFormTitleInput.value = title;
+                                        if (addFormPosterPathInput) addFormPosterPathInput.value = posterPath;
+                                        
+                                        // Optional: Scroll to the form or give a visual cue
+                                        addFormTmdbIdInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                        alert('Show details populated in the form below. Please review and click "Add TV Show".');
+                                    });
+                                });
+
+                            } else {
+                                searchResultsDiv.innerHTML = '<p>No results found.</p>';
+                            }
+                        })
+                        .catch(error => {
+                            searchResultsDiv.innerHTML = `<p>Failed to fetch search results. ${error.message}</p>`;
+                            console.error('Fetch error:', error);
+                        });
+                });
+            }
+        });
+    </script>
 </body>
 </html>

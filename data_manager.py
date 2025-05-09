@@ -114,36 +114,74 @@ def add_tv_show_subscription(user_id: int, tmdb_id: int, title: str, poster_path
     })
     
     return _save_json(TV_SUBSCRIPTIONS_FILE, subscriptions)
+def remove_tv_show_subscription(user_id: int, tmdb_id: int) -> bool:
+    """Removes a TV show subscription for a user based on TMDB ID.
+    Returns True if a row was deleted and saved successfully.
+    Returns False if the show was not found for the user or if there was a save error.
+    """
+    user_id_str = str(user_id)
+    subscriptions = _load_json(TV_SUBSCRIPTIONS_FILE)
+    
+    # Check if the user exists in subscriptions and has any subscriptions
+    if user_id_str not in subscriptions or not subscriptions[user_id_str]:
+        return False 
+
+    user_subs = subscriptions[user_id_str]
+    original_len = len(user_subs)
+    
+    # Filter out the subscription to be removed
+    # It's important to check that 'sub' is a dictionary and 'tmdb_id' exists
+    filtered_subs = [
+        sub for sub in user_subs 
+        if not (isinstance(sub, dict) and sub.get('tmdb_id') == tmdb_id)
+    ]
+    
+    # If the length of the list decreased, it means the item was found and filtered out
+    if len(filtered_subs) < original_len: 
+        if not filtered_subs: # If the list of subscriptions for the user is now empty
+            del subscriptions[user_id_str] # Remove the user's entry entirely
+        else:
+            subscriptions[user_id_str] = filtered_subs # Update user's subscriptions
+        
+        return _save_json(TV_SUBSCRIPTIONS_FILE, subscriptions) # Returns True on successful save, False on error
+    else:
+        # The show with the given tmdb_id was not found for this user
+        return False
 
 # --- Movie Subscriptions ---
 
-def add_movie_subscription(user_id, movie_id, movie_title, release_date):
-    """Adds a movie subscription for a user."""
-    user_id_str = str(user_id)
+def add_movie_subscription(user_id: int, tmdb_id: int, title: str, poster_path: str) -> bool:
+    """Adds a movie subscription for a user using TMDB ID, title, and poster path.
+    Prevents adding duplicate (user_id, tmdb_id) entries.
+    Returns True if the operation was successful (movie added or already existed), False otherwise.
+    """
+    user_id_str = str(user_id)  # JSON keys must be strings
     subscriptions = _load_json(MOVIE_SUBSCRIPTIONS_FILE)
-    
+
     if user_id_str not in subscriptions:
         subscriptions[user_id_str] = []
-    
-    # Avoid duplicate subscriptions for the same movie
-    if not any(sub['movie_id'] == movie_id for sub in subscriptions[user_id_str]):
-        subscriptions[user_id_str].append({
-            "movie_id": movie_id,
-            "movie_title": movie_title,
-            "release_date": release_date, # Store release date
-            "notified_status": False # To track if notification for release has been sent
-        })
-        return _save_json(MOVIE_SUBSCRIPTIONS_FILE, subscriptions)
-    return False # Already subscribed or error
 
-def remove_movie_subscription(user_id, movie_id):
+    # Check if a subscription with the given tmdb_id already exists for this user
+    if any(sub.get('tmdb_id') == tmdb_id for sub in subscriptions[user_id_str]):
+        return True  # Already subscribed, idempotent success
+
+    subscriptions[user_id_str].append({
+        "tmdb_id": tmdb_id,
+        "title": title,
+        "poster_path": poster_path,
+        "notified_status": False # Default notified status
+    })
+    
+    return _save_json(MOVIE_SUBSCRIPTIONS_FILE, subscriptions)
+
+def remove_movie_subscription(user_id, tmdb_id): # Changed movie_id to tmdb_id for consistency
     """Removes a movie subscription for a user."""
     user_id_str = str(user_id)
     subscriptions = _load_json(MOVIE_SUBSCRIPTIONS_FILE)
     
     if user_id_str in subscriptions:
         original_len = len(subscriptions[user_id_str])
-        subscriptions[user_id_str] = [sub for sub in subscriptions[user_id_str] if sub['movie_id'] != movie_id]
+        subscriptions[user_id_str] = [sub for sub in subscriptions[user_id_str] if sub.get('tmdb_id') != tmdb_id]
         if len(subscriptions[user_id_str]) < original_len:
              if not subscriptions[user_id_str]:
                 del subscriptions[user_id_str]
@@ -160,14 +198,14 @@ def get_all_movie_subscriptions():
     """Gets all movie subscriptions for all users."""
     return _load_json(MOVIE_SUBSCRIPTIONS_FILE)
 
-def update_movie_notified_status(user_id, movie_id, status: bool):
+def update_movie_notified_status(user_id: int, tmdb_id: int, status: bool) -> bool: # Changed movie_id to tmdb_id
     """Updates the notified status for a user's specific movie subscription."""
     user_id_str = str(user_id)
     subscriptions = _load_json(MOVIE_SUBSCRIPTIONS_FILE)
     updated = False
     if user_id_str in subscriptions:
         for sub in subscriptions[user_id_str]:
-            if sub['movie_id'] == movie_id:
+            if sub.get('tmdb_id') == tmdb_id: # Changed movie_id to tmdb_id
                 sub['notified_status'] = status
                 updated = True
                 break

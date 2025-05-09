@@ -205,6 +205,68 @@ def add_tv_show():
         
     return redirect(url_for('dashboard'))
 
+@app.route('/dashboard/add_movie', methods=['POST'])
+@login_required
+def add_movie():
+    user = session.get('discord_user')
+    if not user or 'id' not in user:
+        flash("User session not found or invalid. Please log in again.", "error")
+        return redirect(url_for('login'))
+
+    user_id = user['id']
+    tmdb_id_str = request.form.get('tmdb_id')
+    title = request.form.get('title')
+    poster_path = request.form.get('poster_path')
+
+    if not tmdb_id_str or not title: # poster_path can be optional
+        flash("Missing tmdb_id or title for the movie.", "error")
+        return redirect(url_for('dashboard'))
+
+    try:
+        tmdb_id = int(tmdb_id_str)
+    except ValueError:
+        flash("Invalid TMDB ID format.", "error")
+        return redirect(url_for('dashboard'))
+
+    response_json, error_message = internal_api_client.add_movie_subscription(
+        user_id=user_id,
+        tmdb_id=tmdb_id,
+        title=title,
+        poster_path=poster_path if poster_path else ""
+    )
+
+    if error_message:
+        flash(f"Error adding movie: {error_message}", "error")
+    else:
+        flash(f"Movie '{title}' added successfully!", "success")
+        
+    return redirect(url_for('dashboard'))
+@app.route('/dashboard/remove_tv_show/<int:tmdb_id>', methods=['POST'])
+@login_required
+def remove_tv_show(tmdb_id: int):
+    user = session.get('discord_user')
+    if not user or 'id' not in user:
+        flash("User session not found or invalid. Please log in again.", "error")
+        return redirect(url_for('login'))
+
+    user_id = user['id']
+
+    app.logger.info(f"Attempting to remove TV show subscription for user_id: {user_id}, tmdb_id: {tmdb_id}")
+
+    response_json, error_message = internal_api_client.remove_tv_show_subscription(
+        user_id=user_id,
+        tmdb_id=tmdb_id
+    )
+
+    if error_message:
+        flash(f"Error removing TV show (ID: {tmdb_id}): {error_message}", "error")
+        app.logger.error(f"Error removing TV show for user {user_id}, tmdb_id {tmdb_id}: {error_message}")
+    else:
+        # response_json might be None or {} for a successful 204, so we don't typically use its content here
+        flash(f"TV show (ID: {tmdb_id}) subscription removed successfully!", "success")
+        app.logger.info(f"Successfully removed TV show subscription for user_id: {user_id}, tmdb_id: {tmdb_id}")
+        
+    return redirect(url_for('dashboard'))
 @app.route('/dashboard/search_tv_shows', methods=['GET'])
 @login_required
 def search_tv_shows_route():

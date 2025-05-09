@@ -117,7 +117,69 @@ def add_user_tv_show(discord_user_id):
         # This 'else' implies a database error from _save_json, as duplicates are handled as success.
         flask_app.logger.error(f"[BOT API LOGGER] Failed to add TV show (tmdb_id: {tmdb_id}) for user_id {user_id} due to data_manager failure.")
         return jsonify({"error": "Failed to add TV show"}), 500
+@flask_app.route('/api/internal/user/<discord_user_id>/tv_show/<int:tmdb_id>', methods=['DELETE'])
+@require_internal_api_key
+def remove_user_tv_show(discord_user_id, tmdb_id):
+    flask_app.logger.info(f"[BOT API LOGGER] Attempting to remove TV show tmdb_id: {tmdb_id} for discord_user_id: {discord_user_id}")
+    try:
+        user_id = int(discord_user_id)
+        # tmdb_id is already an int due to <int:tmdb_id> in route
+    except ValueError:
+        flask_app.logger.error(f"[BOT API LOGGER] ValueError converting discord_user_id '{discord_user_id}' to int for remove TV show.")
+        return jsonify({"error": "Invalid user ID format"}), 400
 
+    try:
+        flask_app.logger.info(f"[BOT API LOGGER] Calling data_manager.remove_tv_show_subscription for user_id {user_id}, tmdb_id {tmdb_id}")
+        removed_successfully = data_manager.remove_tv_show_subscription(user_id, tmdb_id)
+
+        if removed_successfully:
+            flask_app.logger.info(f"[BOT API LOGGER] Successfully removed TV show (tmdb_id: {tmdb_id}) for user_id {user_id}.")
+            return "", 204 # 204 No Content for successful DELETE
+        else:
+            # data_manager.remove_tv_show_subscription returned False.
+            # This covers "show not found" or "save error after finding show".
+            # As per prompt, this maps to a 404.
+            flask_app.logger.warning(f"[BOT API LOGGER] TV show (tmdb_id: {tmdb_id}) not found for user_id {user_id} OR data_manager.remove_tv_show_subscription returned False.")
+            return jsonify({"error": "TV show not found for this user"}), 404
+            
+    except Exception as e:
+        # This covers other unexpected exceptions during the data_manager call or other logic.
+        flask_app.logger.error(f"[BOT API LOGGER] Exception during removal of TV show (tmdb_id: {tmdb_id}) for user_id {user_id}: {e}", exc_info=True)
+        return jsonify({"error": "Failed to remove TV show"}), 500
+
+@flask_app.route('/api/internal/user/<discord_user_id>/movie', methods=['POST'])
+@require_internal_api_key
+def add_user_movie(discord_user_id):
+    flask_app.logger.info(f"[BOT API LOGGER] Attempting to add movie for discord_user_id: {discord_user_id}")
+    try:
+        user_id = int(discord_user_id)
+    except ValueError:
+        flask_app.logger.error(f"[BOT API LOGGER] ValueError converting discord_user_id '{discord_user_id}' to int for add movie.")
+        return jsonify({"error": "Invalid user ID format"}), 400
+
+    if not request.is_json:
+        flask_app.logger.warning(f"[BOT API LOGGER] Add movie request for user_id {user_id} is not JSON.")
+        return jsonify({"error": "Invalid payload: request must be JSON"}), 400
+
+    data = request.get_json()
+    tmdb_id = data.get('tmdb_id')
+    title = data.get('title')
+    poster_path = data.get('poster_path')
+
+    if not all([isinstance(tmdb_id, int), isinstance(title, str), isinstance(poster_path, str)]):
+        flask_app.logger.warning(f"[BOT API LOGGER] Invalid payload for add movie for user_id {user_id}. Payload: {data}")
+        return jsonify({"error": "Invalid payload: missing or incorrect type for tmdb_id, title, or poster_path"}), 400
+
+    flask_app.logger.info(f"[BOT API LOGGER] Calling data_manager.add_movie_subscription for user_id {user_id}, tmdb_id {tmdb_id}")
+    success = data_manager.add_movie_subscription(user_id, tmdb_id, title, poster_path)
+
+    if success:
+        flask_app.logger.info(f"[BOT API LOGGER] Successfully added/found movie (tmdb_id: {tmdb_id}) for user_id {user_id}.")
+        return jsonify({"message": "Movie added successfully"}), 201
+    else:
+        # This 'else' implies a database error from _save_json, as duplicates are handled as success.
+        flask_app.logger.error(f"[BOT API LOGGER] Failed to add movie (tmdb_id: {tmdb_id}) for user_id {user_id} due to data_manager failure.")
+        return jsonify({"error": "Failed to add movie"}), 500
 @flask_app.route('/api/internal/user/<discord_user_id>/movie_subscriptions', methods=['GET'])
 @require_internal_api_key
 def get_movie_subscriptions(discord_user_id):
