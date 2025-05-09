@@ -36,9 +36,9 @@ jobs:
         with:
           appSourcePath: ${{ github.workspace }}
           dockerfilePath: dashboard/Dockerfile
-          registryUrl:
-          registryUsername: ${{ secrets.PYDASHBOARDAPP_REGISTRY_USERNAME }}
-          registryPassword: ${{ secrets.PYDASHBOARDAPP_REGISTRY_PASSWORD }}
+          # registryUrl: # Leave blank or remove for Azure to manage
+          # registryUsername: ${{ secrets.PYDASHBOARDAPP_REGISTRY_USERNAME }} # Not needed if Azure manages registry
+          # registryPassword: ${{ secrets.PYDASHBOARDAPP_REGISTRY_PASSWORD }} # Not needed if Azure manages registry
           containerAppName: py-dashboard-app
           resourceGroup: PythonBotAppRG
 
