@@ -45,6 +45,7 @@ async def load_extensions():
 
 # --- Flask Web Server for Render Uptime ---
 flask_app = Flask(__name__)
+flask_app.logger.critical("!!!!!!!!!! BOT.PY HAS STARTED - LOGGER TEST !!!!!!!!!!") # New test log
 
 @flask_app.route('/')
 def home():
