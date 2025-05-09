@@ -14,7 +14,7 @@ class MyCustomHelpCommand(commands.HelpCommand):
 
     def get_command_signature(self, command):
         prefix = self.context.prefix
-        ## command.signature provides the parameters part of the signature
+        # command.signature provides the parameters part of the signature
         if command.signature:
             return f"{prefix}{command.qualified_name} {command.signature}"
         return f"{prefix}{command.qualified_name}"
