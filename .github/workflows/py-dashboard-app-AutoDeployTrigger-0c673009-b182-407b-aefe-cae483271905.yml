@@ -41,5 +41,6 @@ jobs:
           # registryPassword: ${{ secrets.PYDASHBOARDAPP_REGISTRY_PASSWORD }} # Not needed if Azure manages registry
           containerAppName: py-dashboard-app
           resourceGroup: PythonBotAppRG
+          imageToBuild: py-dashboard-app:${{ github.sha }}
 
 
