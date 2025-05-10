@@ -16,7 +16,7 @@ jobs:
 
     steps:
       - name: Confirm Bot Workflow Version
-        run: echo "RUNNING BOT WORKFLOW - SHARED SP CREDS"
+        run: echo "RUNNING BOT WORKFLOW V2 - SHARED SP CREDS & EXPLICIT ACR"
 
       - name: Checkout to the branch
         uses: actions/checkout@v2
@@ -24,16 +24,16 @@ jobs:
       - name: Azure Login
         uses: azure/login@v1
         with:
-          creds: ${{ secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS }} # Using the dashboard's credential secret
+          creds: ${{ secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS }} # Using the dashboard's (shared) credential secret
 
       - name: Build and deploy container image
         uses: azure/container-apps-deploy-action@v2
         with:
           appSourcePath: ${{ github.workspace }}
-          dockerfilePath: ./bot.Dockerfile # Corrected
-          # registryUrl:  # Leave blank for Azure to manage
-          # registryUsername: ${{ secrets.PYDISCORDBOT_REGISTRY_USERNAME }} # Not needed if Azure manages registry
-          # registryPassword: ${{ secrets.PYDISCORDBOT_REGISTRY_PASSWORD }} # Not needed if Azure manages registry
+          dockerfilePath: ./bot.Dockerfile
+          registryUrl: pybotdashboardregistry.azurecr.io
+          registryUsername: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}
+          registryPassword: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientSecret }}
           containerAppName: py-discord-bot
           resourceGroup: PythonBotAppRG
-          # imageToBuild: # Removed, let Azure handle image naming
+          imageToBuild: pybotdashboardregistry.azurecr.io/py-discord-bot:${{ github.sha }}
