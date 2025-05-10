@@ -5,16 +5,16 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # 3. Copy the requirements.txt file and install dependencies
-COPY ./requirements.txt .
+COPY ./dashboard/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 # 4. Copy all necessary application files and directories
-COPY ./__init__.py .
-COPY ./app.py .
-COPY ./config.py .
-COPY ./internal_api_client.py .
-COPY ./static ./static
-COPY ./templates ./templates
+COPY ./dashboard/__init__.py .
+COPY ./dashboard/app.py .
+COPY ./dashboard/config.py .
+COPY ./dashboard/internal_api_client.py .
+COPY ./dashboard/static ./static
+COPY ./dashboard/templates ./templates
 
 # 5. Expose the port Gunicorn will listen on
 EXPOSE 8000
