@@ -16,11 +16,11 @@ COPY ./dashboard/internal_api_client.py .
 COPY ./dashboard/static ./static
 COPY ./dashboard/templates ./templates
 
-# 5. Expose the port Gunicorn will listen on (still good to keep for when we revert)
+# 5. Expose the port Gunicorn will listen on
 EXPOSE 8000
 
 # 6. Set the command to run the Flask app using Gunicorn
 # Assuming the Flask app instance is named 'app' in app.py
-# CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
 # TEMPORARY CMD to debug startup
-CMD ["python", "/app/app.py"]
+# CMD ["python", "/app/app.py"]

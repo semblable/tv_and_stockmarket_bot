@@ -1,21 +1,13 @@
-import sys # Add this
-import traceback # Add this
+from flask import Flask, redirect, url_for, session, request, render_template, flash, jsonify
+from functools import wraps
+import requests
+from requests_oauthlib import OAuth2Session
+import os
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-try:
-    from flask import Flask, redirect, url_for, session, request, render_template, flash, jsonify
-    from functools import wraps
-    import requests
-    from requests_oauthlib import OAuth2Session
-    import os
-    from werkzeug.middleware.proxy_fix import ProxyFix
-
-    from config import Config
-    import internal_api_client # Import the new API client
-    from api_clients import tmdb_client # Import the TMDB client
-except Exception as e:
-    print(f"CRITICAL ERROR DURING INITIAL IMPORTS: {e}", file=sys.stderr)
-    print(traceback.format_exc(), file=sys.stderr)
-    sys.exit(1) # Exit immediately if imports fail
+from config import Config
+import internal_api_client # Import the new API client
+from api_clients import tmdb_client # Import the TMDB client
 
 app = Flask(__name__)
 app.config.from_object(Config)

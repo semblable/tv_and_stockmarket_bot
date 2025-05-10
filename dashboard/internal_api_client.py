@@ -2,7 +2,7 @@ import requests
 import json
 from flask import current_app
 
-from dashboard.config import Config
+from config import Config
 
 def _make_api_call(method: str, endpoint: str, user_id: str, payload: dict | None = None) -> tuple[dict | None, str | None]:
     """Helper function to make requests to the internal API."""
