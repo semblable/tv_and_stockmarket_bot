@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Confirm Workflow Version
-        run: echo "RUNNING WORKFLOW V3 RENAMED - CREDS INPUT" # Updated version marker
+        run: echo "RUNNING WORKFLOW V4 RENAMED - EXPLICIT ACR" # Updated version marker
       - name: Checkout to the branch
         uses: actions/checkout@v2
 
@@ -38,9 +38,9 @@ jobs:
         with:
           appSourcePath: ${{ github.workspace }}
           dockerfilePath: dashboard/Dockerfile
-          # registryUrl: # Leave blank or remove for Azure to manage
-          # registryUsername: ${{ secrets.PYDASHBOARDAPP_REGISTRY_USERNAME }} # Not needed if Azure manages registry
-          # registryPassword: ${{ secrets.PYDASHBOARDAPP_REGISTRY_PASSWORD }} # Not needed if Azure manages registry
+          registryUrl: pybotdashboardregistry.azurecr.io
+          registryUsername: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}
+          registryPassword: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientSecret }}
           containerAppName: py-dashboard-app
           resourceGroup: PythonBotAppRG
-          imageToBuild: py-dashboard-app:${{ github.sha }}
+          imageToBuild: pybotdashboardregistry.azurecr.io/py-dashboard-app:${{ github.sha }}
