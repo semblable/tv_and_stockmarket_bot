@@ -1,0 +1,52 @@
+name: Trigger auto deployment for py-dashboard-app V2
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+    - '.github/workflows/py-dashboard-app-NEW-DEPLOY.yml' # Updated path
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # For OIDC (though we aim for SP)
+      contents: read # For checkout
+
+    steps:
+      - name: Confirm Workflow Version
+        run: echo "RUNNING WORKFLOW VERSION: DEBUG_WITH_FROMJSON_AND_EXPLICIT_AUTH_TYPE_V2_RENAMED"
+
+      - name: Checkout to the branch
+        uses: actions/checkout@v2
+
+      - name: Debug Azure Credentials Secret
+        run: |
+          echo "Attempting to parse PYDASHBOARDAPP_AZURE_CREDENTIALS..."
+          echo "Raw Secret Content (first 50 chars): ${{ toJSON(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS) }}"
+          echo "Parsed clientId: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}"
+          echo "Parsed tenantId: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).tenantId }}"
+          echo "Parsed subscriptionId: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).subscriptionId }}"
+          # Do NOT echo clientSecret for security reasons
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          auth-type: SERVICE_PRINCIPAL
+          client-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}
+          tenant-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).tenantId }}
+          subscription-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).subscriptionId }}
+          client-secret: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientSecret }}
+
+      - name: Build and push container image to registry
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          appSourcePath: ${{ github.workspace }}
+          dockerfilePath: dashboard/Dockerfile
+          # registryUrl: # Leave blank or remove for Azure to manage
+          # registryUsername: ${{ secrets.PYDASHBOARDAPP_REGISTRY_USERNAME }} # Not needed if Azure manages registry
+          # registryPassword: ${{ secrets.PYDASHBOARDAPP_REGISTRY_PASSWORD }} # Not needed if Azure manages registry
+          containerAppName: py-dashboard-app
+          resourceGroup: PythonBotAppRG
+          imageToBuild: py-dashboard-app:${{ github.sha }}
