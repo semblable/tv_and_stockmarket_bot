@@ -30,14 +30,14 @@ jobs:
           echo "Parsed subscriptionId: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).subscriptionId }}"
           # Do NOT echo clientSecret for security reasons
 
-      # - name: Azure Login
-      #   uses: azure/login@v1
-      #   with:
-      #     auth-type: SERVICE_PRINCIPAL
-      #     client-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}
-      #     tenant-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).tenantId }}
-      #     subscription-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).subscriptionId }}
-      #     client-secret: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientSecret }}
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          auth-type: SERVICE_PRINCIPAL
+          client-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}
+          tenant-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).tenantId }}
+          subscription-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).subscriptionId }}
+          client-secret: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientSecret }}
 
       # - name: Build and push container image to registry
       #   uses: azure/container-apps-deploy-action@v2
