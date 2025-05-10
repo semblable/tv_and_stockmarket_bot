@@ -11,12 +11,11 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write # For OIDC (though we aim for SP)
       contents: read # For checkout
 
     steps:
       - name: Confirm Workflow Version
-        run: echo "RUNNING WORKFLOW V2 RENAMED YAML TEST"
+        run: echo "RUNNING WORKFLOW V3 RENAMED - CREDS INPUT" # Updated version marker
       - name: Checkout to the branch
         uses: actions/checkout@v2
 
@@ -32,11 +31,7 @@ jobs:
       - name: Azure Login
         uses: azure/login@v1
         with:
-          auth-type: SERVICE_PRINCIPAL
-          client-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}
-          tenant-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).tenantId }}
-          subscription-id: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).subscriptionId }}
-          client-secret: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientSecret }}
+          creds: ${{ secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS }}
 
       - name: Build and push container image to registry
         uses: azure/container-apps-deploy-action@v2
