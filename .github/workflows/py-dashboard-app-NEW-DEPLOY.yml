@@ -36,8 +36,8 @@ jobs:
       - name: Build and push container image to registry
         uses: azure/container-apps-deploy-action@v2
         with:
-          appSourcePath: ${{ github.workspace }}
-          dockerfilePath: dashboard/Dockerfile
+          appSourcePath: ${{ github.workspace }} # Build context: project root (.)
+          dockerfilePath: dashboard/Dockerfile # Dockerfile path: -f dashboard/Dockerfile
           registryUrl: pybotdashboardregistry.azurecr.io
           registryUsername: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}
           registryPassword: ${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientSecret }}

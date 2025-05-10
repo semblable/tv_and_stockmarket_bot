@@ -1,26 +1,23 @@
-# 1. Use an appropriate official Python base image
+# Use python:3.10-slim as the base image
 FROM python:3.10-slim
 
-# 2. Set a working directory
+# Set the working directory in the container
 WORKDIR /app
 
-# 3. Copy the requirements.txt file and install dependencies
-COPY ./dashboard/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+# Copy the requirements file from the dashboard directory into the container at /app
+COPY dashboard/requirements.txt /app/requirements.txt
 
-# 4. Copy all necessary application files and directories
-COPY ./dashboard/__init__.py .
-COPY ./dashboard/app.py .
-COPY ./dashboard/config.py .
-COPY ./dashboard/internal_api_client.py .
-COPY ./dashboard/static ./static
-COPY ./dashboard/templates ./templates
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. Expose the port Gunicorn will listen on
-EXPOSE 8000
+# Copy the contents of the dashboard directory into the container at /app
+COPY dashboard/ /app/
 
-# 6. Set the command to run the Flask app using Gunicorn
-# Assuming the Flask app instance is named 'app' in app.py
+# Copy the api_clients directory into the container at /app/api_clients
+COPY api_clients/ /app/api_clients/
+
+# Add /app to PYTHONPATH to ensure modules in this directory are discoverable
+ENV PYTHONPATH /app
+
+# Run gunicorn when the container launches
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
-# TEMPORARY CMD to debug startup
-# CMD ["python", "/app/app.py"]
