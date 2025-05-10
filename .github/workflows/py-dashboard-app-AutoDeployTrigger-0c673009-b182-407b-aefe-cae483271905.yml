@@ -21,6 +21,9 @@ jobs:
       contents: read #Required when GH token is used to authenticate with private repo
 
     steps:
+      - name: Confirm Workflow Version
+        run: echo "RUNNING WORKFLOW VERSION: DEBUG_WITH_FROMJSON_AND_EXPLICIT_AUTH_TYPE_V2"
+
       - name: Checkout to the branch
         uses: actions/checkout@v2
 
