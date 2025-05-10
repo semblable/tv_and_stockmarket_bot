@@ -5,8 +5,8 @@ from requests_oauthlib import OAuth2Session
 import os
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from .config import Config
-from dashboard import internal_api_client # Import the new API client
+from config import Config
+import internal_api_client # Import the new API client
 from api_clients import tmdb_client # Import the TMDB client
 
 app = Flask(__name__)
