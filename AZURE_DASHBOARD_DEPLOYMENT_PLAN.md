@@ -133,18 +133,68 @@ graph TD
             *   Make sure it's `https` and the path is `/callback`.
         6.  Save the changes in the Discord Developer Portal.
 
-6.  **Verify Dashboard Deployment:**
-    *   **Explanation:** After completing the above steps and allowing a few minutes for the App Service to pull the container and start, you should be able to access your dashboard.
-    *   **Actions:**
-        1.  Open your web browser and navigate to: `https://tvshow-dashboard-<your_initials>.azurewebsites.net`
-            *   Replace `tvshow-dashboard-<your_initials>` with your Web App name.
-        2.  Test the login functionality and other dashboard features.
-        3.  **Troubleshooting:** If you encounter issues, check the logs:
-            *   **Azure Portal:** Navigate to your Web App -> "Monitoring" -> "Log stream".
-            *   **Azure CLI:**
-                ```bash
-                az webapp log tail \
-                  --resource-group <your_resource_group_name> \
-                  --name tvshow-dashboard-<your_initials>
-                ```
-                (Replace placeholders accordingly).
+## Section 6: Accessing and Testing
+
+With both `py-discord-bot` and `py-dashboard-app` deployed (or re-deployed with fixes), the next crucial step is to thoroughly test their functionality and interaction.
+
+### 6.1. Testing `py-discord-bot`
+
+The `py-discord-bot` has been redeployed after addressing `AttributeError`s related to `data_manager.py`.
+
+1.  **Check Runtime Logs for Clean Startup:**
+    *   First, examine the runtime logs of the `py-discord-bot` container app to ensure it started without any immediate errors.
+    *   Use the Azure CLI command:
+        ```bash
+        az containerapp logs show --name py-discord-bot --resource-group <your-resource-group> --tail 100
+        ```
+    *   Look for any stack traces or error messages. A clean startup should show the bot connecting to Discord successfully.
+
+2.  **Verify `AttributeError` Resolution:**
+    *   The primary issue during the initial deployment was `AttributeError: 'DataManager' object has no attribute 'get_all_tv_subscriptions'` (and a similar one for movies). The latest push of the corrected [`data_manager.py`](data_manager.py:1) and subsequent redeployment should have resolved this.
+    *   Carefully review the startup logs for any recurrence of these `AttributeError`s.
+    *   **If Errors Persist:**
+        *   Double-check that the correct version of [`data_manager.py`](data_manager.py:1) (containing `get_all_tv_subscriptions` and `get_all_movie_subscriptions` methods) was committed and pushed to the `main` branch of your GitHub repository.
+        *   Verify that the GitHub Action workflow for `py-discord-bot` (e.g., `py-discord-bot-AutoDeployTrigger-....yml`) triggered and completed successfully after your push. Check the workflow run logs in your GitHub repository's "Actions" tab. A new revision of the container app should have been created and deployed.
+
+3.  **Test Core Bot Functionalities:**
+    *   Once a clean startup is confirmed and the `AttributeError`s are resolved, test the bot's core commands in your Discord server:
+        *   **Subscription Commands:** Test adding, removing, and listing TV show and movie subscriptions (e.g., `/add_tv_show`, `/list_tv_shows`, `/add_movie`, `/list_movies`). These commands directly interact with [`data_manager.py`](data_manager.py:1) and Azure Blob Storage.
+        *   **Utility Commands:** Test commands like `/help`, `/ping`, or any other utility functions.
+        *   **Scheduled Tasks (if any):** If the bot has scheduled tasks (e.g., checking for new episodes), monitor its behavior over time or trigger them manually if possible.
+
+### 6.2. Testing `py-dashboard-app`
+
+The `py-dashboard-app` has been deployed, and its `DASHBOARD_REDIRECT_URI` has been updated.
+
+1.  **Access the Dashboard:**
+    *   Open a web browser and navigate to the Fully Qualified Domain Name (FQDN) of your `py-dashboard-app`. This FQDN is available in the Azure portal for your container app.
+
+2.  **Test Discord OAuth Login:**
+    *   Attempt to log in to the dashboard using the Discord OAuth button.
+    *   Ensure the redirection to Discord for authorization works correctly.
+    *   Verify that after successful authorization, you are redirected back to the dashboard and are logged in. The updated `DASHBOARD_REDIRECT_URI` in Azure and the Discord Developer Portal is critical for this step.
+
+3.  **Test Data Display and Features:**
+    *   Navigate through the dashboard's different sections.
+    *   Pay close attention to features that display data, especially any data fetched from `py-discord-bot` via the `BOT_INTERNAL_API_URL`. For example, if the dashboard shows a list of subscribed TV shows or movies, verify this data is accurate and up-to-date.
+    *   Test any interactive elements or forms on the dashboard.
+
+4.  **Check Dashboard Logs (If Issues Arise):**
+    *   If you encounter issues (e.g., login failures, errors displaying data), check the runtime logs for `py-dashboard-app`:
+        ```bash
+        az containerapp logs show --name py-dashboard-app --resource-group <your-resource-group> --tail 100
+        ```
+    *   Look for error messages related to OAuth, API communication with the bot, or template rendering.
+
+### 6.3. Testing Bot-Dashboard Interaction
+
+*   Specifically test features that require direct or indirect communication between `py-discord-bot` and `py-dashboard-app`.
+*   For example, if an action on the dashboard is supposed to trigger a command or update data used by the bot (or vice-versa), verify this interaction.
+*   Ensure that data consistency is maintained between what the bot reports and what the dashboard displays, especially for shared information like subscription lists.
+
+### 6.4. General Troubleshooting Note
+
+*   If issues persist with either application or their interaction:
+    *   **Application Logs:** The primary diagnostic step is to check the detailed application logs using the `az containerapp logs show ...` commands for both `py-discord-bot` and `py-dashboard-app`.
+    *   **GitHub Action Workflow Logs:** If a problem seems related to deployment, review the logs of the relevant GitHub Action workflow runs in your repository. These logs can indicate if the build or deployment steps failed.
+    *   **Azure Portal:** Check the "Revisions" and "Activity log" sections for your container apps in the Azure portal for deployment history and platform-level events.
