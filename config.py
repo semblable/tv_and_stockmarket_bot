@@ -27,11 +27,9 @@ ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
 
-# Oracle Database Configuration
-ORACLE_USER = os.getenv("ORACLE_USER")
-ORACLE_PASSWORD = os.getenv("ORACLE_PASSWORD")
-ORACLE_DSN = os.getenv("ORACLE_DSN")
-logger.info("config.py: os.getenv() called for all API keys and Oracle DB config.")
+# SQLite Database Configuration
+SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "data/app.db")
+logger.info("config.py: os.getenv() called for all API keys and SQLite DB config.")
 
 if DISCORD_BOT_TOKEN is None:
     logger.warning("config.py: DISCORD_BOT_TOKEN not found in environment variables.")
@@ -43,11 +41,11 @@ if OPENWEATHERMAP_API_KEY is None:
     logger.warning("config.py: OPENWEATHERMAP_API_KEY not found in environment variables.")
 if INTERNAL_API_KEY is None:
     logger.warning("config.py: INTERNAL_API_KEY not found in environment variables.")
-if ORACLE_USER is None:
-    logger.warning("config.py: ORACLE_USER not found in environment variables.")
-if ORACLE_PASSWORD is None:
-    logger.warning("config.py: ORACLE_PASSWORD not found in environment variables.")
-if ORACLE_DSN is None:
-    logger.warning("config.py: ORACLE_DSN not found in environment variables.")
+if SQLITE_DB_PATH == "data/app.db":
+    logger.info(f"config.py: SQLITE_DB_PATH not set, using default: {SQLITE_DB_PATH}")
+elif SQLITE_DB_PATH is None: # Should not happen with default, but good practice
+    logger.warning("config.py: SQLITE_DB_PATH not found and no default was set (this is unexpected).")
+else:
+    logger.info(f"config.py: SQLITE_DB_PATH found in environment variables: {SQLITE_DB_PATH}")
 
 logger.info("config.py: Finished loading configuration.")

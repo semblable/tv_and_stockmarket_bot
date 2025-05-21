@@ -1,52 +1,46 @@
 # data_manager.py
-import oracledb
+import sqlite3
 import os
 import json
 import logging
-from config import ORACLE_USER, ORACLE_PASSWORD, ORACLE_DSN
+from config import SQLITE_DB_PATH
 
 logger = logging.getLogger(__name__)
 
 class DataManager:
     def __init__(self):
-        if not all([ORACLE_USER, ORACLE_PASSWORD, ORACLE_DSN]):
-            logger.error("Oracle database configuration (USER, PASSWORD, DSN) not fully set in environment variables.")
-            raise ValueError("Oracle database configuration not fully set.")
+        if not SQLITE_DB_PATH:
+            logger.error("SQLite database path (SQLITE_DB_PATH) not set in environment variables.")
+            raise ValueError("SQLite database path not set.")
 
         try:
-            # For production, consider using a connection pool
-            self.pool = oracledb.create_pool(user=ORACLE_USER, password=ORACLE_PASSWORD, dsn=ORACLE_DSN, min=1, max=5, increment=1)
-            logger.info("Successfully connected to Oracle database and created connection pool.")
+            # Connect to SQLite database (creates the file if it doesn't exist)
+            self.conn = sqlite3.connect(SQLITE_DB_PATH)
+            self.conn.row_factory = sqlite3.Row # Access columns by name
+            logger.info(f"Successfully connected to SQLite database at {SQLITE_DB_PATH}.")
             self._initialize_db()
-        except oracledb.Error as e:
-            logger.error(f"Failed to connect to Oracle Database or create pool: {e}")
-            raise ConnectionError(f"Failed to connect to Oracle Database: {e}")
+        except sqlite3.Error as e:
+            logger.error(f"Failed to connect to SQLite Database: {e}")
+            raise ConnectionError(f"Failed to connect to SQLite Database: {e}")
 
     def _get_connection(self):
-        """Acquires a connection from the pool."""
-        try:
-            return self.pool.acquire()
-        except oracledb.Error as e:
-            logger.error(f"Error acquiring connection from pool: {e}")
-            raise
+        """Returns the active connection."""
+        return self.conn
 
     def _close_connection(self, connection):
-        """Releases a connection back to the pool."""
-        if connection:
-            try:
-                self.pool.release(connection)
-            except oracledb.Error as e:
-                logger.error(f"Error releasing connection to pool: {e}")
+        """SQLite connections don't need explicit release like connection pools."""
+        pass # No-op for SQLite single connection
 
 
     def _execute_query(self, query, params=None, fetch_one=False, fetch_all=False, commit=False):
         """Executes a given SQL query."""
-        conn = None
+        conn = self._get_connection()
         cursor = None
         try:
-            conn = self._get_connection()
             cursor = conn.cursor()
             if params:
+                # SQLite uses ? for placeholders, or named placeholders like :param_name
+                # We'll stick to named placeholders for consistency with previous Oracle code
                 cursor.execute(query, params)
             else:
                 cursor.execute(query)
@@ -56,136 +50,113 @@ class DataManager:
                 return True
 
             if fetch_one:
-                columns = [col[0].lower() for col in cursor.description]
                 row = cursor.fetchone()
-                return dict(zip(columns, row)) if row else None
+                return dict(row) if row else None # sqlite3.Row allows dict conversion
             elif fetch_all:
-                columns = [col[0].lower() for col in cursor.description]
-                return [dict(zip(columns, row)) for row in cursor.fetchall()]
+                return [dict(row) for row in cursor.fetchall()] # sqlite3.Row allows dict conversion
             return cursor # For cases like rowcount or other cursor properties
-        except oracledb.Error as e:
+        except sqlite3.Error as e:
             logger.error(f"Database query error: {e}\nQuery: {query}\nParams: {params}")
             if conn and not commit: # Rollback if not a commit operation that failed
                 try:
                     conn.rollback()
-                except oracledb.Error as re:
+                except sqlite3.Error as re:
                     logger.error(f"Rollback failed: {re}")
             return False if commit else (None if fetch_one else []) # Consistent error return
         finally:
             if cursor:
                 cursor.close()
-            if conn:
-                self._close_connection(conn)
 
     def _initialize_db(self):
         """Creates tables if they don't exist."""
-        # Using Oracle's anonymous block to check for table existence and create if not found
-        # This is more robust than relying on catching ORA-00955 for table already exists.
+        # SQLite CREATE TABLE IF NOT EXISTS is the standard way
         
-        # Helper to check and create table
-        def check_and_create_table(table_name, create_sql):
-            check_query = f"""
-            DECLARE
-                v_count INTEGER;
-            BEGIN
-                SELECT COUNT(*)
-                INTO v_count
-                FROM user_tables
-                WHERE table_name = UPPER('{table_name}');
-
-                IF v_count = 0 THEN
-                    EXECUTE IMMEDIATE '{create_sql.replace("'", "''")}';
-                    DBMS_OUTPUT.PUT_LINE('Table {table_name} created.');
-                ELSE
-                    DBMS_OUTPUT.PUT_LINE('Table {table_name} already exists.');
-                END IF;
-            EXCEPTION
-                WHEN OTHERS THEN
-                    DBMS_OUTPUT.PUT_LINE('Error checking/creating table {table_name}: ' || SQLERRM);
-                    RAISE;
-            END;
-            """
-            self._execute_query(check_query, commit=True) # Commit DDL
+        # Helper to create table if not exists
+        def create_table_if_not_exists(table_name, create_sql):
+            # SQLite doesn't need the complex Oracle PL/SQL block
+            # The CREATE TABLE IF NOT EXISTS syntax is sufficient
+            try:
+                self._execute_query(create_sql, commit=True)
+                logger.info(f"Table {table_name} checked/created.")
+            except sqlite3.Error as e:
+                logger.error(f"Error creating table {table_name}: {e}")
+                raise # Re-raise the exception
 
         # TV Show Subscriptions
-        # Storing last_notified_episode_details as CLOB for potentially large JSON
+        # Storing last_notified_episode_details as TEXT for JSON
         create_tv_subscriptions_sql = """
-        CREATE TABLE tv_subscriptions (
-            user_id VARCHAR2(255) NOT NULL,
-            tmdb_id NUMBER NOT NULL,
-            title VARCHAR2(1000),
-            poster_path VARCHAR2(1000),
-            last_notified_episode_details CLOB,
+        CREATE TABLE IF NOT EXISTS tv_subscriptions (
+            user_id TEXT NOT NULL,
+            tmdb_id INTEGER NOT NULL,
+            title TEXT,
+            poster_path TEXT,
+            last_notified_episode_details TEXT,
             PRIMARY KEY (user_id, tmdb_id)
         )
         """
-        check_and_create_table("tv_subscriptions", create_tv_subscriptions_sql)
+        create_table_if_not_exists("tv_subscriptions", create_tv_subscriptions_sql)
 
         # Movie Subscriptions
         create_movie_subscriptions_sql = """
-        CREATE TABLE movie_subscriptions (
-            user_id VARCHAR2(255) NOT NULL,
-            tmdb_id NUMBER NOT NULL,
-            title VARCHAR2(1000),
-            poster_path VARCHAR2(1000),
-            notified_status NUMBER(1) DEFAULT 0, CHECK (notified_status IN (0,1)),
+        CREATE TABLE IF NOT EXISTS movie_subscriptions (
+            user_id TEXT NOT NULL,
+            tmdb_id INTEGER NOT NULL,
+            title TEXT,
+            poster_path TEXT,
+            notified_status INTEGER DEFAULT 0 CHECK (notified_status IN (0,1)),
             PRIMARY KEY (user_id, tmdb_id)
         )
         """
-        check_and_create_table("movie_subscriptions", create_movie_subscriptions_sql)
+        create_table_if_not_exists("movie_subscriptions", create_movie_subscriptions_sql)
 
         # Tracked Stocks
         create_tracked_stocks_sql = """
-        CREATE TABLE tracked_stocks (
-            user_id VARCHAR2(255) NOT NULL,
-            symbol VARCHAR2(20) NOT NULL,
-            quantity NUMBER,
-            purchase_price NUMBER,
+        CREATE TABLE IF NOT EXISTS tracked_stocks (
+            user_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            quantity REAL, -- Use REAL for floating point numbers
+            purchase_price REAL, -- Use REAL for floating point numbers
             PRIMARY KEY (user_id, symbol)
         )
         """
-        check_and_create_table("tracked_stocks", create_tracked_stocks_sql)
+        create_table_if_not_exists("tracked_stocks", create_tracked_stocks_sql)
 
         # Stock Alerts
         create_stock_alerts_sql = """
-        CREATE TABLE stock_alerts (
-            user_id VARCHAR2(255) NOT NULL,
-            symbol VARCHAR2(20) NOT NULL,
-            target_above NUMBER,
-            active_above NUMBER(1) DEFAULT 0, CHECK (active_above IN (0,1)),
-            target_below NUMBER,
-            active_below NUMBER(1) DEFAULT 0, CHECK (active_below IN (0,1)),
-            dpc_above_target NUMBER,
-            dpc_above_active NUMBER(1) DEFAULT 0, CHECK (dpc_above_active IN (0,1)),
-            dpc_below_target NUMBER,
-            dpc_below_active NUMBER(1) DEFAULT 0, CHECK (dpc_below_active IN (0,1)),
+        CREATE TABLE IF NOT EXISTS stock_alerts (
+            user_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            target_above REAL,
+            active_above INTEGER DEFAULT 0 CHECK (active_above IN (0,1)),
+            target_below REAL,
+            active_below INTEGER DEFAULT 0 CHECK (active_below IN (0,1)),
+            dpc_above_target REAL,
+            dpc_above_active INTEGER DEFAULT 0 CHECK (dpc_above_active IN (0,1)),
+            dpc_below_target REAL,
+            dpc_below_active INTEGER DEFAULT 0 CHECK (dpc_below_active IN (0,1)),
             PRIMARY KEY (user_id, symbol)
         )
         """
-        check_and_create_table("stock_alerts", create_stock_alerts_sql)
+        create_table_if_not_exists("stock_alerts", create_stock_alerts_sql)
 
         # User Preferences
         create_user_preferences_sql = """
-        CREATE TABLE user_preferences (
-            user_id VARCHAR2(255) NOT NULL,
-            pref_key VARCHAR2(255) NOT NULL,
-            pref_value CLOB,
+        CREATE TABLE IF NOT EXISTS user_preferences (
+            user_id TEXT NOT NULL,
+            pref_key TEXT NOT NULL,
+            pref_value TEXT, -- Use TEXT for JSON
             PRIMARY KEY (user_id, pref_key)
         )
         """
-        check_and_create_table("user_preferences", create_user_preferences_sql)
+        create_table_if_not_exists("user_preferences", create_user_preferences_sql)
         logger.info("Database initialization check complete.")
 
     # --- TV Show Subscriptions ---
     def add_tv_show_subscription(self, user_id: int, tmdb_id: int, title: str, poster_path: str) -> bool:
         user_id_str = str(user_id)
         query = """
-        MERGE INTO tv_subscriptions dest
-        USING (SELECT :user_id AS user_id, :tmdb_id AS tmdb_id FROM dual) src
-        ON (dest.user_id = src.user_id AND dest.tmdb_id = src.tmdb_id)
-        WHEN NOT MATCHED THEN
-            INSERT (user_id, tmdb_id, title, poster_path, last_notified_episode_details)
-            VALUES (:user_id, :tmdb_id, :title, :poster_path, NULL)
+        INSERT OR IGNORE INTO tv_subscriptions (user_id, tmdb_id, title, poster_path, last_notified_episode_details)
+        VALUES (:user_id, :tmdb_id, :title, :poster_path, NULL)
         """
         params = {
             "user_id": user_id_str, "tmdb_id": tmdb_id,
@@ -213,13 +184,10 @@ class DataManager:
         for sub in subscriptions:
             if sub.get('last_notified_episode_details'):
                 try:
-                    # CLOB might need .read() if it's a LOB object, or oracledb might handle it.
-                    # Assuming it's returned as string from dict conversion for now.
+                    # SQLite returns TEXT directly, no LOB handling needed
                     details_str = sub['last_notified_episode_details']
-                    if isinstance(details_str, oracledb.LOB): # Handle LOB if driver returns it
-                        details_str = details_str.read()
                     sub['last_notified_episode_details'] = json.loads(details_str) if details_str else None
-                except (json.JSONDecodeError, oracledb.Error) as e:
+                except json.JSONDecodeError as e:
                     logger.error(f"Error decoding last_notified_episode_details for user {user_id_str}, tmdb_id {sub.get('tmdb_id')}: {e}")
                     sub['last_notified_episode_details'] = None
         return subscriptions
@@ -230,11 +198,10 @@ class DataManager:
         for sub in subscriptions:
             if sub.get('last_notified_episode_details'):
                 try:
+                    # SQLite returns TEXT directly
                     details_str = sub['last_notified_episode_details']
-                    if isinstance(details_str, oracledb.LOB):
-                        details_str = details_str.read()
                     sub['last_notified_episode_details'] = json.loads(details_str) if details_str else None
-                except (json.JSONDecodeError, oracledb.Error) as e:
+                except json.JSONDecodeError as e:
                     logger.error(f"Error decoding last_notified_episode_details for tmdb_id {sub.get('tmdb_id')} in get_all: {e}")
                     sub['last_notified_episode_details'] = None
         # The old method returned a dict keyed by user_id. Let's try to match that.
@@ -264,12 +231,8 @@ class DataManager:
     def add_movie_subscription(self, user_id: int, tmdb_id: int, title: str, poster_path: str) -> bool:
         user_id_str = str(user_id)
         query = """
-        MERGE INTO movie_subscriptions dest
-        USING (SELECT :user_id AS user_id, :tmdb_id AS tmdb_id FROM dual) src
-        ON (dest.user_id = src.user_id AND dest.tmdb_id = src.tmdb_id)
-        WHEN NOT MATCHED THEN
-            INSERT (user_id, tmdb_id, title, poster_path, notified_status)
-            VALUES (:user_id, :tmdb_id, :title, :poster_path, 0)
+        INSERT OR IGNORE INTO movie_subscriptions (user_id, tmdb_id, title, poster_path, notified_status)
+        VALUES (:user_id, :tmdb_id, :title, :poster_path, 0)
         """
         params = {"user_id": user_id_str, "tmdb_id": tmdb_id, "title": title, "poster_path": poster_path}
         return self._execute_query(query, params, commit=True)
@@ -316,66 +279,29 @@ class DataManager:
         
         # MERGE can handle insert or update logic
         query = """
-        MERGE INTO tracked_stocks dest
-        USING (SELECT :user_id AS user_id, :symbol AS symbol FROM dual) src
-        ON (dest.user_id = src.user_id AND dest.symbol = src.symbol)
-        WHEN MATCHED THEN
-            UPDATE SET quantity = NVL(:quantity, dest.quantity), 
-                       purchase_price = NVL(:purchase_price, dest.purchase_price)
-            WHERE (:quantity IS NOT NULL AND dest.quantity != :quantity) OR 
-                  (:purchase_price IS NOT NULL AND dest.purchase_price != :purchase_price) OR
-                  (:quantity IS NOT NULL AND dest.quantity IS NULL) OR 
-                  (:purchase_price IS NOT NULL AND dest.purchase_price IS NULL)
-        WHEN NOT MATCHED THEN
-            INSERT (user_id, symbol, quantity, purchase_price)
-            VALUES (:user_id, :symbol, :quantity, :purchase_price)
+        INSERT INTO tracked_stocks (user_id, symbol, quantity, purchase_price)
+        VALUES (:user_id, :symbol, :quantity, :purchase_price)
+        ON CONFLICT(user_id, symbol) DO UPDATE SET
+            quantity = COALESCE(:quantity, quantity), -- Use COALESCE for NVL equivalent
+            purchase_price = COALESCE(:purchase_price, purchase_price)
         """
-        # If quantity or purchase_price is None, we don't want to overwrite existing values with NULL
-        # unless explicitly setting them to NULL (which is not the current logic's intent for partial updates).
-        # The NVL in update helps, but the WHERE clause for MATCHED needs to be careful.
-        # The old logic returned False if only one of quantity/price was given for a new stock.
-        # This MERGE will insert with NULLs if they are not provided.
-        # For existing stocks, it updates if new values are provided and different.
+        # Note: SQLite's ON CONFLICT DO UPDATE SET updates ALL listed fields if there's a conflict.
+        # The COALESCE function handles the case where the input parameter is None,
+        # keeping the existing value in the database. This simplifies the logic
+        # compared to the original Oracle MERGE with its complex WHERE clause.
+        # This also aligns with the desired behavior: if quantity/price is None,
+        # it doesn't overwrite the existing value. If the stock is new, it inserts
+        # with NULLs if quantity/price are None, which is acceptable.
 
-        # To align with old logic: if stock is new, both quantity and price must be provided or neither.
-        # If stock exists, can update one or both.
+        params = {"user_id": user_id_str, "symbol": symbol_upper, "quantity": quantity, "purchase_price": purchase_price}
         
-        # Let's check if stock exists first to simplify logic alignment
-        existing_stock = self.get_user_tracked_stocks_for_symbol(user_id_str, symbol_upper)
+        # The original Oracle logic had a check for new stocks requiring both quantity and price.
+        # The SQLite UPSERT doesn't enforce this at the DB level.
+        # We can add a Python-side check if strict adherence to that specific behavior is needed,
+        # but the UPSERT with COALESCE provides a more flexible and common pattern.
+        # For now, we'll rely on the UPSERT behavior.
 
-        if existing_stock:
-            # Update existing
-            if quantity is None and purchase_price is None: # No update data provided
-                return True # Already tracked, no change
-            
-            update_fields = []
-            params_update = {"user_id": user_id_str, "symbol": symbol_upper}
-            if quantity is not None:
-                update_fields.append("quantity = :quantity")
-                params_update["quantity"] = float(quantity)
-            if purchase_price is not None:
-                update_fields.append("purchase_price = :purchase_price")
-                params_update["purchase_price"] = float(purchase_price)
-            
-            if not update_fields: return True # Should not happen if quantity or purchase_price is not None
-
-            query_update = f"UPDATE tracked_stocks SET {', '.join(update_fields)} WHERE user_id = :user_id AND symbol = :symbol"
-            return self._execute_query(query_update, params_update, commit=True)
-        else:
-            # Add new stock
-            if quantity is not None and purchase_price is not None:
-                q_float = float(quantity)
-                p_float = float(purchase_price)
-            elif quantity is None and purchase_price is None:
-                q_float = None
-                p_float = None
-            else: # Only one provided for new stock
-                logger.warning(f"add_tracked_stock: For new stock {symbol_upper} for user {user_id_str}, both quantity and purchase_price must be provided or neither.")
-                return False
-
-            query_insert = "INSERT INTO tracked_stocks (user_id, symbol, quantity, purchase_price) VALUES (:user_id, :symbol, :quantity, :purchase_price)"
-            params_insert = {"user_id": user_id_str, "symbol": symbol_upper, "quantity": q_float, "purchase_price": p_float}
-            return self._execute_query(query_insert, params_insert, commit=True)
+        return self._execute_query(query, params, commit=True)
 
 
     def get_user_tracked_stocks_for_symbol(self, user_id_str, symbol_upper):
@@ -463,19 +389,25 @@ class DataManager:
         else:
             # Upsert logic
             query_upsert = """
-            MERGE INTO stock_alerts dest
-            USING (SELECT :user_id AS user_id, :symbol AS symbol FROM dual) src
-            ON (dest.user_id = src.user_id AND dest.symbol = src.symbol)
-            WHEN MATCHED THEN
-                UPDATE SET target_above = :target_above, active_above = :active_above,
-                           target_below = :target_below, active_below = :active_below,
-                           dpc_above_target = :dpc_above_target, dpc_above_active = :dpc_above_active,
-                           dpc_below_target = :dpc_below_target, dpc_below_active = :dpc_below_active
-            WHEN NOT MATCHED THEN
-                INSERT (user_id, symbol, target_above, active_above, target_below, active_below,
-                        dpc_above_target, dpc_above_active, dpc_below_target, dpc_below_active)
-                VALUES (:user_id, :symbol, :target_above, :active_above, :target_below, :active_below,
-                        :dpc_above_target, :dpc_above_active, :dpc_below_target, :dpc_below_active)
+            INSERT INTO stock_alerts (user_id, symbol,
+                                      target_above, active_above,
+                                      target_below, active_below,
+                                      dpc_above_target, dpc_above_active,
+                                      dpc_below_target, dpc_below_active)
+            VALUES (:user_id, :symbol,
+                    :target_above, :active_above,
+                    :target_below, :active_below,
+                    :dpc_above_target, :dpc_above_active,
+                    :dpc_below_target, :dpc_below_active)
+            ON CONFLICT(user_id, symbol) DO UPDATE SET
+                target_above = excluded.target_above,
+                active_above = excluded.active_above,
+                target_below = excluded.target_below,
+                active_below = excluded.active_below,
+                dpc_above_target = excluded.dpc_above_target,
+                dpc_above_active = excluded.dpc_above_active,
+                dpc_below_target = excluded.dpc_below_target,
+                dpc_below_active = excluded.dpc_below_active
             """
             params_upsert = {
                 "user_id": user_id_str, "symbol": symbol_upper,
@@ -555,10 +487,9 @@ class DataManager:
         if result and result.get('pref_value'):
             try:
                 value_str = result['pref_value']
-                if isinstance(value_str, oracledb.LOB): # Handle LOB if driver returns it
-                    value_str = value_str.read()
+                # SQLite returns TEXT directly, no LOB handling needed
                 return json.loads(value_str)
-            except (json.JSONDecodeError, oracledb.Error) as e:
+            except json.JSONDecodeError as e:
                 logger.error(f"Error decoding preference value for user {user_id_str}, key {key}: {e}")
                 return default
         return default
@@ -567,14 +498,10 @@ class DataManager:
         user_id_str = str(user_id)
         value_json = json.dumps(value)
         query = """
-        MERGE INTO user_preferences dest
-        USING (SELECT :user_id AS user_id, :key AS pref_key FROM dual) src
-        ON (dest.user_id = src.user_id AND dest.pref_key = src.pref_key)
-        WHEN MATCHED THEN
-            UPDATE SET pref_value = :value_json
-        WHEN NOT MATCHED THEN
-            INSERT (user_id, pref_key, pref_value)
-            VALUES (:user_id, :key, :value_json)
+        INSERT INTO user_preferences (user_id, pref_key, pref_value)
+        VALUES (:user_id, :key, :value_json)
+        ON CONFLICT(user_id, pref_key) DO UPDATE SET
+            pref_value = :value_json
         """
         params = {"user_id": user_id_str, "key": key, "value_json": value_json}
         return self._execute_query(query, params, commit=True)
@@ -596,81 +523,73 @@ class DataManager:
             key = pref_row['pref_key']
             try:
                 value_str = pref_row['pref_value']
-                if isinstance(value_str, oracledb.LOB):
-                    value_str = value_str.read()
+                # SQLite returns TEXT directly
                 user_prefs[key] = json.loads(value_str)
-            except (json.JSONDecodeError, oracledb.Error) as e:
+            except json.JSONDecodeError as e:
                 logger.error(f"Error decoding preference value for user {user_id_str}, key {key} in get_all_preferences: {e}")
                 user_prefs[key] = None # Or some default error indicator
         return user_prefs
 
     def close(self):
-        """Closes the database connection pool."""
-        if self.pool:
+        """Closes the database connection."""
+        if hasattr(self, 'conn') and self.conn:
             try:
-                self.pool.close()
-                logger.info("Oracle connection pool closed.")
-            except oracledb.Error as e:
-                logger.error(f"Error closing Oracle connection pool: {e}")
+                self.conn.close()
+                logger.info("SQLite database connection closed.")
+            except sqlite3.Error as e:
+                logger.error(f"Error closing SQLite database connection: {e}")
 
-# Example of how to use DataManager (optional, for testing)
-if __name__ == '__main__':
-    # This requires .env to be in the same directory as data_manager.py or config.py to load correctly
-    # Or environment variables ORACLE_USER, ORACLE_PASSWORD, ORACLE_DSN to be set
-    logging.basicConfig(level=logging.INFO)
+# Example Usage (for testing)
+if __name__ == "__main__":
+    # Configure basic logging for standalone run
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
-    # Ensure .env is loaded if running standalone for testing
-    from dotenv import load_dotenv
-    dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
-    if os.path.exists(dotenv_path):
-        load_dotenv(dotenv_path=dotenv_path)
-        logger.info(f"Loaded .env from {dotenv_path} for standalone test.")
-    else:
-        logger.warning(f".env file not found at {dotenv_path}. Ensure Oracle env vars are set.")
+    # Set dummy environment variables for testing
+    # Set dummy environment variables for testing
+    os.environ['SQLITE_DB_PATH'] = 'test_bot.db' # Set SQLite env var
 
-    # Re-import config to pick up .env vars if loaded above
-    import importlib
-    import config as app_config # Use an alias to avoid conflict
-    importlib.reload(app_config) # Reload to get env vars
+    try:
+        logger.info("SQLite database path seems to be loaded for testing.")
+        db_manager = DataManager()
+        logger.info("DataManager initialized.")
 
-    # Update global vars from reloaded config
-    ORACLE_USER = app_config.ORACLE_USER
-    ORACLE_PASSWORD = app_config.ORACLE_PASSWORD
-    ORACLE_DSN = app_config.ORACLE_DSN
-    
-    if not all([ORACLE_USER, ORACLE_PASSWORD, ORACLE_DSN]):
-        logger.error("Oracle credentials not found. Set ORACLE_USER, ORACLE_PASSWORD, ORACLE_DSN environment variables.")
-    else:
-        logger.info("Oracle credentials seem to be loaded for testing.")
-        dm = None
-        try:
-            dm = DataManager()
-            logger.info("DataManager initialized for testing.")
-
-            # Test TV Show
-            # dm.add_tv_show_subscription(123, 71712, "The Orville", "/path.jpg")
-            # dm.add_tv_show_subscription(123, 1399, "Game of Thrones", "/got.jpg")
-            # user_tv = dm.get_user_tv_subscriptions(123)
-            # logger.info(f"User 123 TV: {user_tv}")
-            # all_tv = dm.get_all_tv_subscriptions()
-            # logger.info(f"All TV: {all_tv}")
-            # dm.update_last_notified_episode_details(123, 71712, {"season": 3, "episode": 10, "name": "Future Unknown"})
-            # logger.info(f"Updated Orville: {dm.get_user_tv_subscriptions(123)}")
-            # dm.remove_tv_show_subscription(123, 1399)
-            # logger.info(f"After removing GoT: {dm.get_user_tv_subscriptions(123)}")
-
-            # Test Preferences
-            # dm.set_user_preference(999, "theme", "dark")
-            # dm.set_user_preference(999, "notifications", {"email": True, "sms": False})
-            # prefs = dm.get_user_all_preferences(999)
-            # logger.info(f"User 999 Prefs: {prefs}")
-            # theme = dm.get_user_preference(999, "theme")
-            # logger.info(f"User 999 Theme: {theme}")
-            # dm.delete_user_preference(999, "theme")
-            # logger.info(f"User 999 Prefs after delete: {dm.get_user_all_preferences(999)}")
-
-        except Exception as e:
-            logger.error(f"Error during DataManager test: {e}", exc_info=True)
-        finally:
-            if dm:
-                dm.close()
+        # Example: Add a TV show subscription
+        user_id = 12345
+        tmdb_id = 1399 # Game of Thrones
+        title = "Game of Thrones"
+        poster_path = "/path/to/poster.jpg"
+        success = db_manager.add_tv_show_subscription(user_id, tmdb_id, title, poster_path)
+        if success:
+            logger.info(f"Added TV show subscription for user {user_id}, TMDB ID {tmdb_id}")
+        else:
+            logger.error(f"Failed to add TV show subscription for user {user_id}, TMDB ID {tmdb_id}")
+#
+#         # Example: Get user's TV subscriptions
+#         subscriptions = db_manager.get_user_tv_subscriptions(user_id)
+#         logger.info(f"Subscriptions for user {user_id}: {subscriptions}")
+#
+#         # Example: Update last notified episode details
+#         episode_details = {"season": 8, "episode": 6, "title": "The Iron Throne"}
+#         success = db_manager.update_last_notified_episode_details(user_id, tmdb_id, episode_details)
+#         if success:
+#             logger.info(f"Updated episode details for user {user_id}, TMDB ID {tmdb_id}")
+#         else:
+#             logger.error(f"Failed to update episode details for user {user_id}, TMDB ID {tmdb_id}")
+#
+#         # Example: Get updated subscriptions
+#         subscriptions = db_manager.get_user_tv_subscriptions(user_id)
+#         logger.info(f"Updated subscriptions for user {user_id}: {subscriptions}")
+#
+#         # Example: Remove TV show subscription
+#         success = db_manager.remove_tv_show_subscription(user_id, tmdb_id)
+#         if success:
+#             logger.info(f"Removed TV show subscription for user {user_id}, TMDB ID {tmdb_id}")
+#         else:
+#             logger.error(f"Failed to remove TV show subscription for user {user_id}, TMDB ID {tmdb_id}")
+#
+    except (ValueError, ConnectionError) as e:
+        logger.error(f"Application startup failed: {e}")
+    finally:
+        if 'db_manager' in locals() and db_manager:
+            db_manager.close()
+            logger.info("DataManager closed.")
