@@ -5,19 +5,19 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Copy the requirements file from the dashboard directory into the container at /app
-COPY dashboard/requirements.txt /app/requirements.txt
+COPY requirements.txt /app/requirements.txt
 
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the contents of the dashboard directory into the container at /app
-COPY dashboard/ /app/
+COPY . /app/
 
 # Copy the api_clients directory into the container at /app/api_clients
 COPY api_clients/ /app/api_clients/
 
 # Add /app to PYTHONPATH to ensure modules in this directory are discoverable
-ENV PYTHONPATH /app
+ENV PYTHONPATH="/app"
 
 # Run gunicorn when the container launches
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
