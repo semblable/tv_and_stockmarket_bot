@@ -26,7 +26,12 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
-logger.info("config.py: os.getenv() called for all API keys.")
+
+# Oracle Database Configuration
+ORACLE_USER = os.getenv("ORACLE_USER")
+ORACLE_PASSWORD = os.getenv("ORACLE_PASSWORD")
+ORACLE_DSN = os.getenv("ORACLE_DSN")
+logger.info("config.py: os.getenv() called for all API keys and Oracle DB config.")
 
 if DISCORD_BOT_TOKEN is None:
     logger.warning("config.py: DISCORD_BOT_TOKEN not found in environment variables.")
@@ -38,5 +43,11 @@ if OPENWEATHERMAP_API_KEY is None:
     logger.warning("config.py: OPENWEATHERMAP_API_KEY not found in environment variables.")
 if INTERNAL_API_KEY is None:
     logger.warning("config.py: INTERNAL_API_KEY not found in environment variables.")
+if ORACLE_USER is None:
+    logger.warning("config.py: ORACLE_USER not found in environment variables.")
+if ORACLE_PASSWORD is None:
+    logger.warning("config.py: ORACLE_PASSWORD not found in environment variables.")
+if ORACLE_DSN is None:
+    logger.warning("config.py: ORACLE_DSN not found in environment variables.")
 
 logger.info("config.py: Finished loading configuration.")

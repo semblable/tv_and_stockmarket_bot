@@ -8,11 +8,8 @@ from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
 from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series # Added
 from utils.chart_utils import generate_stock_chart_url # Added
-from data_manager import (
-    add_tracked_stock, remove_tracked_stock, get_user_tracked_stocks,
-    add_stock_alert, get_stock_alert, deactivate_stock_alert_target,
-    get_all_active_alerts_for_monitoring
-)
+from data_manager import DataManager # Import DataManager class
+# Individual function imports from data_manager are no longer needed if using an instance
 
 # Configure logging for this cog
 logger = logging.getLogger(__name__)
@@ -36,6 +33,7 @@ SUPPORTED_TIMESPAN = {
 class Stocks(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.db_manager = bot.db_manager # Get the DataManager instance from the bot
         self.unique_stocks_queue = []
         self.current_queue_index = 0
         self.check_stock_alerts.start() # Start the background task
@@ -50,14 +48,25 @@ class Stocks(commands.Cog):
 
     @tasks.loop(minutes=STOCK_CHECK_INTERVAL_MINUTES)
     async def check_stock_alerts(self):
-        logger.info("Stock alert check task running...")
-        all_user_alerts = get_all_active_alerts_for_monitoring()
+        if not self.db_manager:
+            logger.error("StocksCog: DataManager (db_manager) not available. Cannot check stock alerts.")
+            return
 
-        if not all_user_alerts:
+        logger.info("Stock alert check task running...")
+        all_user_alerts_map = self.db_manager.get_all_active_alerts_for_monitoring() # Returns dict {user_id: {symbol: alert_details}}
+
+        if not all_user_alerts_map:
             logger.info("No active stock alerts to monitor.")
             return
 
-        latest_unique_symbols = sorted(list(set(a['symbol'] for a in all_user_alerts)))
+        # Extract all unique symbols from the map
+        all_symbols_with_alerts = set()
+        for user_id_str, stock_alerts_dict in all_user_alerts_map.items():
+            for symbol_str in stock_alerts_dict.keys():
+                all_symbols_with_alerts.add(symbol_str)
+        
+        latest_unique_symbols = sorted(list(all_symbols_with_alerts))
+
 
         if not latest_unique_symbols:
             logger.info("No unique symbols from active alerts.")
@@ -71,11 +80,10 @@ class Stocks(commands.Cog):
             self.unique_stocks_queue = latest_unique_symbols
             self.current_queue_index = 0 # Reset index if list changes
 
-        if not self.unique_stocks_queue: # Should be caught by previous check, but as a safeguard
+        if not self.unique_stocks_queue:
             logger.info("Stock monitoring queue is empty after update.")
             return
         
-        # Ensure index is valid
         if self.current_queue_index >= len(self.unique_stocks_queue):
             self.current_queue_index = 0
 
@@ -84,13 +92,12 @@ class Stocks(commands.Cog):
 
         self.current_queue_index = (self.current_queue_index + 1) % len(self.unique_stocks_queue)
         
-        # Add a small delay before API call, even if it's one per hour, good practice.
-        await asyncio.sleep(2)
+        await asyncio.sleep(2) # Small delay
         price_data = alpha_vantage_client.get_stock_price(symbol_to_check)
 
         if not price_data or "error" in price_data or "05. price" not in price_data or "08. previous close" not in price_data:
             error_msg = price_data.get("message", "Unknown API error or invalid/incomplete data") if isinstance(price_data, dict) else "No data received"
-            logger.error(f"Could not fetch complete price data (current and previous close) for {symbol_to_check} during alert check: {error_msg}")
+            logger.error(f"Could not fetch complete price data for {symbol_to_check} during alert check: {error_msg}")
             if isinstance(price_data, dict) and price_data.get("error") == "api_limit":
                 logger.warning(f"Alpha Vantage API limit reached while checking {symbol_to_check}. Task will retry next cycle.")
             return
@@ -103,59 +110,61 @@ class Stocks(commands.Cog):
             logger.error(f"Could not parse price/previous close for {symbol_to_check}. Data: {price_data}. Error: {e}")
             return
 
-        alerts_for_this_symbol = [a for a in all_user_alerts if a['symbol'] == symbol_to_check]
+        # Iterate through users who have alerts for this specific symbol_to_check
+        for user_id_str, user_specific_alerts_dict in all_user_alerts_map.items():
+            if symbol_to_check not in user_specific_alerts_dict:
+                continue # This user doesn't have an alert for the current symbol
 
-        for alert in alerts_for_this_symbol:
-            user_id = alert['user_id']
-            user = self.bot.get_user(user_id)
-            if not user:
-                logger.warning(f"Could not find user {user_id} for alert on {symbol_to_check}.")
+            alert_details = user_specific_alerts_dict[symbol_to_check] # This is the dict of alert conditions
+            user_id_int = int(user_id_str) # Convert string user_id to int
+            
+            discord_user_obj = await self.bot.fetch_user(user_id_int)
+            if not discord_user_obj:
+                logger.warning(f"Could not find user {user_id_int} for alert on {symbol_to_check}.")
                 continue
 
             triggered_message = None
-            deactivate_direction = None # Can be 'above', 'below', 'dpc_above', 'dpc_below'
+            deactivate_direction = None
 
             # --- Price Target Checks ---
-            if alert.get('active_above') and alert.get('target_above') is not None:
-                if current_price > alert['target_above']:
-                    triggered_message = f"📈 **Price Alert!** {symbol_to_check} has risen above your target of ${alert['target_above']:.2f}. Current price: ${current_price:.2f}"
+            # alert_details keys are like 'target_above', 'active_above', etc.
+            if alert_details.get('active_above') and alert_details.get('target_above') is not None:
+                if current_price > float(alert_details['target_above']): # Ensure comparison with float
+                    triggered_message = f"📈 **Price Alert!** {symbol_to_check} has risen above your target of ${float(alert_details['target_above']):.2f}. Current price: ${current_price:.2f}"
                     deactivate_direction = "above"
             
-            if not triggered_message and alert.get('active_below') and alert.get('target_below') is not None:
-                if current_price < alert['target_below']:
-                    triggered_message = f"📉 **Price Alert!** {symbol_to_check} has fallen below your target of ${alert['target_below']:.2f}. Current price: ${current_price:.2f}"
+            if not triggered_message and alert_details.get('active_below') and alert_details.get('target_below') is not None:
+                if current_price < float(alert_details['target_below']): # Ensure comparison with float
+                    triggered_message = f"📉 **Price Alert!** {symbol_to_check} has fallen below your target of ${float(alert_details['target_below']):.2f}. Current price: ${current_price:.2f}"
                     deactivate_direction = "below"
 
             # --- Daily Percentage Change (DPC) Target Checks ---
-            # Only proceed if a price alert hasn't already been triggered for this cycle for this user/stock
-            if not triggered_message and previous_close_price != 0: # Avoid division by zero
+            if not triggered_message and previous_close_price != 0:
                 percentage_change = ((current_price - previous_close_price) / previous_close_price) * 100
-                logger.info(f"DPC calc for {symbol_to_check}: Current: {current_price}, Prev Close: {previous_close_price}, Change: {percentage_change:.2f}%")
+                logger.info(f"DPC calc for {symbol_to_check} (User {user_id_int}): Current: {current_price}, Prev Close: {previous_close_price}, Change: {percentage_change:.2f}%")
 
-                if alert.get('dpc_above_active') and alert.get('dpc_above_target') is not None:
-                    if percentage_change > alert['dpc_above_target']:
-                        triggered_message = f"📈 **DPC Alert!** {symbol_to_check} is up +{percentage_change:.2f}% today (currently ${current_price:.2f}), meeting your +{alert['dpc_above_target']:.2f}% target."
+                if alert_details.get('dpc_above_active') and alert_details.get('dpc_above_target') is not None:
+                    if percentage_change > float(alert_details['dpc_above_target']):
+                        triggered_message = f"📈 **DPC Alert!** {symbol_to_check} is up +{percentage_change:.2f}% today (currently ${current_price:.2f}), meeting your +{float(alert_details['dpc_above_target']):.2f}% target."
                         deactivate_direction = "dpc_above"
                 
-                if not triggered_message and alert.get('dpc_below_active') and alert.get('dpc_below_target') is not None:
-                    # dpc_below_target is stored as positive, so compare absolute percentage_change if it's negative
-                    if percentage_change < 0 and abs(percentage_change) > alert['dpc_below_target']: # or percentage_change < -alert['dpc_below_target']
-                         triggered_message = f"📉 **DPC Alert!** {symbol_to_check} is down {percentage_change:.2f}% today (currently ${current_price:.2f}), meeting your -{alert['dpc_below_target']:.2f}% target."
+                if not triggered_message and alert_details.get('dpc_below_active') and alert_details.get('dpc_below_target') is not None:
+                    if percentage_change < 0 and abs(percentage_change) > float(alert_details['dpc_below_target']):
+                         triggered_message = f"📉 **DPC Alert!** {symbol_to_check} is down {percentage_change:.2f}% today (currently ${current_price:.2f}), meeting your -{float(alert_details['dpc_below_target']):.2f}% target."
                          deactivate_direction = "dpc_below"
             elif not triggered_message and previous_close_price == 0:
                 logger.warning(f"Cannot calculate DPC for {symbol_to_check} as previous_close_price is 0.")
 
-
             if triggered_message and deactivate_direction:
                 try:
-                    await user.send(triggered_message)
-                    logger.info(f"Sent alert DM to user {user_id} for {symbol_to_check} ({deactivate_direction} target). Message: {triggered_message}")
-                    deactivate_stock_alert_target(user_id, symbol_to_check, deactivate_direction)
-                    logger.info(f"Deactivated {deactivate_direction} alert for user {user_id}, stock {symbol_to_check}.")
+                    await discord_user_obj.send(triggered_message)
+                    logger.info(f"Sent alert DM to user {user_id_int} for {symbol_to_check} ({deactivate_direction} target). Message: {triggered_message}")
+                    self.db_manager.deactivate_stock_alert_target(user_id_int, symbol_to_check, deactivate_direction)
+                    logger.info(f"Deactivated {deactivate_direction} alert for user {user_id_int}, stock {symbol_to_check}.")
                 except discord.Forbidden:
-                    logger.warning(f"Could not send DM to user {user_id} (DM disabled or bot blocked).")
+                    logger.warning(f"Could not send DM to user {user_id_int} (DM disabled or bot blocked).")
                 except Exception as e:
-                    logger.error(f"Error sending DM or deactivating alert for user {user_id}, {symbol_to_check}: {e}")
+                    logger.error(f"Error sending DM or deactivating alert for user {user_id_int}, {symbol_to_check}: {e}")
         logger.info(f"Finished alert check for {symbol_to_check}.")
 
     @check_stock_alerts.before_loop
@@ -298,27 +307,25 @@ class Stocks(commands.Cog):
             return
 
         # Attempt to add/update the stock
-        # The data_manager.add_tracked_stock now handles the logic of adding vs updating
+        # The self.db_manager.add_tracked_stock now handles the logic of adding vs updating
         # and whether portfolio data is new, updated, or absent.
-        success = add_tracked_stock(user_id, upper_symbol, quantity, purchase_price)
+        success = self.db_manager.add_tracked_stock(user_id, upper_symbol, quantity, purchase_price)
 
         if success:
             if quantity is not None and purchase_price is not None:
                 await ctx.send(f"Successfully tracking {upper_symbol} with {quantity} shares at ${purchase_price:,.2f} each. Portfolio data updated.", ephemeral=True)
             else:
                 # Check if it was already tracked with portfolio data that's being kept, or just simple tracking
-                tracked_stocks = get_user_tracked_stocks(user_id)
-                existing_stock_info = next((s for s in tracked_stocks if s['symbol'] == upper_symbol), None)
+                tracked_stocks_list = self.db_manager.get_user_tracked_stocks(user_id) # Returns list of dicts
+                existing_stock_info = next((s for s in tracked_stocks_list if s['symbol'] == upper_symbol), None)
                 if existing_stock_info and existing_stock_info.get('quantity') is not None:
                      await ctx.send(f"Successfully tracking {upper_symbol}. Existing portfolio data (Quantity: {existing_stock_info['quantity']}, Price: ${existing_stock_info.get('purchase_price', 0):,.2f}) is maintained.", ephemeral=True)
                 else:
                     await ctx.send(f"Successfully started tracking {upper_symbol} (no portfolio data provided/updated).", ephemeral=True)
         else:
-            # This 'else' might indicate an issue like invalid data format if data_manager returns False for reasons other than "already tracked"
-            # For now, assume it means "already tracked and no changes made" or a more specific error from data_manager if it were to raise one.
-            # The current data_manager.add_tracked_stock returns True if already tracked and no portfolio update,
-            # and False for invalid data format for quantity/price.
-            await ctx.send(f"Could not track {upper_symbol}. This might be due to invalid quantity/price format, or the stock is already tracked and no valid update was provided.", ephemeral=True)
+            # This 'else' from db_manager.add_tracked_stock usually means a DB operation failure
+            # or if quantity/price was partially provided for a new stock.
+            await ctx.send(f"Could not track {upper_symbol}. This might be due to invalid quantity/price format for a new stock, or a database error.", ephemeral=True)
 
     @commands.hybrid_command(name="untrack_stock", description="Stop tracking a stock symbol.")
     @discord.app_commands.describe(symbol="The stock symbol to untrack (e.g., AAPL, MSFT)")
@@ -332,10 +339,12 @@ class Stocks(commands.Cog):
         """
         upper_symbol = symbol.upper()
         user_id = ctx.author.id
-        if remove_tracked_stock(user_id, upper_symbol):
+        if self.db_manager.remove_tracked_stock(user_id, upper_symbol): # Returns True on successful commit
             await ctx.send(f"Successfully stopped tracking {upper_symbol}.", ephemeral=True)
         else:
-            await ctx.send(f"{upper_symbol} was not found in your tracked list.", ephemeral=True)
+            # This now implies a DB operation failure, as "not found" doesn't make the DB operation fail.
+            # To check if it was found, we'd query before deleting.
+            await ctx.send(f"Could not untrack {upper_symbol}. It might not be in your list or a database error occurred.", ephemeral=True)
 
     @commands.hybrid_command(name="my_tracked_stocks", description="Lists your tracked stock symbols.")
     async def my_tracked_stocks(self, ctx: commands.Context):
@@ -348,43 +357,45 @@ class Stocks(commands.Cog):
         `/my_tracked_stocks`
         """
         user_id = ctx.author.id
-        tracked_stocks = get_user_tracked_stocks(user_id)
+        tracked_stocks_list = self.db_manager.get_user_tracked_stocks(user_id) # Returns list of dicts
 
-        if not tracked_stocks:
+        if not tracked_stocks_list:
             await ctx.send("You are not tracking any stocks. Use `/track_stock <symbol>` to add some!", ephemeral=True)
             return
 
-        embed = discord.Embed(title=f"📊 Your Tracked Stocks ({len(tracked_stocks)})", color=discord.Color.purple())
+        embed = discord.Embed(title=f"📊 Your Tracked Stocks ({len(tracked_stocks_list)})", color=discord.Color.purple())
         embed.set_footer(text="Data provided by Alpha Vantage. Prices may be delayed. Alerts shown are active.")
         
         description_lines = []
         api_call_count = 0
-        max_calls_for_prices = 3 # Limit direct price fetches in this command to avoid hitting limits quickly
-        # For more than this, users should use !stock_price for individual stocks.
-        # The alert system handles background checks.
+        max_calls_for_prices = 3
 
-        if len(tracked_stocks) > max_calls_for_prices:
-             await ctx.send(f"Displaying basic info for {len(tracked_stocks)} stocks. For current prices of more than {max_calls_for_prices} stocks, please use `/stock_price <symbol>` individually to manage API rate limits.", ephemeral=True)
+        if len(tracked_stocks_list) > max_calls_for_prices:
+             await ctx.send(f"Displaying basic info for {len(tracked_stocks_list)} stocks. For current prices of more than {max_calls_for_prices} stocks, please use `/stock_price <symbol>` individually to manage API rate limits.", ephemeral=True)
 
-
-        for i, symbol in enumerate(tracked_stocks):
-            stock_display = f"**{symbol.upper()}**:"
+        for i, stock_item in enumerate(tracked_stocks_list): # stock_item is a dict
+            symbol_upper = stock_item['symbol'].upper()
+            stock_display = f"**{symbol_upper}**:"
             
-            # Fetch and display price only for a limited number
+            # Portfolio info if available
+            quantity = stock_item.get('quantity')
+            purchase_price = stock_item.get('purchase_price')
+            if quantity is not None and purchase_price is not None:
+                stock_display += f" ({quantity} @ ${purchase_price:,.2f})"
+            
             if i < max_calls_for_prices:
-                if api_call_count > 0: # Delay between calls if we are making multiple
-                    await asyncio.sleep(13) # Alpha Vantage: 5 calls/min, so ~12s interval
+                if api_call_count > 0:
+                    await asyncio.sleep(13)
                 
-                price_data = alpha_vantage_client.get_stock_price(symbol)
+                price_data = alpha_vantage_client.get_stock_price(symbol_upper)
                 api_call_count += 1
 
                 if price_data:
                     if "error" in price_data:
                         error_type = price_data["error"]
                         error_message = price_data.get("message", "Unknown error")
-                        if error_type == "api_limit": stock_display += f" ⚠️ Price: API limit. ({error_message[:20]}...)"
-                        elif error_type == "config_error": stock_display += " ❌ Price: N/A (Server issue)"
-                        else: stock_display += f" ❌ Price: N/A ({error_message})"
+                        if error_type == "api_limit": stock_display += f" ⚠️ Price: API limit."
+                        else: stock_display += f" ❌ Price: N/A"
                     elif "01. symbol" in price_data and "05. price" in price_data:
                         raw_price = price_data.get('05. price')
                         raw_change = price_data.get('09. change', '0')
@@ -397,24 +408,22 @@ class Stocks(commands.Cog):
                             trend_emoji = "📈 " if change_val_float > 0 else "📉 " if change_val_float < 0 else ""
                         except (ValueError, TypeError): trend_emoji = ""
                         stock_display += f" 💰 {price_display_val} {trend_emoji}"
-                    else: stock_display += " ❌ Price: N/A (Format error)"
-                else: stock_display += " ❌ Price: N/A (Fetch error)"
-            elif i == max_calls_for_prices: # For stocks beyond the limit, don't fetch price
-                stock_display += " (Price check skipped due to API limits in this view)"
+                    else: stock_display += " ❌ Price: N/A (Format)"
+                else: stock_display += " ❌ Price: N/A (Fetch)"
+            elif i == max_calls_for_prices:
+                stock_display += " (Price check skipped)"
 
-
-            # Display alert info
-            alert_info = get_stock_alert(user_id, symbol)
+            alert_info = self.db_manager.get_stock_alert(user_id, symbol_upper)
             alert_texts = []
             if alert_info:
                 if alert_info.get('active_above') and alert_info.get('target_above') is not None:
-                    alert_texts.append(f"Price > ${alert_info['target_above']:.2f}")
+                    alert_texts.append(f"Price > ${float(alert_info['target_above']):.2f}")
                 if alert_info.get('active_below') and alert_info.get('target_below') is not None:
-                    alert_texts.append(f"Price < ${alert_info['target_below']:.2f}")
+                    alert_texts.append(f"Price < ${float(alert_info['target_below']):.2f}")
                 if alert_info.get('dpc_above_active') and alert_info.get('dpc_above_target') is not None:
-                    alert_texts.append(f"DPC > +{alert_info['dpc_above_target']:.2f}%")
+                    alert_texts.append(f"DPC > +{float(alert_info['dpc_above_target']):.2f}%")
                 if alert_info.get('dpc_below_active') and alert_info.get('dpc_below_target') is not None:
-                    alert_texts.append(f"DPC < -{alert_info['dpc_below_target']:.2f}%")
+                    alert_texts.append(f"DPC < -{float(alert_info['dpc_below_target']):.2f}%")
             
             if alert_texts:
                 stock_display += f" | Alerts: {'; '.join(alert_texts)}"
@@ -463,23 +472,23 @@ class Stocks(commands.Cog):
         user_id = ctx.author.id
         symbol_upper = symbol.upper()
 
-        tracked_stocks = get_user_tracked_stocks(user_id)
-        if symbol_upper not in [s.upper() for s in tracked_stocks]:
+        tracked_stocks_list = self.db_manager.get_user_tracked_stocks(user_id)
+        if not any(s['symbol'] == symbol_upper for s in tracked_stocks_list):
             await ctx.send(f"You are not tracking {symbol_upper}. Please use `/track_stock {symbol_upper}` first.", ephemeral=True)
             return
 
         if above_target is None and below_target is None and dpc_above_target is None and dpc_below_target is None:
-            current_alert_info = get_stock_alert(user_id, symbol_upper)
+            current_alert_info = self.db_manager.get_stock_alert(user_id, symbol_upper)
             if current_alert_info:
                 alerts_display = []
                 if current_alert_info.get('active_above') and current_alert_info.get('target_above') is not None:
-                    alerts_display.append(f"Price Above: ${current_alert_info['target_above']:.2f}")
+                    alerts_display.append(f"Price Above: ${float(current_alert_info['target_above']):.2f}")
                 if current_alert_info.get('active_below') and current_alert_info.get('target_below') is not None:
-                    alerts_display.append(f"Price Below: ${current_alert_info['target_below']:.2f}")
+                    alerts_display.append(f"Price Below: ${float(current_alert_info['target_below']):.2f}")
                 if current_alert_info.get('dpc_above_active') and current_alert_info.get('dpc_above_target') is not None:
-                    alerts_display.append(f"DPC Above: +{current_alert_info['dpc_above_target']:.2f}%")
+                    alerts_display.append(f"DPC Above: +{float(current_alert_info['dpc_above_target']):.2f}%")
                 if current_alert_info.get('dpc_below_active') and current_alert_info.get('dpc_below_target') is not None:
-                    alerts_display.append(f"DPC Below: -{current_alert_info['dpc_below_target']:.2f}%")
+                    alerts_display.append(f"DPC Below: -{float(current_alert_info['dpc_below_target']):.2f}%")
                 
                 if alerts_display:
                     await ctx.send(f"Current alerts for {symbol_upper}: {'; '.join(alerts_display)}. To change, provide target parameters.", ephemeral=True)
@@ -496,74 +505,72 @@ class Stocks(commands.Cog):
         
         action_summary = []
 
-        # Helper to parse percentage input
-        def parse_percentage(value_str: str, param_name: str) -> typing.Optional[float]:
+        def parse_percentage(value_str: str, param_name: str) -> typing.Optional[typing.Union[float, str]]: # Added Union for "clear_marker"
             if value_str is None: return None
+            value_str_lower = value_str.lower()
+            if value_str_lower == 'clear':
+                return "clear_marker"
             try:
-                val = float(value_str.rstrip('%'))
+                val = float(value_str_lower.rstrip('%'))
                 if val <= 0:
-                    # Use asyncio.create_task for sending messages from non-async helper
-                    asyncio.create_task(ctx.send(f"Error: '{param_name}' percentage must be a positive number.", ephemeral=True))
-                    return None # Indicate error by returning None, caller should check
+                    raise ValueError("Percentage target must be positive.")
                 return val
             except ValueError:
-                asyncio.create_task(ctx.send(f"Error: Invalid format for '{param_name}': '{value_str}'. Use a number (e.g., 5 or 2.5) or 'clear'.", ephemeral=True))
-                return None # Indicate error
+                raise ValueError(f"Invalid format for {param_name}")
 
-        if above_target is not None:
-            if above_target.lower() == 'clear':
-                clear_above_flag = True
-                action_summary.append("clearing 'price above' alert")
-            else:
-                try:
-                    target_above_val = float(above_target)
-                    if target_above_val <= 0:
-                        await ctx.send("Error: 'Above' price must be a positive number.", ephemeral=True); return
-                    action_summary.append(f"setting 'price above' target to ${target_above_val:.2f}")
-                except ValueError:
-                    await ctx.send(f"Error: Invalid price format for 'above': '{above_target}'. Use number or 'clear'.", ephemeral=True); return
+        def parse_price(value_str: str, param_name: str) -> typing.Optional[typing.Union[float, str]]: # Added Union
+            if value_str is None: return None
+            value_str_lower = value_str.lower()
+            if value_str_lower == 'clear':
+                return "clear_marker"
+            try:
+                val = float(value_str_lower)
+                if val <= 0:
+                    raise ValueError("Price target must be positive.")
+                return val
+            except ValueError:
+                raise ValueError(f"Invalid format for {param_name}")
+
+        parse_errors = []
+
+        try:
+            if above_target is not None:
+                parsed_val = parse_price(above_target, "above_target")
+                if parsed_val == "clear_marker": clear_above_flag = True
+                else: target_above_val = parsed_val
+            
+            if below_target is not None:
+                parsed_val = parse_price(below_target, "below_target")
+                if parsed_val == "clear_marker": clear_below_flag = True
+                else: target_below_val = parsed_val
+
+            if dpc_above_target is not None:
+                parsed_val = parse_percentage(dpc_above_target, "dpc_above_target")
+                if parsed_val == "clear_marker": clear_dpc_above_flag = True
+                else: dpc_above_val = parsed_val
+
+            if dpc_below_target is not None:
+                parsed_val = parse_percentage(dpc_below_target, "dpc_below_target")
+                if parsed_val == "clear_marker": clear_dpc_below_flag = True
+                else: dpc_below_val = parsed_val
+        except ValueError as ve:
+            parse_errors.append(str(ve))
         
-        if below_target is not None:
-            if below_target.lower() == 'clear':
-                clear_below_flag = True
-                action_summary.append("clearing 'price below' alert")
-            else:
-                try:
-                    target_below_val = float(below_target)
-                    if target_below_val <= 0:
-                        await ctx.send("Error: 'Below' price must be a positive number.", ephemeral=True); return
-                    action_summary.append(f"setting 'price below' target to ${target_below_val:.2f}")
-                except ValueError:
-                    await ctx.send(f"Error: Invalid price format for 'below': '{below_target}'. Use number or 'clear'.", ephemeral=True); return
+        if parse_errors:
+            await ctx.send("\n".join(parse_errors), ephemeral=True)
+            return
 
-        if dpc_above_target is not None:
-            if dpc_above_target.lower() == 'clear':
-                clear_dpc_above_flag = True
-                action_summary.append("clearing 'DPC above' alert")
-            else:
-                # Need to await the send from the helper if it's used directly in async func
-                # For simplicity, directly call and check return, error message sent by helper
-                parsed_val = parse_percentage(dpc_above_target, "dpc_above")
-                if parsed_val is None and dpc_above_target.lower() != 'clear': return
-                dpc_above_val = parsed_val
-                if dpc_above_val is not None:
-                    action_summary.append(f"setting 'DPC above' target to +{dpc_above_val:.2f}%")
-
-        if dpc_below_target is not None:
-            if dpc_below_target.lower() == 'clear':
-                clear_dpc_below_flag = True
-                action_summary.append("clearing 'DPC below' alert")
-            else:
-                parsed_val = parse_percentage(dpc_below_target, "dpc_below")
-                if parsed_val is None and dpc_below_target.lower() != 'clear': return
-                dpc_below_val = parsed_val
-                if dpc_below_val is not None:
-                    action_summary.append(f"setting 'DPC below' target to -{dpc_below_val:.2f}%")
-
-        if target_above_val is not None and target_below_val is not None and target_above_val <= target_below_val:
-            await ctx.send(f"Error: 'Above' price target (${target_above_val:.2f}) must be greater than 'below' price target (${target_below_val:.2f}).", ephemeral=True); return
+        current_alert = self.db_manager.get_stock_alert(user_id, symbol_upper) or {}
         
-        success = add_stock_alert(
+        final_above = target_above_val if target_above_val is not None else (None if clear_above_flag else (float(current_alert.get('target_above')) if current_alert.get('target_above') is not None else None))
+        final_below = target_below_val if target_below_val is not None else (None if clear_below_flag else (float(current_alert.get('target_below')) if current_alert.get('target_below') is not None else None))
+
+
+        if final_above is not None and final_below is not None and final_above <= final_below:
+            await ctx.send(f"Error: 'Above' target (${final_above:.2f}) must be greater than 'Below' target (${final_below:.2f}). Alert not set/updated.", ephemeral=True)
+            return
+        
+        success = self.db_manager.add_stock_alert(
             user_id, symbol_upper,
             target_above=target_above_val, target_below=target_below_val,
             dpc_above_target=dpc_above_val, dpc_below_target=dpc_below_val,
@@ -572,37 +579,21 @@ class Stocks(commands.Cog):
         )
 
         if success:
-            final_action_summary = ", ".join(action_summary) if action_summary else "No changes specified."
-            await ctx.send(f"Successfully updated alerts for {symbol_upper}: {final_action_summary}.", ephemeral=True)
+            if target_above_val is not None: action_summary.append(f"Above target set to ${target_above_val:.2f}")
+            if clear_above_flag: action_summary.append("Above target cleared")
+            if target_below_val is not None: action_summary.append(f"Below target set to ${target_below_val:.2f}")
+            if clear_below_flag: action_summary.append("Below target cleared")
+            if dpc_above_val is not None: action_summary.append(f"DPC Above target set to +{dpc_above_val:.2f}%")
+            if clear_dpc_above_flag: action_summary.append("DPC Above target cleared")
+            if dpc_below_val is not None: action_summary.append(f"DPC Below target set to -{dpc_below_val:.2f}%")
+            if clear_dpc_below_flag: action_summary.append("DPC Below target cleared")
+
+            if not action_summary:
+                 await ctx.send(f"Alerts for {symbol_upper} processed. No specific changes to report, but settings were applied.", ephemeral=True)
+            else:
+                await ctx.send(f"Alerts for {symbol_upper} updated: {'; '.join(action_summary)}.", ephemeral=True)
         else:
-            # This 'else' might mean no actual change was made, or an internal save error.
-            # data_manager.add_stock_alert returns False if no change or error.
-            # Check current state to provide a more specific message if no changes were made.
-            current_alert = get_stock_alert(user_id, symbol_upper)
-            
-            if not action_summary: # No valid actions were parsed from input
-                 await ctx.send(f"No valid alert changes specified for {symbol_upper}. Please provide targets or use 'clear'.", ephemeral=True)
-            else: # Actions were specified, but add_stock_alert returned False
-                # Check if it was because the state already matched the request
-                is_no_actual_change = True # Assume no change was needed
-                if clear_above_flag and (current_alert and current_alert.get("target_above") is not None): is_no_actual_change = False
-                elif target_above_val is not None and (not current_alert or current_alert.get("target_above") != target_above_val or not current_alert.get("active_above")): is_no_actual_change = False
-                
-                if clear_below_flag and (current_alert and current_alert.get("target_below") is not None): is_no_actual_change = False
-                elif target_below_val is not None and (not current_alert or current_alert.get("target_below") != target_below_val or not current_alert.get("active_below")): is_no_actual_change = False
-
-                if clear_dpc_above_flag and (current_alert and current_alert.get("dpc_above_target") is not None): is_no_actual_change = False
-                elif dpc_above_val is not None and (not current_alert or current_alert.get("dpc_above_target") != dpc_above_val or not current_alert.get("dpc_above_active")): is_no_actual_change = False
-
-                if clear_dpc_below_flag and (current_alert and current_alert.get("dpc_below_target") is not None): is_no_actual_change = False
-                elif dpc_below_val is not None and (not current_alert or current_alert.get("dpc_below_target") != dpc_below_val or not current_alert.get("dpc_below_active")): is_no_actual_change = False
-                
-                # If any of the conditions for 'is_no_actual_change = False' were met, it means a change was intended.
-                # If all passed (is_no_actual_change remains True), then it was a no-op.
-                if is_no_actual_change and action_summary: # action_summary means user intended something
-                    await ctx.send(f"Alerts for {symbol_upper} are already set as requested. No changes made.", ephemeral=True)
-                else: # An actual change was intended but add_stock_alert failed, or it's an unhandled case
-                    await ctx.send(f"Could not update alerts for {symbol_upper}. This might be due to an internal error, or the values are already set as requested.", ephemeral=True)
+            await ctx.send(f"No changes made to alerts for {symbol_upper}. Values might be the same as current, or a database error occurred.", ephemeral=True)
 
     @commands.hybrid_command(name="stock_chart", description="Generate a price chart for a stock symbol over a timespan.")
     @discord.app_commands.describe(
@@ -803,7 +794,7 @@ class Stocks(commands.Cog):
         `/my_portfolio`
         """
         user_id = ctx.author.id
-        tracked_stocks_all = get_user_tracked_stocks(user_id)
+        tracked_stocks_all = self.db_manager.get_user_tracked_stocks(user_id)
 
         portfolio_stocks = [
             s for s in tracked_stocks_all

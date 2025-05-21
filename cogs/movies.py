@@ -3,7 +3,7 @@
 import discord
 from discord.ext import commands, tasks
 from api_clients import tmdb_client
-import data_manager # Will be used for subscription commands
+from data_manager import DataManager # Will be used for subscription commands
 from datetime import datetime, date, timedelta, time
 import asyncio
 import re # For parsing director from credits
@@ -25,6 +25,7 @@ def format_runtime(minutes):
 class MoviesCog(commands.Cog, name="Movies"):
     def __init__(self, bot):
         self.bot = bot
+        self.db_manager = bot.db_manager # Get the DataManager instance from the bot
         logger.info("MoviesCog: Initializing and starting check_movie_releases task.")
         self.check_movie_releases.start()
 
@@ -323,18 +324,21 @@ Usage examples:
             await ctx.followup.send(f"Cannot subscribe to '{actual_movie_title}' as its release date is not available.", ephemeral=True)
             return
 
+        # The add_movie_subscription in DataManager now takes poster_path as well.
+        # We have selected_movie_data which should contain 'poster_path'.
+        poster_path = selected_movie_data.get('poster_path')
+        if poster_path is None: # Should ideally have a fallback or default
+            logger.warning(f"Poster path not found for movie {movie_id} during subscription for user {ctx.author.id}. Using empty string.")
+            poster_path = ""
+
+
         try:
-            success = data_manager.add_movie_subscription(ctx.author.id, movie_id, actual_movie_title, release_date)
-            if success:
+            success = self.db_manager.add_movie_subscription(ctx.author.id, movie_id, actual_movie_title, poster_path)
+            if success: # This now directly reflects DB operation success (MERGE)
                 await ctx.followup.send(f"Successfully subscribed to **{actual_movie_title}** (Release: {release_date})!", ephemeral=True)
             else:
-                # This could mean already subscribed or a save error in data_manager
-                # Check if already subscribed to give a more specific message
-                current_subs = data_manager.get_user_movie_subscriptions(ctx.author.id)
-                if any(sub['movie_id'] == movie_id for sub in current_subs):
-                    await ctx.followup.send(f"You are already subscribed to **{actual_movie_title}**.", ephemeral=True)
-                else:
-                    await ctx.followup.send(f"Could not subscribe to **{actual_movie_title}**. Please try again later.", ephemeral=True)
+                # If MERGE fails, it's a DB issue, not "already subscribed" as MERGE handles that.
+                await ctx.followup.send(f"Could not subscribe to **{actual_movie_title}** due to a database error. Please try again later.", ephemeral=True)
         except Exception as e:
             print(f"Error adding movie subscription for user {ctx.author.id} to movie {movie_id} ('{actual_movie_title}'): {e}")
             await ctx.followup.send(f"Sorry, there was an error subscribing to '{actual_movie_title}'. Please try again later.", ephemeral=True)
@@ -354,7 +358,7 @@ Usage examples:
         user_id = ctx.author.id
 
         try:
-            subscriptions = data_manager.get_user_movie_subscriptions(user_id)
+            subscriptions = self.db_manager.get_user_movie_subscriptions(user_id)
         except Exception as e:
             print(f"Error getting movie subscriptions for user {user_id}: {e}")
             await ctx.followup.send("Sorry, there was an error fetching your movie subscriptions.", ephemeral=True)
@@ -366,8 +370,9 @@ Usage examples:
 
         movie_to_unsubscribe = None
         
+        # The new get_user_movie_subscriptions returns a list of dicts, each having 'title' and 'tmdb_id'
         matching_subscriptions = [
-            sub for sub in subscriptions if movie_name.lower() in sub['movie_title'].lower()
+            sub for sub in subscriptions if movie_name.lower() in sub['title'].lower()
         ]
 
         if not matching_subscriptions:
@@ -383,20 +388,22 @@ Usage examples:
             message_content = "Multiple subscribed movies match. React with the number to unsubscribe:"
 
             for i, sub_data_item in enumerate(display_results):
-                year_str = sub_data_item.get('release_date')
-                year = year_str[:4] if year_str and len(year_str) >= 4 else 'N/A'
+                # release_date is not directly in the new subscription structure from DB,
+                # but we can fetch it if needed for display, or omit year.
+                # For now, let's just use title.
+                # year_str = sub_data_item.get('release_date') # Not available directly
+                # year = year_str[:4] if year_str and len(year_str) >= 4 else 'N/A'
                 
-                # For unsubscribe, we might not need to fetch poster from TMDB again, use stored info.
-                # If poster is desired, an API call would be needed here. For simplicity, skipping.
                 movie_embed = discord.Embed(
-                    description=f"{NUMBER_EMOJIS[i]} **{sub_data_item['movie_title']} ({year})**",
+                    description=f"{NUMBER_EMOJIS[i]} **{sub_data_item['title']}**", # Removed year for simplicity
                     color=discord.Color.red() # Red for unsubscribe
                 )
-                # Optionally, fetch poster if desired, similar to tv_unsubscribe
-                # movie_details_temp = tmdb_client.get_movie_details(sub_data_item['movie_id'])
-                # if movie_details_temp and movie_details_temp.get('poster_path'):
-                #    poster_url = tmdb_client.get_poster_url(movie_details_temp['poster_path'], size="w154")
-                #    if poster_url: movie_embed.set_thumbnail(url=poster_url)
+                
+                poster_path = sub_data_item.get('poster_path')
+                if poster_path:
+                    poster_url = tmdb_client.get_poster_url(poster_path, size="w154")
+                    if poster_url:
+                        movie_embed.set_thumbnail(url=poster_url)
 
                 embeds_list.append(movie_embed)
             
@@ -448,15 +455,16 @@ Usage examples:
             await ctx.followup.send("Failed to make a selection. Unsubscription cancelled.", ephemeral=True)
             return
         
-        movie_id_to_remove = movie_to_unsubscribe['movie_id']
-        title_of_movie_unsubscribed = movie_to_unsubscribe['movie_title']
+        movie_id_to_remove = movie_to_unsubscribe['tmdb_id'] # Key is 'tmdb_id' now
+        title_of_movie_unsubscribed = movie_to_unsubscribe['title'] # Key is 'title'
 
         try:
-            success = data_manager.remove_movie_subscription(user_id, movie_id_to_remove)
-            if success:
+            success = self.db_manager.remove_movie_subscription(user_id, movie_id_to_remove)
+            if success: # remove_movie_subscription returns True on successful commit
                 await ctx.followup.send(f"Successfully unsubscribed from **{title_of_movie_unsubscribed}**.", ephemeral=True)
             else:
-                await ctx.followup.send(f"Could not unsubscribe from **{title_of_movie_unsubscribed}**. It might have already been removed.", ephemeral=True)
+                # This implies a DB operation failure
+                await ctx.followup.send(f"Could not unsubscribe from **{title_of_movie_unsubscribed}** due to a database error.", ephemeral=True)
         except Exception as e:
             print(f"Error removing movie subscription for user {user_id} from movie {movie_id_to_remove}: {e}")
             await ctx.followup.send(f"Sorry, there was an error unsubscribing from '{title_of_movie_unsubscribed}'.", ephemeral=True)
@@ -474,7 +482,7 @@ Usage examples:
         user_id = ctx.author.id
 
         try:
-            subscriptions = data_manager.get_user_movie_subscriptions(user_id)
+            subscriptions = self.db_manager.get_user_movie_subscriptions(user_id)
         except Exception as e:
             print(f"Error getting movie subscriptions for user {user_id} in my_movies: {e}")
             await ctx.followup.send("Sorry, there was an error fetching your movie subscriptions.", ephemeral=True)
@@ -533,92 +541,124 @@ Usage examples:
 
     @tasks.loop(hours=24) # Run once a day
     async def check_movie_releases(self):
-        print(f"Task: check_movie_releases running at {datetime.now()}")
-        all_subscriptions = data_manager.get_all_movie_subscriptions()
-        today = date.today()
-        notification_window_days = 7 # Notify if release is within this many days (including today)
+        """Checks for movie releases and notifies subscribed users."""
+        if not self.db_manager:
+            logger.error("MoviesCog: DataManager (db_manager) not available. Cannot check movie releases.")
+            return
 
-        for user_id_str, user_subs in all_subscriptions.items():
+        logger.info("MoviesCog: check_movie_releases task is running.")
+        all_subscriptions_by_user = self.db_manager.get_all_movie_subscriptions() # Uses DB
+        if not all_subscriptions_by_user: # This is a dict {user_id_str: [subs_list]}
+            logger.info("MoviesCog: No movie subscriptions found to check.")
+            return
+
+        today = date.today()
+        logger.info(f"MoviesCog: Today's date for release check: {today}")
+
+        for user_id_str, user_subs_list in all_subscriptions_by_user.items():
             try:
                 user_id = int(user_id_str)
-                user_discord_obj = await self.bot.fetch_user(user_id)
-                if not user_discord_obj:
-                    print(f"Task: check_movie_releases - Could not fetch user {user_id}")
+                discord_user_obj = await self.bot.fetch_user(user_id) # Renamed for clarity
+                if not discord_user_obj:
+                    logger.warning(f"MoviesCog: Could not fetch user {user_id}. Skipping their movie notifications.")
                     continue
+
+                dnd_enabled = self.db_manager.get_user_preference(user_id, 'dnd_enabled', False)
+                dnd_start_str = self.db_manager.get_user_preference(user_id, 'dnd_start_time', "00:00")
+                dnd_end_str = self.db_manager.get_user_preference(user_id, 'dnd_end_time', "00:00")
                 
-                # Check DND preference
-                dnd_enabled = data_manager.get_user_preference(user_id, 'dnd_enabled', False)
-                if dnd_enabled:
-                    dnd_start_str = data_manager.get_user_preference(user_id, 'dnd_start_time', "00:00")
-                    dnd_end_str = data_manager.get_user_preference(user_id, 'dnd_end_time', "00:00")
-                    try:
-                        dnd_start_time = datetime.strptime(dnd_start_str, '%H:%M').time()
-                        dnd_end_time = datetime.strptime(dnd_end_str, '%H:%M').time()
-                        now_time = datetime.now().time() # Consider bot's local time or UTC
+                try:
+                    dnd_start_time_obj = datetime.strptime(dnd_start_str, '%H:%M').time() # Renamed
+                    dnd_end_time_obj = datetime.strptime(dnd_end_str, '%H:%M').time() # Renamed
+                except ValueError:
+                    logger.warning(f"MoviesCog: Invalid DND time format for user {user_id}. Using defaults.")
+                    dnd_start_time_obj = time(0,0)
+                    dnd_end_time_obj = time(0,0)
 
-                        # Handle overnight DND
-                        if dnd_start_time <= dnd_end_time: # DND period is within the same day
-                            if dnd_start_time <= now_time <= dnd_end_time:
-                                print(f"Task: check_movie_releases - User {user_id} DND active (same day). Skipping notifications.")
-                                continue
-                        else: # DND period spans midnight (e.g., 22:00 to 06:00)
-                            if now_time >= dnd_start_time or now_time <= dnd_end_time:
-                                print(f"Task: check_movie_releases - User {user_id} DND active (overnight). Skipping notifications.")
-                                continue
-                    except ValueError:
-                        print(f"Task: check_movie_releases - Invalid DND time format for user {user_id}. Skipping DND check.")
+                for sub_item_dict in user_subs_list: # Renamed for clarity
+                    movie_tmdb_id = sub_item_dict.get('tmdb_id')
+                    # Title from subscription is a fallback if TMDB fetch fails for title
+                    movie_title_from_sub = sub_item_dict.get('title', 'Unknown Movie')
+                    notified_status_bool = bool(sub_item_dict.get('notified_status', 0))
 
-
-                for sub in user_subs:
-                    movie_id = sub.get('movie_id')
-                    movie_title = sub.get('movie_title', 'N/A')
-                    release_date_str = sub.get('release_date')
-                    notified_status = sub.get('notified_status', False)
-
-                    if notified_status or not release_date_str:
+                    if notified_status_bool: # Already notified
                         continue
 
-                    try:
-                        release_date_obj = datetime.strptime(release_date_str, '%Y-%m-%d').date()
-                    except ValueError:
-                        print(f"Task: check_movie_releases - Invalid date format for movie {movie_title} (ID: {movie_id}) for user {user_id}")
+                    if not movie_tmdb_id: # Should not happen if data is clean
+                        logger.warning(f"MoviesCog: Subscription item for user {user_id} is missing tmdb_id. Sub: {sub_item_dict}")
                         continue
+                        
+                    # Fetch fresh movie details from TMDB for release date and current title.
+                    try:
+                        fresh_movie_details = tmdb_client.get_movie_details(movie_tmdb_id)
+                        if not fresh_movie_details or not fresh_movie_details.get('release_date'):
+                            logger.warning(f"MoviesCog: Could not fetch release date for movie '{movie_title_from_sub}' (ID: {movie_tmdb_id}) for user {user_id} from TMDB. Skipping.")
+                            continue
+                        release_date_str_from_tmdb = fresh_movie_details['release_date']
+                        # Use fresh title from TMDB if available, otherwise fallback to subscribed title
+                        actual_movie_title_to_display = fresh_movie_details.get('title', movie_title_from_sub)
+                    except Exception as tmdb_err:
+                        logger.error(f"MoviesCog: Error fetching TMDB details for movie ID {movie_tmdb_id} during release check: {tmdb_err}")
+                        continue # Skip this movie for this user if TMDB fails
+                    
+                    try:
+                        release_date_obj_from_tmdb = datetime.strptime(release_date_str_from_tmdb, '%Y-%m-%d').date() # Renamed
+                    except ValueError:
+                        logger.error(f"MoviesCog: Invalid release date format '{release_date_str_from_tmdb}' from TMDB for movie '{actual_movie_title_to_display}' (ID: {movie_tmdb_id}).")
+                        continue # Skip if date is malformed
+                    
+                    # Notify if release date is today or in the past (and not yet notified)
+                    if release_date_obj_from_tmdb <= today:
+                        logger.info(f"MoviesCog: Movie '{actual_movie_title_to_display}' (ID: {movie_tmdb_id}) released on or before {today} for user {user_id}. Preparing notification.")
+                        
+                        current_time_obj = datetime.now().time() # Renamed
+                        is_dnd_active_now = False # Renamed
+                        if dnd_enabled:
+                            if dnd_start_time_obj <= dnd_end_time_obj: # Normal DND period (e.g., 10:00 - 18:00)
+                                if dnd_start_time_obj <= current_time_obj <= dnd_end_time_obj: is_dnd_active_now = True
+                            else: # Overnight DND period (e.g., 22:00 - 06:00 next day)
+                                if current_time_obj >= dnd_start_time_obj or current_time_obj <= dnd_end_time_obj: is_dnd_active_now = True
+                        
+                        if is_dnd_active_now:
+                            logger.info(f"MoviesCog: DND active for user {user_id}. Skipping notification for '{actual_movie_title_to_display}'.")
+                            continue
 
-                    days_until_release = (release_date_obj - today).days
-
-                    if 0 <= days_until_release <= notification_window_days:
-                        # Send DM
+                        # Construct embed using fresh_movie_details
+                        embed_title = f"🎬 Movie Released: {actual_movie_title_to_display}"
+                        embed_description = (
+                            f"The movie **{actual_movie_title_to_display}** has been released!\n\n"
+                            f"**Release Date:** {release_date_obj_from_tmdb.strftime('%B %d, %Y')}\n"
+                            f"**Overview:** {fresh_movie_details.get('overview', 'No overview available.')[:500]}" # Truncate overview
+                        )
+                        embed_color = discord.Color.blue() # Consistent color for release notifications
+                        
+                        notification_embed = discord.Embed(title=embed_title, description=embed_description, color=embed_color) # Renamed
+                        if fresh_movie_details.get('poster_path'):
+                            poster_url = tmdb_client.get_poster_url(fresh_movie_details['poster_path'])
+                            if poster_url: # Ensure URL is valid
+                                notification_embed.set_thumbnail(url=poster_url)
+                        
+                        notification_embed.set_footer(text=f"Movie ID: {movie_tmdb_id} | Data from TMDB")
+                        
                         try:
-                            formatted_release_date = release_date_obj.strftime('%B %d, %Y')
-                            tmdb_link = f"https://www.themoviedb.org/movie/{movie_id}"
-                            message = (
-                                f"🎬 **Movie Release Alert!** 🎬\n\n"
-                                f"**{movie_title}** is releasing on **{formatted_release_date}**!\n\n"
-                                f"View on TMDB: {tmdb_link}"
-                            )
-                            if days_until_release == 0:
-                                message = (
-                                    f"🎉 **Movie Release Today!** 🎉\n\n"
-                                    f"**{movie_title}** is released **TODAY, {formatted_release_date}**!\n\n"
-                                    f"View on TMDB: {tmdb_link}"
-                                )
+                            await discord_user_obj.send(embed=notification_embed)
+                            logger.info(f"MoviesCog: Sent release notification for '{actual_movie_title_to_display}' (ID: {movie_tmdb_id}) to user {user_id}.")
                             
-                            await user_discord_obj.send(message)
-                            print(f"Task: check_movie_releases - Sent notification for {movie_title} to user {user_id}")
-                            data_manager.update_movie_notified_status(user_id, movie_id, True)
-                            await asyncio.sleep(1) # Avoid rate limits if many DMs
+                            # Update notified status in DB
+                            update_success = self.db_manager.update_movie_notified_status(user_id, movie_tmdb_id, True)
+                            if update_success:
+                                logger.info(f"MoviesCog: Updated notified status for '{actual_movie_title_to_display}' (ID: {movie_tmdb_id}) for user {user_id}.")
+                            else:
+                                logger.error(f"MoviesCog: FAILED to update notified status for '{actual_movie_title_to_display}' (ID: {movie_tmdb_id}) for user {user_id}.")
+
                         except discord.Forbidden:
-                            print(f"Task: check_movie_releases - Cannot send DM to user {user_id} (Forbidden). Marking as notified to prevent spam.")
-                            data_manager.update_movie_notified_status(user_id, movie_id, True) # Mark as notified to avoid retrying if DMs are closed
-                        except discord.HTTPException as e:
-                            print(f"Task: check_movie_releases - Failed to send DM to user {user_id} for movie {movie_title}: {e}")
-                        except Exception as e:
-                            print(f"Task: check_movie_releases - Generic error sending DM for {movie_title} to {user_id}: {e}")
-            except ValueError: # For int(user_id_str)
-                print(f"Task: check_movie_releases - Invalid user ID string: {user_id_str}")
-            except Exception as e:
-                print(f"Task: check_movie_releases - Error processing subscriptions for user ID {user_id_str}: {e}")
-        print(f"Task: check_movie_releases finished at {datetime.now()}")
+                            logger.warning(f"MoviesCog: Cannot send DM to user {user_id} (Forbidden). They might have DMs disabled or blocked the bot.")
+                        except discord.HTTPException as ehttp: # More specific exception
+                            logger.error(f"MoviesCog: HTTP error sending DM for movie '{actual_movie_title_to_display}' to user {user_id}: {ehttp}")
+                        except Exception as e_send_dm: # Catch other potential errors during send
+                            logger.error(f"MoviesCog: Error sending movie release DM for '{actual_movie_title_to_display}' (ID: {movie_tmdb_id}) to user {user_id}: {e_send_dm}", exc_info=True)
+            except Exception as e_user_loop: # More specific exception name
+                logger.error(f"MoviesCog: Error processing subscriptions for user ID string '{user_id_str}': {e_user_loop}", exc_info=True)
 
     @check_movie_releases.before_loop
     async def before_check_movie_releases(self):

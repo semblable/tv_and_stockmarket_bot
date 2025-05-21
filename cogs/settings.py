@@ -5,7 +5,7 @@ import re # For DND time validation
 from datetime import datetime, time # For DND time checking (though not used in this file directly yet)
 import logging # Import logging
 
-import data_manager
+from data_manager import DataManager # Import DataManager class
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ def create_settings_embed(ctx, user_preferences):
 class SettingsCog(commands.Cog, name="Settings"):
     def __init__(self, bot):
         self.bot = bot
+        self.db_manager = bot.db_manager # Get the DataManager instance from the bot
 
     @commands.group(name="settings", aliases=["prefs"], invoke_without_command=True)
     async def settings_group(self, ctx: commands.Context):
@@ -64,10 +65,10 @@ class SettingsCog(commands.Cog, name="Settings"):
         """Displays your current notification settings."""
         user_id = ctx.author.id
         preferences = {
-            "tv_show_dm_overview": data_manager.get_user_preference(user_id, "tv_show_dm_overview", default=True),
-            "dnd_enabled": data_manager.get_user_preference(user_id, "dnd_enabled", default=False),
-            "dnd_start_time": data_manager.get_user_preference(user_id, "dnd_start_time", default="22:00"),
-            "dnd_end_time": data_manager.get_user_preference(user_id, "dnd_end_time", default="07:00"),
+            "tv_show_dm_overview": self.db_manager.get_user_preference(user_id, "tv_show_dm_overview", default=True),
+            "dnd_enabled": self.db_manager.get_user_preference(user_id, "dnd_enabled", default=False),
+            "dnd_start_time": self.db_manager.get_user_preference(user_id, "dnd_start_time", default="22:00"),
+            "dnd_end_time": self.db_manager.get_user_preference(user_id, "dnd_end_time", default="07:00"),
         }
         embed = create_settings_embed(ctx, preferences)
         await ctx.send(embed=embed)
@@ -86,7 +87,7 @@ class SettingsCog(commands.Cog, name="Settings"):
             return
 
         preference_value = True if new_status_lower == "on" else False
-        data_manager.set_user_preference(user_id, "tv_show_dm_overview", preference_value)
+        self.db_manager.set_user_preference(user_id, "tv_show_dm_overview", preference_value)
         
         status_text = "✅ On" if preference_value else "❌ Off"
         await ctx.send(f"📺 TV Show DM Overview preference updated to: **{status_text}**.")
@@ -108,13 +109,13 @@ class SettingsCog(commands.Cog, name="Settings"):
         time_match = time_pattern.match(dnd_setting)
 
         if setting_lower == "on":
-            data_manager.set_user_preference(user_id, "dnd_enabled", True)
+            self.db_manager.set_user_preference(user_id, "dnd_enabled", True)
             # Ensure times exist if enabling DND globally
-            _ = data_manager.get_user_preference(user_id, "dnd_start_time", "22:00")
-            _ = data_manager.get_user_preference(user_id, "dnd_end_time", "07:00")
+            _ = self.db_manager.get_user_preference(user_id, "dnd_start_time", "22:00")
+            _ = self.db_manager.get_user_preference(user_id, "dnd_end_time", "07:00")
             await ctx.send("🌙 Do Not Disturb (DND) is now **Active**.")
         elif setting_lower == "off":
-            data_manager.set_user_preference(user_id, "dnd_enabled", False)
+            self.db_manager.set_user_preference(user_id, "dnd_enabled", False)
             await ctx.send("☀️ Do Not Disturb (DND) is now **Inactive**.")
         elif time_match:
             start_time_str = f"{time_match.group(1)}:{time_match.group(2)}"
@@ -124,9 +125,9 @@ class SettingsCog(commands.Cog, name="Settings"):
             # More complex validation (e.g. end time after start time, crossing midnight) can be added
             # For now, we store them as strings.
             
-            data_manager.set_user_preference(user_id, "dnd_start_time", start_time_str)
-            data_manager.set_user_preference(user_id, "dnd_end_time", end_time_str)
-            data_manager.set_user_preference(user_id, "dnd_enabled", True) # Enable DND when times are set
+            self.db_manager.set_user_preference(user_id, "dnd_start_time", start_time_str)
+            self.db_manager.set_user_preference(user_id, "dnd_end_time", end_time_str)
+            self.db_manager.set_user_preference(user_id, "dnd_enabled", True) # Enable DND when times are set
             await ctx.send(f"🌙 DND period set to **{start_time_str} - {end_time_str}** and DND is **Active**.")
         else:
             await ctx.send(
