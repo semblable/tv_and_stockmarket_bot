@@ -1,9 +1,10 @@
 # api_clients/tmdb_client.py
 
 import requests
-import config # To access TMDB_API_KEY
+import os # Added
+# import config # Removed
 
-TMDB_API_KEY = config.TMDB_API_KEY
+TMDB_API_KEY = os.getenv("TMDB_API_KEY") # Changed
 BASE_URL = "https://api.themoviedb.org/3"
 
 def search_tv_shows(query: str) -> list[dict]:
