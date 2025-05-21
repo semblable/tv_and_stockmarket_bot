@@ -13,8 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the contents of the dashboard directory into the container at /app
 COPY . /app/
 
-# Copy the api_clients directory into the container at /app/api_clients
-COPY api_clients/ /app/api_clients/
 
 # Add /app to PYTHONPATH to ensure modules in this directory are discoverable
 ENV PYTHONPATH="/app"
