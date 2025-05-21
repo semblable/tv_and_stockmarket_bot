@@ -14,8 +14,12 @@ class DataManager:
             raise ValueError("SQLite database path not set.")
 
         try:
+            # Log the database path being used
+            logger.info(f"Attempting to connect to database at: {SQLITE_DB_PATH}")
+
             # Ensure the directory for the SQLite database file exists
             db_dir = os.path.dirname(SQLITE_DB_PATH)
+            logger.info(f"Database directory derived as: {db_dir}") # Add this log
             if db_dir: # Check if db_dir is not empty (i.e., not just a filename in the current dir)
                 os.makedirs(db_dir, exist_ok=True)
                 logger.info(f"Ensured directory exists: {db_dir}")
