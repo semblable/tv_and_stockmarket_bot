@@ -3,6 +3,7 @@ from functools import wraps
 import requests
 from requests_oauthlib import OAuth2Session
 import os
+import logging # Added for enhanced logging
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import Config
@@ -11,6 +12,10 @@ from api_clients import tmdb_client # Import the TMDB client
 
 app = Flask(__name__)
 app.config.from_object(Config)
+
+# Configure basic logging
+logging.basicConfig(level=logging.INFO)
+app.logger.setLevel(logging.INFO) # Ensure app logger also respects this level
 
 # Apply ProxyFix to handle X-Forwarded-Proto and other headers correctly
 # This is important for OAuth2 callbacks when running behind a reverse proxy (like on Render)
@@ -50,38 +55,67 @@ def index():
 @app.route('/login')
 def login():
     if not Config.DISCORD_CLIENT_ID or not Config.DISCORD_REDIRECT_URI:
+        app.logger.error("OAuth2 Client ID or Redirect URI is not configured in .env.")
         return "OAuth2 Client ID or Redirect URI is not configured. Please check your .env file.", 500
     
+    app.logger.info(f"Login route: Config.DISCORD_REDIRECT_URI = {Config.DISCORD_REDIRECT_URI}")
+
     discord_oauth = OAuth2Session(
         Config.DISCORD_CLIENT_ID,
         redirect_uri=Config.DISCORD_REDIRECT_URI,
         scope=Config.DISCORD_SCOPES
     )
     authorization_url, state = discord_oauth.authorization_url(Config.DISCORD_AUTHORIZATION_URL)
+    app.logger.info(f"Login route: Generated authorization_url = {authorization_url}")
     session['oauth2_state'] = state
     return redirect(authorization_url)
 
 @app.route('/callback')
 def callback():
     if request.values.get('error'):
+        app.logger.error(f"OAuth callback error: {request.values['error']}")
         return request.values['error']
 
+    app.logger.info(f"Callback route: Received request.url = {request.url}")
+    app.logger.info(f"Callback route: request.base_url = {request.base_url}")
+    app.logger.info(f"Callback route: request.url_root = {request.url_root}")
+    app.logger.info(f"Callback route: Config.DISCORD_REDIRECT_URI = {Config.DISCORD_REDIRECT_URI}")
+
+
     if not Config.DISCORD_CLIENT_ID or not Config.DISCORD_CLIENT_SECRET or not Config.DISCORD_REDIRECT_URI:
+        app.logger.error("OAuth2 Client ID, Client Secret, or Redirect URI is not configured for token exchange.")
         return "OAuth2 Client ID, Client Secret, or Redirect URI is not configured.", 500
 
     discord_oauth = OAuth2Session(
         Config.DISCORD_CLIENT_ID,
         state=session.get('oauth2_state'),
-        redirect_uri=Config.DISCORD_REDIRECT_URI
+        redirect_uri=Config.DISCORD_REDIRECT_URI # This MUST match what Discord expects and what was used in authorization_url
     )
     
+    # Log the redirect_uri being used by OAuth2Session for fetching token
+    # This is not directly available from the object, but it's the one passed in constructor
+    app.logger.info(f"Callback route: OAuth2Session using redirect_uri = {Config.DISCORD_REDIRECT_URI} for fetch_token.")
+    
     try:
+        # It's crucial that `authorization_response` (request.url here) has the same scheme (http/https)
+        # and host as the `redirect_uri` registered with Discord and used in the initial auth request.
+        # ProxyFix should help ensure `request.url` is correct (e.g. https if behind an SSL-terminating proxy).
+        app.logger.info(f"Callback route: Attempting to fetch token with authorization_response = {request.url}")
         token = discord_oauth.fetch_token(
             Config.DISCORD_TOKEN_URL,
             client_secret=Config.DISCORD_CLIENT_SECRET,
-            authorization_response=request.url
+            authorization_response=request.url # This must be the full callback URL received from Discord
         )
     except Exception as e:
+        app.logger.error(f"Error fetching token: {e}")
+        app.logger.error(f"Details for token fetch error: Request URL was {request.url}, State was {session.get('oauth2_state')}")
+        # Check if the error message itself contains clues about the redirect_uri mismatch
+        if "redirect_uri_mismatch" in str(e).lower() or "invalid_grant" in str(e).lower():
+            app.logger.error("This error often indicates a redirect_uri mismatch. "
+                             f"The redirect_uri used by the app here is '{Config.DISCORD_REDIRECT_URI}'. "
+                             f"The URL Discord redirected to was '{request.url}'. "
+                             "Ensure the one in your Discord Developer Portal EXACTLY matches "
+                             "the scheme, host, port (if non-standard), and path.")
         return f"Error fetching token: {e}", 500
 
     session['oauth2_token'] = token
@@ -317,5 +351,7 @@ if __name__ == '__main__':
     debug_mode_str = os.environ.get('FLASK_DEBUG', os.environ.get('DEBUG', 'False'))
     debug_mode = debug_mode_str.lower() in ['true', '1', 't']
 
-    print(f"Starting Flask app on host 0.0.0.0, port {port}, debug mode: {debug_mode}")
+    app.logger.info(f"Starting Flask app on host 0.0.0.0, port {port}, debug mode: {debug_mode}")
+    app.logger.info(f"Loaded Config.DISCORD_REDIRECT_URI = {Config.DISCORD_REDIRECT_URI}")
+    app.logger.info(f"OAUTHLIB_INSECURE_TRANSPORT is set to: {os.environ.get('OAUTHLIB_INSECURE_TRANSPORT')}")
     app.run(host='0.0.0.0', port=port, debug=debug_mode)
