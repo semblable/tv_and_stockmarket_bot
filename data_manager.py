@@ -14,6 +14,12 @@ class DataManager:
             raise ValueError("SQLite database path not set.")
 
         try:
+            # Ensure the directory for the SQLite database file exists
+            db_dir = os.path.dirname(SQLITE_DB_PATH)
+            if db_dir: # Check if db_dir is not empty (i.e., not just a filename in the current dir)
+                os.makedirs(db_dir, exist_ok=True)
+                logger.info(f"Ensured directory exists: {db_dir}")
+
             # Connect to SQLite database (creates the file if it doesn't exist)
             self.conn = sqlite3.connect(SQLITE_DB_PATH)
             self.conn.row_factory = sqlite3.Row # Access columns by name
@@ -22,6 +28,9 @@ class DataManager:
         except sqlite3.Error as e:
             logger.error(f"Failed to connect to SQLite Database: {e}")
             raise ConnectionError(f"Failed to connect to SQLite Database: {e}")
+        except OSError as e: # Catch potential errors from os.makedirs
+            logger.error(f"Failed to create directory for SQLite database: {e}")
+            raise ConnectionError(f"Failed to create directory for SQLite database: {e}")
 
     def _get_connection(self):
         """Returns the active connection."""
