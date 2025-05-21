@@ -78,10 +78,11 @@ def require_internal_api_key(f):
 # Ensure Oracle credentials are loaded by config.py before this.
 try:
     db_manager = DataManager()
+    bot.db_manager = db_manager # Assign DataManager instance to the bot object
     logger.info("DataManager initialized successfully.")
 except Exception as e:
     logger.critical(f"CRITICAL: Failed to initialize DataManager: {e}", exc_info=True)
-    db_manager = None # Ensure it's None if initialization fails
+    bot.db_manager = None # Ensure it's None if initialization fails
     # Depending on the bot's design, you might want to exit or prevent Flask/bot from starting.
     # For now, it will log critically and proceed, but API endpoints will likely fail.
 
@@ -89,13 +90,14 @@ except Exception as e:
 @flask_app.route('/api/internal/user/<discord_user_id>/tv_subscriptions', methods=['GET'])
 @require_internal_api_key
 def get_tv_subscriptions(discord_user_id):
-    if not db_manager:
+    # Access db_manager via bot object
+    if not bot.db_manager:
         return jsonify({"error": "Database manager not available"}), 503
     flask_app.logger.info(f"[BOT API LOGGER] Attempting to get TV subscriptions for discord_user_id: {discord_user_id}")
     try:
         user_id = int(discord_user_id)
         flask_app.logger.info(f"[BOT API LOGGER] Converted discord_user_id to int user_id: {user_id}")
-        subscriptions = db_manager.get_user_tv_subscriptions(user_id) # Use instance
+        subscriptions = bot.db_manager.get_user_tv_subscriptions(user_id) # Use instance via bot
         flask_app.logger.info(f"[BOT API LOGGER] Data manager returned TV subscriptions for user_id {user_id}: {subscriptions}")
         # get_user_tv_subscriptions now returns a list, potentially empty. No need to check for None.
         return jsonify(subscriptions), 200
@@ -109,7 +111,8 @@ def get_tv_subscriptions(discord_user_id):
 @flask_app.route('/api/internal/user/<discord_user_id>/tv_show', methods=['POST'])
 @require_internal_api_key
 def add_user_tv_show(discord_user_id):
-    if not db_manager:
+    # Access db_manager via bot object
+    if not bot.db_manager:
         return jsonify({"error": "Database manager not available"}), 503
     flask_app.logger.info(f"[BOT API LOGGER] Attempting to add TV show for discord_user_id: {discord_user_id}")
     try:
@@ -132,7 +135,7 @@ def add_user_tv_show(discord_user_id):
         return jsonify({"error": "Invalid payload: missing or incorrect type for tmdb_id, title, or poster_path"}), 400
 
     flask_app.logger.info(f"[BOT API LOGGER] Calling db_manager.add_tv_show_subscription for user_id {user_id}, tmdb_id {tmdb_id}")
-    success = db_manager.add_tv_show_subscription(user_id, tmdb_id, title, poster_path) # Use instance
+    success = bot.db_manager.add_tv_show_subscription(user_id, tmdb_id, title, poster_path) # Use instance via bot
 
     if success:
         flask_app.logger.info(f"[BOT API LOGGER] Successfully added/found TV show (tmdb_id: {tmdb_id}) for user_id {user_id}.")
@@ -144,7 +147,8 @@ def add_user_tv_show(discord_user_id):
 @flask_app.route('/api/internal/user/<discord_user_id>/tv_show/<int:tmdb_id>', methods=['DELETE'])
 @require_internal_api_key
 def remove_user_tv_show(discord_user_id, tmdb_id):
-    if not db_manager:
+    # Access db_manager via bot object
+    if not bot.db_manager:
         return jsonify({"error": "Database manager not available"}), 503
     flask_app.logger.info(f"[BOT API LOGGER] Attempting to remove TV show tmdb_id: {tmdb_id} for discord_user_id: {discord_user_id}")
     try:
@@ -155,7 +159,7 @@ def remove_user_tv_show(discord_user_id, tmdb_id):
 
     try:
         flask_app.logger.info(f"[BOT API LOGGER] Calling db_manager.remove_tv_show_subscription for user_id {user_id}, tmdb_id {tmdb_id}")
-        removed_successfully = db_manager.remove_tv_show_subscription(user_id, tmdb_id) # Use instance
+        removed_successfully = bot.db_manager.remove_tv_show_subscription(user_id, tmdb_id) # Use instance via bot
 
         if removed_successfully: # remove_tv_show_subscription returns True on successful commit
             # To check if a row was actually deleted, the DataManager method would need to return rowcount or similar
@@ -165,7 +169,7 @@ def remove_user_tv_show(discord_user_id, tmdb_id):
             # This implies the DB operation failed (e.g. connection issue during commit)
             flask_app.logger.warning(f"[BOT API LOGGER] db_manager.remove_tv_show_subscription returned False for user_id {user_id}, tmdb_id {tmdb_id}.")
             return jsonify({"error": "Failed to remove TV show due to database operation issue"}), 500
-            
+
     except Exception as e:
         flask_app.logger.error(f"[BOT API LOGGER] Exception during removal of TV show (tmdb_id: {tmdb_id}) for user_id {user_id}: {e}", exc_info=True)
         return jsonify({"error": "Failed to remove TV show"}), 500
@@ -173,7 +177,8 @@ def remove_user_tv_show(discord_user_id, tmdb_id):
 @flask_app.route('/api/internal/user/<discord_user_id>/movie', methods=['POST'])
 @require_internal_api_key
 def add_user_movie(discord_user_id):
-    if not db_manager:
+    # Access db_manager via bot object
+    if not bot.db_manager:
         return jsonify({"error": "Database manager not available"}), 503
     flask_app.logger.info(f"[BOT API LOGGER] Attempting to add movie for discord_user_id: {discord_user_id}")
     try:
@@ -196,7 +201,7 @@ def add_user_movie(discord_user_id):
         return jsonify({"error": "Invalid payload: missing or incorrect type for tmdb_id, title, or poster_path"}), 400
 
     flask_app.logger.info(f"[BOT API LOGGER] Calling db_manager.add_movie_subscription for user_id {user_id}, tmdb_id {tmdb_id}")
-    success = db_manager.add_movie_subscription(user_id, tmdb_id, title, poster_path) # Use instance
+    success = bot.db_manager.add_movie_subscription(user_id, tmdb_id, title, poster_path) # Use instance via bot
 
     if success:
         flask_app.logger.info(f"[BOT API LOGGER] Successfully added/found movie (tmdb_id: {tmdb_id}) for user_id {user_id}.")
@@ -208,11 +213,12 @@ def add_user_movie(discord_user_id):
 @flask_app.route('/api/internal/user/<discord_user_id>/movie_subscriptions', methods=['GET'])
 @require_internal_api_key
 def get_movie_subscriptions(discord_user_id):
-    if not db_manager:
+    # Access db_manager via bot object
+    if not bot.db_manager:
         return jsonify({"error": "Database manager not available"}), 503
     try:
         user_id = int(discord_user_id)
-        subscriptions = db_manager.get_user_movie_subscriptions(user_id) # Use instance
+        subscriptions = bot.db_manager.get_user_movie_subscriptions(user_id) # Use instance via bot
         return jsonify(subscriptions), 200
     except ValueError:
         return jsonify({"error": "Invalid user ID format"}), 400
@@ -223,11 +229,12 @@ def get_movie_subscriptions(discord_user_id):
 @flask_app.route('/api/internal/user/<discord_user_id>/tracked_stocks', methods=['GET'])
 @require_internal_api_key
 def get_tracked_stocks(discord_user_id):
-    if not db_manager:
+    # Access db_manager via bot object
+    if not bot.db_manager:
         return jsonify({"error": "Database manager not available"}), 503
     try:
         user_id = int(discord_user_id)
-        stocks = db_manager.get_user_tracked_stocks(user_id) # Use instance
+        stocks = bot.db_manager.get_user_tracked_stocks(user_id) # Use instance via bot
         return jsonify(stocks), 200
     except ValueError:
         return jsonify({"error": "Invalid user ID format"}), 400
@@ -238,11 +245,12 @@ def get_tracked_stocks(discord_user_id):
 @flask_app.route('/api/internal/user/<discord_user_id>/stock_alerts', methods=['GET'])
 @require_internal_api_key
 def get_stock_alerts(discord_user_id):
-    if not db_manager:
+    # Access db_manager via bot object
+    if not bot.db_manager:
         return jsonify({"error": "Database manager not available"}), 503
     try:
         user_id = int(discord_user_id)
-        alerts = db_manager.get_user_all_stock_alerts(user_id) # Use instance
+        alerts = bot.db_manager.get_user_all_stock_alerts(user_id) # Use instance via bot
         return jsonify(alerts), 200
     except ValueError:
         return jsonify({"error": "Invalid user ID format"}), 400
@@ -253,11 +261,12 @@ def get_stock_alerts(discord_user_id):
 @flask_app.route('/api/internal/user/<discord_user_id>/settings', methods=['GET'])
 @require_internal_api_key
 def get_user_settings(discord_user_id):
-    if not db_manager:
+    # Access db_manager via bot object
+    if not bot.db_manager:
         return jsonify({"error": "Database manager not available"}), 503
     try:
         user_id = int(discord_user_id)
-        settings = db_manager.get_user_all_preferences(user_id) # Use instance
+        settings = bot.db_manager.get_user_all_preferences(user_id) # Use instance via bot
         return jsonify(settings), 200
     except ValueError:
         return jsonify({"error": "Invalid user ID format"}), 400
