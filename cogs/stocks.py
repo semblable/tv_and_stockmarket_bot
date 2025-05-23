@@ -919,15 +919,29 @@ class Stocks(commands.Cog):
             if api_call_count > 0:
                 await asyncio.sleep(13) # Alpha Vantage: ~5 calls/min, so ~12s interval + buffer
 
+            # Try Alpha Vantage first, then fallback to Yahoo Finance (like stock_price command)
             current_price_data = alpha_vantage_client.get_stock_price(symbol)
+            data_source = "Alpha Vantage"
             api_call_count += 1
 
+            # If Alpha Vantage fails, try Yahoo Finance as fallback
+            if not current_price_data or "error" in current_price_data:
+                if current_price_data and current_price_data.get("error") == "api_limit":
+                    logger.info(f"Portfolio: Alpha Vantage API limit for {symbol}. Falling back to Yahoo.")
+                else:
+                    logger.info(f"Portfolio: Alpha Vantage failed for {symbol}. Falling back to Yahoo.")
+                
+                current_price_data = yahoo_finance_client.get_stock_price(symbol)
+                data_source = "Yahoo Finance"
+
             current_price = None
+            currency = "USD"  # Default currency
             api_error_for_stock = False
 
             if current_price_data and "05. price" in current_price_data:
                 try:
                     current_price = float(current_price_data["05. price"])
+                    currency = current_price_data.get('currency', 'USD')  # Get actual currency
                 except (ValueError, TypeError):
                     logger.error(f"Portfolio: Could not parse current price for {symbol}. Data: {current_price_data}")
                     api_error_for_stock = True
@@ -939,6 +953,17 @@ class Stocks(commands.Cog):
                     error_info = "No data received (possible network issue or invalid symbol)"
                 logger.warning(f"Portfolio: Could not fetch price for {symbol}. Info: {error_info}")
                 api_error_for_stock = True
+
+            # Currency symbol mapping
+            currency_symbols = {
+                'USD': '$',
+                'PLN': 'zł',
+                'EUR': '€',
+                'GBP': '£',
+                'CAD': 'C$',
+                'JPY': '¥'
+            }
+            currency_symbol = currency_symbols.get(currency, currency)
 
             cost_basis = quantity * purchase_price
             market_value = 0.0 # Ensure float
@@ -967,10 +992,13 @@ class Stocks(commands.Cog):
                 "quantity": quantity,
                 "purchase_price": purchase_price,
                 "current_price": current_price,
+                "currency": currency,
+                "currency_symbol": currency_symbol,
                 "cost_basis": cost_basis,
                 "market_value": market_value,
                 "gain_loss": gain_loss,
-                "gain_loss_pct_str": gain_loss_pct_str
+                "gain_loss_pct_str": gain_loss_pct_str,
+                "data_source": data_source
             })
 
         overall_gain_loss = overall_market_value - overall_cost_basis
@@ -991,15 +1019,36 @@ class Stocks(commands.Cog):
 
         embed.color = summary_color
 
-        overall_market_value_display = f"${overall_market_value:,.2f}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
-        overall_gain_loss_display = f"${overall_gain_loss:,.2f}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
-
+        # Check if all stocks use the same currency for cleaner summary display
+        currencies_used = set(item.get('currency', 'USD') for item in individual_holdings_details if isinstance(item.get('current_price'), (int, float)))
+        mixed_currencies = len(currencies_used) > 1
+        
+        if mixed_currencies:
+            # Mixed currencies - show totals in respective currencies or USD equivalent note
+            overall_market_value_display = f"${overall_market_value:,.2f}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
+            overall_gain_loss_display = f"${overall_gain_loss:,.2f}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
+            currency_note = " (mixed currencies, totals approximate)"
+        else:
+            # Single currency - use appropriate symbol
+            single_currency = list(currencies_used)[0] if currencies_used else 'USD'
+            currency_symbols = {'USD': '$', 'PLN': 'zł', 'EUR': '€', 'GBP': '£', 'CAD': 'C$', 'JPY': '¥'}
+            summary_currency_symbol = currency_symbols.get(single_currency, single_currency)
+            
+            if single_currency == 'PLN':
+                overall_market_value_display = f"{overall_market_value:,.2f} {summary_currency_symbol}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
+                overall_gain_loss_display = f"{overall_gain_loss:,.2f} {summary_currency_symbol}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
+                cost_basis_display = f"{overall_cost_basis:,.2f} {summary_currency_symbol}"
+            else:
+                overall_market_value_display = f"{summary_currency_symbol}{overall_market_value:,.2f}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
+                overall_gain_loss_display = f"{summary_currency_symbol}{overall_gain_loss:,.2f}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
+                cost_basis_display = f"{summary_currency_symbol}{overall_cost_basis:,.2f}"
+            currency_note = ""
 
         embed.add_field(
             name="📈 Overall Portfolio Summary",
             value=(
-                f"**Total Market Value:** {overall_market_value_display}\n"
-                f"**Total Cost Basis:** ${overall_cost_basis:,.2f}\n"
+                f"**Total Market Value:** {overall_market_value_display}{currency_note}\n"
+                f"**Total Cost Basis:** {cost_basis_display if not mixed_currencies else f'${overall_cost_basis:,.2f}'}\n"
                 f"**Total Gain/Loss:** {overall_gain_loss_display} ({overall_gain_loss_pct_str})"
             ),
             inline=False
@@ -1009,9 +1058,41 @@ class Stocks(commands.Cog):
         for item in individual_holdings_details:
             symbol_header = f"--- **{item['symbol']}** ---"
             
-            current_price_display = f"${item['current_price']:,.2f}" if isinstance(item['current_price'], (int, float)) else str(item['current_price'])
-            market_value_display = f"${item['market_value']:,.2f}" if isinstance(item['market_value'], (int, float)) else str(item['market_value'])
-            gain_loss_display_val = f"${item['gain_loss']:+,.2f}" if isinstance(item['gain_loss'], (int, float)) else str(item['gain_loss'])
+            # Use the correct currency for each stock
+            currency_symbol = item.get('currency_symbol', '$')
+            
+            # Format prices with appropriate currency
+            if isinstance(item['current_price'], (int, float)):
+                if item.get('currency') == 'PLN':
+                    current_price_display = f"{item['current_price']:,.2f} {currency_symbol}"
+                else:
+                    current_price_display = f"{currency_symbol}{item['current_price']:,.2f}"
+            else:
+                current_price_display = str(item['current_price'])
+            
+            if isinstance(item['market_value'], (int, float)):
+                if item.get('currency') == 'PLN':
+                    market_value_display = f"{item['market_value']:,.2f} {currency_symbol}"
+                else:
+                    market_value_display = f"{currency_symbol}{item['market_value']:,.2f}"
+            else:
+                market_value_display = str(item['market_value'])
+            
+            if isinstance(item['gain_loss'], (int, float)):
+                if item.get('currency') == 'PLN':
+                    gain_loss_display_val = f"{item['gain_loss']:+,.2f} {currency_symbol}"
+                else:
+                    gain_loss_display_val = f"{currency_symbol}{item['gain_loss']:+,.2f}"
+            else:
+                gain_loss_display_val = str(item['gain_loss'])
+
+            # Format purchase price and cost basis (these are stored in original currency)
+            if item.get('currency') == 'PLN':
+                purchase_price_display = f"{item['purchase_price']:,.2f} {currency_symbol}"
+                cost_basis_display = f"{item['cost_basis']:,.2f} {currency_symbol}"
+            else:
+                purchase_price_display = f"{currency_symbol}{item['purchase_price']:,.2f}"
+                cost_basis_display = f"{currency_symbol}{item['cost_basis']:,.2f}"
 
             gain_loss_emoji = ""
             if isinstance(item['gain_loss'], (int, float)):
@@ -1020,8 +1101,8 @@ class Stocks(commands.Cog):
             
             details = (
                 f"{symbol_header}\n"
-                f"Quantity: `{item['quantity']}` @ Avg Cost: `${item['purchase_price']:,.2f}`\n"
-                f"Cost Basis: `${item['cost_basis']:,.2f}`\n"
+                f"Quantity: `{item['quantity']}` @ Avg Cost: `{purchase_price_display}`\n"
+                f"Cost Basis: `{cost_basis_display}`\n"
                 f"Current Price: `{current_price_display}`\n"
                 f"Market Value: `{market_value_display}`\n"
                 f"Gain/Loss: {gain_loss_emoji}`{gain_loss_display_val} ({item['gain_loss_pct_str']})`"
@@ -1061,6 +1142,14 @@ class Stocks(commands.Cog):
                 pass
             except discord.HTTPException as e:
                 logger.warning(f"Could not delete portfolio status message: {e}")
+
+        # Add footer indicating data sources
+        data_sources_used = set(item.get('data_source', 'Alpha Vantage') for item in individual_holdings_details)
+        if len(data_sources_used) > 1:
+            footer_text = f"Data provided by {' & '.join(sorted(data_sources_used))}. Prices may be delayed."
+        else:
+            footer_text = f"Data provided by {list(data_sources_used)[0] if data_sources_used else 'Alpha Vantage'}. Prices may be delayed."
+        embed.set_footer(text=footer_text)
 
         await ctx.send(embed=embed, ephemeral=False)
 
