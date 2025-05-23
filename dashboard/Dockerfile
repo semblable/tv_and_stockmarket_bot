@@ -22,8 +22,8 @@ COPY api_clients/ /app/api_clients/
 # Add /app to PYTHONPATH to ensure modules in this directory are discoverable
 ENV PYTHONPATH="/app"
 
-# Expose port 8050
-EXPOSE 8050
+# Expose port 8000 (to match docker run port mapping)
+EXPOSE 8000
 
-# Run gunicorn when the container launches
-CMD ["gunicorn", "--bind", "0.0.0.0:8050", "app:app"]
+# Run gunicorn when the container launches (bind to port 8000)
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]

@@ -216,7 +216,7 @@ class Stocks(commands.Cog):
         if not price_data:
             logger.error(f"[STOCK_PRICE_DEBUG] All APIs failed for {upper_symbol}.")
             embed = discord.Embed(
-                title="❌ Stock Data Error",
+                title="❌ Stock Not Found",
                 description=f"Could not retrieve data for **{upper_symbol}** from Alpha Vantage or Yahoo Finance.\n\n" +
                            f"Please check the symbol and try again.\n\n" +
                            f"💡 **Tip**: For Polish stocks, try adding `.WA` suffix (e.g., `{upper_symbol}.WA`)",
@@ -1133,6 +1133,132 @@ class Stocks(commands.Cog):
             return True
             
         return False
+
+    @commands.command(name="stock_alert_set", aliases=["alert_set"])
+    async def stock_alert_set(self, ctx: commands.Context, symbol: str, direction: str, target: float):
+        """
+        Simple command to set a stock price alert.
+        
+        Usage:
+        !stock_alert_set ASML below 700
+        !stock_alert_set AAPL above 150
+        !alert_set TSLA below 200
+        """
+        user_id = ctx.author.id
+        symbol_upper = symbol.upper()
+        direction_lower = direction.lower()
+        
+        # Check if stock is tracked
+        tracked_stocks_list = self.db_manager.get_user_tracked_stocks(user_id)
+        if not any(s['symbol'] == symbol_upper for s in tracked_stocks_list):
+            await ctx.send(f"❌ You are not tracking {symbol_upper}. Please use `!track_stock {symbol_upper}` first.")
+            return
+            
+        # Validate direction
+        if direction_lower not in ['above', 'below']:
+            await ctx.send(f"❌ Direction must be 'above' or 'below', not '{direction}'.")
+            return
+            
+        # Validate target price
+        if target <= 0:
+            await ctx.send(f"❌ Target price must be positive, not {target}.")
+            return
+            
+        # Set the alert
+        try:
+            if direction_lower == 'above':
+                success = self.db_manager.add_stock_alert(
+                    user_id, symbol_upper,
+                    target_above=target, target_below=None,
+                    dpc_above_target=None, dpc_below_target=None,
+                    clear_above=False, clear_below=False,
+                    clear_dpc_above=False, clear_dpc_below=False
+                )
+                if success:
+                    await ctx.send(f"✅ Alert set for {symbol_upper}: notify when price goes **above ${target:.2f}**")
+                else:
+                    await ctx.send(f"❌ Failed to set alert for {symbol_upper}. It might already be set to this value.")
+            else:  # below
+                success = self.db_manager.add_stock_alert(
+                    user_id, symbol_upper,
+                    target_above=None, target_below=target,
+                    dpc_above_target=None, dpc_below_target=None,
+                    clear_above=False, clear_below=False,
+                    clear_dpc_above=False, clear_dpc_below=False
+                )
+                if success:
+                    await ctx.send(f"✅ Alert set for {symbol_upper}: notify when price goes **below ${target:.2f}**")
+                else:
+                    await ctx.send(f"❌ Failed to set alert for {symbol_upper}. It might already be set to this value.")
+                    
+        except Exception as e:
+            await ctx.send(f"❌ Error setting alert: {str(e)}")
+
+    @commands.command(name="stock_alert_clear", aliases=["alert_clear"])
+    async def stock_alert_clear(self, ctx: commands.Context, symbol: str, direction: str = "all"):
+        """
+        Clear stock alerts.
+        
+        Usage:
+        !stock_alert_clear ASML below
+        !stock_alert_clear AAPL above  
+        !stock_alert_clear TSLA all
+        """
+        user_id = ctx.author.id
+        symbol_upper = symbol.upper()
+        direction_lower = direction.lower()
+        
+        # Check if stock is tracked
+        tracked_stocks_list = self.db_manager.get_user_tracked_stocks(user_id)
+        if not any(s['symbol'] == symbol_upper for s in tracked_stocks_list):
+            await ctx.send(f"❌ You are not tracking {symbol_upper}.")
+            return
+            
+        # Validate direction
+        if direction_lower not in ['above', 'below', 'all']:
+            await ctx.send(f"❌ Direction must be 'above', 'below', or 'all', not '{direction}'.")
+            return
+            
+        try:
+            if direction_lower == 'all':
+                success = self.db_manager.add_stock_alert(
+                    user_id, symbol_upper,
+                    target_above=None, target_below=None,
+                    dpc_above_target=None, dpc_below_target=None,
+                    clear_above=True, clear_below=True,
+                    clear_dpc_above=True, clear_dpc_below=True
+                )
+                if success:
+                    await ctx.send(f"✅ All alerts cleared for {symbol_upper}")
+                else:
+                    await ctx.send(f"❌ Failed to clear alerts for {symbol_upper}")
+            elif direction_lower == 'above':
+                success = self.db_manager.add_stock_alert(
+                    user_id, symbol_upper,
+                    target_above=None, target_below=None,
+                    dpc_above_target=None, dpc_below_target=None,
+                    clear_above=True, clear_below=False,
+                    clear_dpc_above=False, clear_dpc_below=False
+                )
+                if success:
+                    await ctx.send(f"✅ 'Above' alert cleared for {symbol_upper}")
+                else:
+                    await ctx.send(f"❌ Failed to clear 'above' alert for {symbol_upper}")
+            else:  # below
+                success = self.db_manager.add_stock_alert(
+                    user_id, symbol_upper,
+                    target_above=None, target_below=None,
+                    dpc_above_target=None, dpc_below_target=None,
+                    clear_above=False, clear_below=True,
+                    clear_dpc_above=False, clear_dpc_below=False
+                )
+                if success:
+                    await ctx.send(f"✅ 'Below' alert cleared for {symbol_upper}")
+                else:
+                    await ctx.send(f"❌ Failed to clear 'below' alert for {symbol_upper}")
+                    
+        except Exception as e:
+            await ctx.send(f"❌ Error clearing alert: {str(e)}")
 
 async def setup(bot):
     await bot.add_cog(Stocks(bot))
