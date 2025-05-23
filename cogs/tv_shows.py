@@ -379,22 +379,17 @@ Usage examples:
         )
         embed.set_footer(text="Information from TMDB.")
 
-        if not subscriptions: # This check is technically redundant due to the one above, but good for safety.
-            embed.description = "You are not subscribed to any TV shows yet."
-            await self.send_response(ctx, embed=embed, ephemeral=True)
-            return
-        
-        # Limit the number of shows displayed directly in one embed to avoid hitting limits
-        # For more shows, pagination would be needed, but for now, we'll list up to a certain number.
-        # Discord embed field limit is 25. Value limit is 1024 chars. Total char limit 6000.
-        max_shows_in_embed = 10
+        # Limit the number of shows to process to prevent timeouts
+        max_shows_to_process = 5  # Reduced from 10 to 5 for better performance
         shows_processed_count = 0
+        shows_with_errors = 0
 
         for sub in subscriptions:
-            if shows_processed_count >= max_shows_in_embed:
+            if shows_processed_count >= max_shows_to_process:
+                remaining_count = len(subscriptions) - max_shows_to_process
                 embed.add_field(
-                    name="More Shows...",
-                    value=f"You have {len(subscriptions) - max_shows_in_embed} more subscriptions not shown here.",
+                    name="📋 More Shows",
+                    value=f"You have {remaining_count} more subscriptions. Use this command again to see updated details for all shows.",
                     inline=False
                 )
                 break
@@ -404,11 +399,11 @@ Usage examples:
             show_name = sub['title']
             poster_path = sub.get('poster_path')
             
-            next_episode_str = "🗓️ Next: Not available"
+            next_episode_str = "🗓️ Next: Loading..."
             last_notified_str = "🔔 Notified: Never"
 
             try:
-                # Fetch show details for next_episode_to_air from TMDB
+                # Add timeout and error handling for TMDB API calls
                 show_details_tmdb = tmdb_client.get_show_details(show_id)
 
                 if show_details_tmdb and show_details_tmdb.get('next_episode_to_air'):
@@ -425,11 +420,13 @@ Usage examples:
                             pass
                     next_episode_str = f"🗓️ Next: S{ep_season:02d}E{ep_num:02d} - {ep_name} ({ep_air_date})"
                 else:
-                    next_episode_str = "🗓️ Next: No upcoming episode data."
+                    next_episode_str = "🗓️ Next: No upcoming episode data"
 
             except Exception as e:
                 print(f"Error fetching TMDB details for show ID {show_id} in my_tv_shows: {e}")
-                next_episode_str = "🗓️ Next: Error fetching data."
+                next_episode_str = "🗓️ Next: ⚠️ Error loading data"
+                shows_with_errors += 1
+                # Continue processing other shows even if one fails
 
             # Get last notified episode details from stored data (which is now JSON in CLOB)
             last_notified_details = sub.get('last_notified_episode_details')
@@ -441,40 +438,38 @@ Usage examples:
             
             field_value = f"{next_episode_str}\n{last_notified_str}"
             
-            # Add thumbnail if poster_path is available
-            if poster_path:
-                 # We can't add a thumbnail directly to a field.
-                 # Let's just add the field with a link.
-                 tmdb_link = f"https://www.themoviedb.org/tv/{show_id}"
-                 field_value_with_link = f"{field_value}\n[View on TMDB]({tmdb_link})"
-                 embed.add_field(name=f"📺 {show_name}", value=field_value_with_link, inline=False)
-
-            else: # No poster path
-                 tmdb_link = f"https://www.themoviedb.org/tv/{show_id}"
-                 field_value_with_link = f"{field_value}\n[View on TMDB]({tmdb_link})"
-                 embed.add_field(name=f"📺 {show_name}", value=field_value_with_link, inline=False)
+            # Add TMDB link
+            tmdb_link = f"https://www.themoviedb.org/tv/{show_id}"
+            field_value_with_link = f"{field_value}\n[View on TMDB]({tmdb_link})"
+            embed.add_field(name=f"📺 {show_name}", value=field_value_with_link, inline=False)
 
             shows_processed_count += 1
 
-        if not embed.fields and len(subscriptions) > 0 : # Fallback if loop didn't add fields but subs exist
-             embed.description = "Could not retrieve detailed information for your subscriptions."
-        elif not embed.fields and not subscriptions: # Should be caught earlier
-             embed.description = "You are not subscribed to any TV shows yet."
+        # Add footer note if there were errors
+        if shows_with_errors > 0:
+            embed.add_field(
+                name="⚠️ Notice",
+                value=f"Had trouble loading data for {shows_with_errors} show(s). Try again later if some information is missing.",
+                inline=False
+            )
 
+        if not embed.fields and len(subscriptions) > 0:
+            embed.description = "Could not retrieve information for your subscriptions. Please try again later."
+        elif not embed.fields and not subscriptions:
+            embed.description = "You are not subscribed to any TV shows yet."
 
         try:
             await self.send_response(ctx, embed=embed, ephemeral=True)
         except discord.HTTPException as e:
             print(f"Error sending embed for my_tv_shows for user {user_id}: {e}")
-            # Basic text fallback if embed fails (e.g., too long, though field limiting should help)
-            # This fallback will be very basic and lose formatting.
+            # Basic text fallback if embed fails
             fallback_text = f"**Your Subscribed TV Shows ({len(subscriptions)}):**\n"
             if subscriptions:
-                for i, sub_item in enumerate(subscriptions[:5]): # Limit fallback text too
-                    fallback_text += f"- {sub_item['show_name']}\n"
+                for i, sub_item in enumerate(subscriptions[:5]):
+                    fallback_text += f"- {sub_item['title']}\n"
                 if len(subscriptions) > 5:
                     fallback_text += f"...and {len(subscriptions)-5} more."
-            else: # Should not be reached if initial checks are correct
+            else:
                 fallback_text = "You are not subscribed to any TV shows."
             
             if len(fallback_text) > 2000:
