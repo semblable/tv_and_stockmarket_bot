@@ -110,7 +110,7 @@ Usage examples:
                        str(reaction.emoji) in NUMBER_EMOJIS[:len(display_results)]
 
             try:
-                reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check) # 60s timeout
+                reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
                 
                 # Determine choice from reaction
                 choice_idx = -1
@@ -410,7 +410,6 @@ Usage examples:
             try:
                 # Fetch show details for next_episode_to_air from TMDB
                 show_details_tmdb = tmdb_client.get_show_details(show_id)
-                await asyncio.sleep(0.2)
 
                 if show_details_tmdb and show_details_tmdb.get('next_episode_to_air'):
                     next_ep = show_details_tmdb['next_episode_to_air']
@@ -739,13 +738,6 @@ Usage examples:
 
             try:
                 show_details_tmdb = tmdb_client.get_show_details(show_id)
-                # TMDB rate limits are typically around 40 requests per 10 seconds.
-                # A small delay helps, especially if a user has many shows.
-                if sub_idx > 0 and sub_idx % 5 == 0: # Add a slightly longer delay every 5 calls
-                    await asyncio.sleep(0.5)
-                else:
-                    await asyncio.sleep(0.25)
-
 
                 if show_details_tmdb and show_details_tmdb.get('next_episode_to_air'):
                     next_ep = show_details_tmdb['next_episode_to_air']
@@ -957,7 +949,6 @@ Usage examples:
                     # Fetch full show details, which includes 'next_episode_to_air'
                     # and 'last_episode_to_air'
                     show_details_tmdb = tmdb_client.get_show_details(show_id)
-                    await asyncio.sleep(0.3) # API rate limiting kindness
 
                     if not show_details_tmdb:
                         print(f"Could not fetch details for show ID {show_id} ({show_name_stored}). Skipping.")
