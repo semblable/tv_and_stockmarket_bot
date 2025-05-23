@@ -355,13 +355,76 @@ async def on_ready():
     Called when the bot is successfully logged in and ready.
     """
     logger.info(f"Bot is ready and logged in as {bot.user}")
+    logger.info(f"Bot is in {len(bot.guilds)} guild(s)")
+    
+    # Log bot's current permissions to check for applications.commands scope
     try:
-        # Sync the application commands (slash commands) to Discord
-        logger.info("Attempting to sync application commands...")
-        synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} command(s)")
+        app_info = await bot.application_info()
+        logger.info(f"Bot application ID: {app_info.id}")
+        logger.info(f"Bot owner: {app_info.owner}")
+        
+        # Check bot permissions in each guild
+        for guild in bot.guilds:
+            logger.info(f"Guild: {guild.name} (ID: {guild.id}) - Members: {guild.member_count}")
+            bot_member = guild.get_member(bot.user.id)
+            if bot_member:
+                perms = bot_member.guild_permissions
+                logger.info(f"  Bot permissions in {guild.name}: Administrator: {perms.administrator}, Manage Guild: {perms.manage_guild}")
+            else:
+                logger.warning(f"  Bot member not found in {guild.name}")
     except Exception as e:
-        logger.error("Error syncing application commands:", exc_info=True)
+        logger.error(f"Error checking bot application info: {e}")
+
+    # Sync commands
+    commands_synced = False
+    try:
+        # If we have guilds, sync to the first one for immediate updates
+        if bot.guilds:
+            first_guild = bot.guilds[0]
+            logger.info(f"Attempting to sync application commands to guild: {first_guild.name} (ID: {first_guild.id})...")
+            try:
+                synced_guild = await bot.tree.sync(guild=discord.Object(id=first_guild.id))
+                logger.info(f"✅ Successfully synced {len(synced_guild)} command(s) to guild {first_guild.name}")
+                commands_synced = True
+                
+                # Log the synced commands
+                for cmd in synced_guild:
+                    logger.info(f"  - Synced command: /{cmd.name}")
+                    
+            except discord.Forbidden as e:
+                logger.error(f"❌ Forbidden error syncing to guild {first_guild.name}: {e}")
+                logger.error("This usually means the bot lacks 'applications.commands' scope or manage guild permissions")
+            except discord.HTTPException as e:
+                logger.error(f"❌ HTTP error syncing to guild {first_guild.name}: {e}")
+            except Exception as e:
+                logger.error(f"❌ Unexpected error syncing to guild {first_guild.name}: {e}")
+        else:
+            logger.warning("Bot is not in any guilds - cannot do guild-specific sync")
+        
+        # Also sync globally (takes up to 1 hour to propagate)
+        logger.info("Attempting to sync application commands globally...")
+        try:
+            synced = await bot.tree.sync()
+            logger.info(f"✅ Successfully synced {len(synced)} command(s) globally")
+            if not commands_synced:
+                commands_synced = True
+        except discord.Forbidden as e:
+            logger.error(f"❌ Forbidden error syncing globally: {e}")
+            logger.error("This usually means the bot application lacks proper scopes")
+        except discord.HTTPException as e:
+            logger.error(f"❌ HTTP error syncing globally: {e}")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error syncing globally: {e}")
+            
+    except Exception as e:
+        logger.error("❌ Critical error during command sync:", exc_info=True)
+    
+    if not commands_synced:
+        logger.error("🚨 CRITICAL: No commands were synced! Slash commands will not work!")
+        logger.error("🔧 SOLUTION: Ensure bot has 'bot' AND 'applications.commands' scopes when added to server")
+        logger.error("🔧 REINVITE: Use this URL pattern: https://discord.com/api/oauth2/authorize?client_id=YOUR_BOT_ID&permissions=8&scope=bot%20applications.commands")
+    else:
+        logger.info("🎉 Command sync completed successfully!")
 
 # --- Basic Slash Command (Example) ---
 @bot.hybrid_command(name="ping", description="Checks bot latency and responds with Pong!")

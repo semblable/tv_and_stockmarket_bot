@@ -391,10 +391,10 @@ class DataManager:
             return False # No changes made
 
         # Check if all targets are None, then delete row
-        all_targets_none = all(
+        all_targets_none = all([
             update_data["target_above"] is None, update_data["target_below"] is None,
             update_data["dpc_above_target"] is None, update_data["dpc_below_target"] is None
-        )
+        ])
 
         if all_targets_none:
             query_delete = "DELETE FROM stock_alerts WHERE user_id = :user_id AND symbol = :symbol"
