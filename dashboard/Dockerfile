@@ -22,5 +22,8 @@ COPY api_clients/ /app/api_clients/
 # Add /app to PYTHONPATH to ensure modules in this directory are discoverable
 ENV PYTHONPATH="/app"
 
+# Expose port 8050
+EXPOSE 8050
+
 # Run gunicorn when the container launches
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8050", "app:app"]
