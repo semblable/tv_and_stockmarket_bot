@@ -10,6 +10,9 @@ COPY dashboard/requirements.txt /app/requirements.txt
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy the environment file from project root
+COPY .env /app/.env
+
 # Copy the contents of the dashboard directory (relative to project root context)
 COPY dashboard/ /app/
 

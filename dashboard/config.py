@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
 if os.path.exists(dotenv_path):
     load_dotenv(dotenv_path)
+else:
+    # Try loading from current directory (Docker container case)
+    load_dotenv('/app/.env')
 
 class Config:
     SECRET_KEY = os.environ.get('DASHBOARD_SECRET_KEY') or 'your_default_secret_key'

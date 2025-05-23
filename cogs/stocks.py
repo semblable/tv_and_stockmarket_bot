@@ -7,6 +7,7 @@ import typing # For type hinting
 from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
 from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series # Added
+from api_clients import yahoo_finance_client # Added Yahoo Finance support
 from utils.chart_utils import generate_stock_chart_url # Added
 from data_manager import DataManager # Import DataManager class
 # Individual function imports from data_manager are no longer needed if using an instance
@@ -173,33 +174,89 @@ class Stocks(commands.Cog):
         logger.info("Stock alert monitoring task is waiting for bot to be ready...")
 
     @commands.hybrid_command(name="stock_price", description="Get the current price of a stock.")
-    @discord.app_commands.describe(symbol="The stock symbol (e.g., AAPL, MSFT)")
+    @discord.app_commands.describe(symbol="The stock symbol (e.g., AAPL, MSFT, LPP.WA)")
     async def stock_price(self, ctx: commands.Context, *, symbol: str):
         """
         Fetches and displays the current price and other relevant information for a given stock symbol.
+        Supports both US stocks (Alpha Vantage) and international stocks like Polish stocks (Yahoo Finance).
 
         Usage examples:
         `!stock_price AAPL`
         `/stock_price symbol:TSLA`
+        `/stock_price symbol:LPP` (Polish stock, auto-converted to LPP.WA)
+        `/stock_price symbol:LPP.WA` (Polish stock, explicit format)
         """
-        price_data = alpha_vantage_client.get_stock_price(symbol.upper())
+        logger.info(f"[STOCK_PRICE_DEBUG] Command received for symbol: {symbol}")
+        upper_symbol = symbol.upper()
+        
+        # First try Alpha Vantage (for US stocks)
+        logger.info(f"[STOCK_PRICE_DEBUG] Attempting Alpha Vantage for {upper_symbol}")
+        price_data = alpha_vantage_client.get_stock_price(upper_symbol)
+        data_source = "Alpha Vantage"
+        logger.info(f"[STOCK_PRICE_DEBUG] Alpha Vantage raw response for {upper_symbol}: {price_data}")
 
-        if price_data:
-            if "error" in price_data:
+        # If Alpha Vantage fails or has API limits, try Yahoo Finance as fallback
+        if not price_data or "error" in price_data:
+            if price_data and price_data.get("error") == "api_limit":
+                logger.info(f"[STOCK_PRICE_DEBUG] Alpha Vantage API limit for {upper_symbol}. Falling back to Yahoo.")
+            else:
+                logger.info(f"[STOCK_PRICE_DEBUG] Alpha Vantage failed for {upper_symbol} (Data: {price_data}). Falling back to Yahoo.")
+            
+            # Try Yahoo Finance
+            logger.info(f"[STOCK_PRICE_DEBUG] Attempting Yahoo Finance for {upper_symbol} (normalized to {yahoo_finance_client.normalize_symbol(upper_symbol)})")
+            price_data = yahoo_finance_client.get_stock_price(upper_symbol)
+            data_source = "Yahoo Finance"
+            logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance raw response for {yahoo_finance_client.normalize_symbol(upper_symbol)}: {price_data}")
+            
+            # If Yahoo Finance also fails, we're out of options
+            if not price_data:
+                logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance also failed for {yahoo_finance_client.normalize_symbol(upper_symbol)}. No more APIs to try.")
+        
+        # Check if we have valid data from any source
+        if not price_data:
+            logger.error(f"[STOCK_PRICE_DEBUG] All APIs failed for {upper_symbol}.")
+            embed = discord.Embed(
+                title="❌ Stock Data Error",
+                description=f"Could not retrieve data for **{upper_symbol}** from Alpha Vantage or Yahoo Finance.\n\n" +
+                           f"Please check the symbol and try again.\n\n" +
+                           f"💡 **Tip**: For Polish stocks, try adding `.WA` suffix (e.g., `{upper_symbol}.WA`)",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+            return
+
+        if price_data: # This block now processes data from AV or YF
+            if "error" in price_data: # This error is now from the *second* attempt if AV failed
                 error_type = price_data["error"]
                 error_message = price_data.get("message", "An unspecified error occurred.")
+                logger.error(f"[STOCK_PRICE_DEBUG] Final data source ({data_source}) reported error for {upper_symbol}: Type: {error_type}, Msg: {error_message}")
                 if error_type == "api_limit":
-                    await ctx.send(f"Could not retrieve price for {symbol.upper()}: {error_message}", ephemeral=True)
+                    await ctx.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
                 elif error_type == "config_error":
-                    print(f"Stock price configuration error for {symbol.upper()}: {error_message}") # Log server-side
-                    await ctx.send(f"Could not retrieve price for {symbol.upper()} due to a server configuration issue. Please notify the bot administrator.", ephemeral=True)
+                    print(f"Stock price configuration error for {upper_symbol}: {error_message}") # Log server-side
+                    await ctx.send(f"Could not retrieve price for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.")
                 elif error_type == "api_error":
-                    await ctx.send(f"Could not retrieve price for {symbol.upper()}: {error_message}", ephemeral=True)
+                    await ctx.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
                 else: # Unknown error type in dictionary
-                    print(f"Stock price: Unknown error type '{error_type}' for {symbol.upper()}: {error_message}")
-                    await ctx.send(f"Error fetching data for {symbol.upper()}. An unexpected error occurred with the data provider.", ephemeral=True)
-            elif "01. symbol" in price_data and "05. price" in price_data: # Success
+                    print(f"Stock price: Unknown error type '{error_type}' for {upper_symbol}: {error_message}")
+                    await ctx.send(f"Error fetching data for {upper_symbol}. An unexpected error occurred with the data provider.")
+            elif "01. symbol" in price_data and "05. price" in price_data: # Success from either AV or YF
+                logger.info(f"[STOCK_PRICE_DEBUG] Successfully processed data for {upper_symbol} from {data_source}.")
                 stock_symbol_from_api = price_data['01. symbol']
+                
+                # Get currency from the API response, default to USD for Alpha Vantage
+                currency = price_data.get('currency', 'USD')
+                
+                # Determine currency symbol for display
+                currency_symbols = {
+                    'USD': '$',
+                    'PLN': 'zł',
+                    'EUR': '€',
+                    'GBP': '£',
+                    'CAD': 'C$',
+                    'JPY': '¥'
+                }
+                currency_symbol = currency_symbols.get(currency, currency)
                 
                 # Helper to safely get and format numbers
                 def get_formatted_value(key, prefix="", suffix="", is_numeric=True, is_currency=False, is_volume=False):
@@ -210,7 +267,7 @@ class Stocks(commands.Cog):
                         if is_numeric:
                             num_value = float(value.rstrip('%')) # Remove % for change percent
                             if is_currency:
-                                return f"{prefix}{num_value:,.2f}{suffix}"
+                                return f"{num_value:,.2f} {currency_symbol}" if currency == 'PLN' else f"{currency_symbol}{num_value:,.2f}"
                             elif is_volume:
                                 return f"{prefix}{int(num_value):,}{suffix}"
                             # For change and change percent, format based on original string
@@ -223,15 +280,15 @@ class Stocks(commands.Cog):
                     except ValueError:
                         return "N/A" # Should not happen if API is consistent
 
-                price = get_formatted_value('05. price', prefix="$", is_currency=True)
+                price = get_formatted_value('05. price', is_currency=True)
                 change_val_str = price_data.get('09. change', '0') # Default to '0' for float conversion
                 change_percent_val_str = price_data.get('10. change percent', '0%') # Default to '0%' for float conversion
                 
                 change_display = get_formatted_value('09. change')
                 change_percent_display = get_formatted_value('10. change percent')
 
-                day_high = get_formatted_value('03. high', prefix="$", is_currency=True)
-                day_low = get_formatted_value('04. low', prefix="$", is_currency=True)
+                day_high = get_formatted_value('03. high', is_currency=True)
+                day_low = get_formatted_value('04. low', is_currency=True)
                 volume = get_formatted_value('06. volume', is_volume=True)
 
                 # Determine embed color and trend emoji
@@ -263,13 +320,19 @@ class Stocks(commands.Cog):
                 embed.add_field(name="🗓️ 52-Week Low", value="N/A", inline=True)
                 embed.add_field(name="🏦 Market Cap", value="N/A", inline=True)
                 
-                embed.set_footer(text="Data provided by Alpha Vantage")
+                # Add exchange info for international stocks
+                if currency != 'USD' and 'exchange' in price_data:
+                    embed.add_field(name="🏢 Exchange", value=price_data['exchange'], inline=True)
+                
+                embed.set_footer(text=f"Data provided by {data_source}")
                 await ctx.send(embed=embed)
             else: # price_data is a dictionary, but not a known error type and not a success structure
+                logger.error(f"[STOCK_PRICE_DEBUG] Unexpected data structure for {upper_symbol} from {data_source}: {price_data}")
                 print(f"Stock price: Unexpected data structure for {symbol.upper()}: {price_data}")
-                await ctx.send(f"Error fetching data for {symbol.upper()}. Unexpected data format received from the provider.", ephemeral=True)
-        else: # price_data is None (e.g., network issue, client-side timeout before API response)
-            await ctx.send(f"Error fetching data for {symbol.upper()}. Could not connect to the data provider or the symbol is invalid.", ephemeral=True)
+                await ctx.send(f"Error fetching data for {symbol.upper()}. Unexpected data format received from the provider.")
+        else: # price_data is None (e.g., network issue, client-side timeout before API response) - This implies BOTH AV and YF returned None
+            logger.error(f"[STOCK_PRICE_DEBUG] Both Alpha Vantage and Yahoo Finance returned None for {upper_symbol}.")
+            await ctx.send(f"Error fetching data for {symbol.upper()}. Could not connect to the data provider or the symbol is invalid.")
 
 
     @commands.hybrid_command(name="track_stock", description="Track a stock symbol, optionally with quantity and purchase price.")
@@ -609,7 +672,9 @@ class Stocks(commands.Cog):
         `/stock_chart symbol:TSLA timespan:6M`
         `/stock_chart symbol:MSFT timespan:1D`
         """
-        symbol_upper = symbol.upper()
+        # Normalize symbol for Yahoo Finance compatibility first
+        normalized_symbol = yahoo_finance_client.normalize_symbol(symbol.upper())
+        symbol_for_display = symbol.upper() # For messages and chart title
         timespan_upper = timespan.upper()
 
         if timespan_upper not in SUPPORTED_TIMESPAN:
@@ -626,35 +691,59 @@ class Stocks(commands.Cog):
         api_params = config["params"].copy() # Use a copy to avoid modifying the original dict
         display_label = config["label"]
 
-        logger.info(f"Fetching chart data for {symbol_upper}, timespan {timespan_upper} using {api_func.__name__} with params {api_params}")
+        logger.info(f"Fetching chart data for {symbol_for_display} (normalized: {normalized_symbol}), timespan {timespan_upper} using Alpha Vantage first.")
+        data_source = "Alpha Vantage" # Default data source
 
         # Call the appropriate Alpha Vantage function
         if config["is_intraday"]:
-            time_series_data = api_func(symbol_upper, interval=api_params['interval'], outputsize=api_params['outputsize'])
+            time_series_data = alpha_vantage_client.get_intraday_time_series(symbol_for_display, interval=api_params['interval'], outputsize=api_params['outputsize'])
         else: # Daily
-            time_series_data = api_func(symbol_upper, outputsize=api_params['outputsize'])
+            time_series_data = alpha_vantage_client.get_daily_time_series(symbol_for_display, outputsize=api_params['outputsize'])
 
-
+        # Check if Alpha Vantage failed (no data, error dict, or empty list), then try Yahoo Finance
+        alpha_vantage_failed = False
         if not time_series_data:
-            await ctx.send(f"Could not retrieve time series data for {symbol_upper} ({display_label}). The symbol might be invalid or there's no data for the period.", ephemeral=True)
+            logger.warning(f"Alpha Vantage: No time series data for {symbol_for_display} ({display_label}).")
+            alpha_vantage_failed = True
+        elif isinstance(time_series_data, dict) and "error" in time_series_data:
+            logger.warning(f"Alpha Vantage: API error for {symbol_for_display} ({display_label}): {time_series_data.get('message')}")
+            alpha_vantage_failed = True
+        elif isinstance(time_series_data, list) and not time_series_data:
+            logger.warning(f"Alpha Vantage: Empty list returned for {symbol_for_display} ({display_label}).")
+            alpha_vantage_failed = True
+
+        if alpha_vantage_failed:
+            logger.info(f"Attempting to fetch chart data for {normalized_symbol} via Yahoo Finance.")
+            data_source = "Yahoo Finance"
+            # outputsize for Yahoo: 'compact' for 3 months, 'full' for max
+            yahoo_outputsize = "compact" if api_params.get('outputsize') == "compact" else "full"
+
+            if config["is_intraday"]:
+                # Map Alpha Vantage interval to approximate Yahoo interval
+                # Yahoo: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
+                # Alpha: 1min, 5min, 15min, 30min, 60min
+                av_interval = api_params['interval']
+                if av_interval == "1min": yahoo_interval = "1m"
+                elif av_interval == "5min": yahoo_interval = "5m"
+                elif av_interval == "15min": yahoo_interval = "15m"
+                elif av_interval == "30min": yahoo_interval = "30m"
+                elif av_interval == "60min": yahoo_interval = "60m" # or 1h
+                else: yahoo_interval = "60m" # Default
+                time_series_data = yahoo_finance_client.get_intraday_time_series(normalized_symbol, interval=yahoo_interval) # Yahoo outputsize not really used for intraday
+            else: # Daily
+                time_series_data = yahoo_finance_client.get_daily_time_series(normalized_symbol, outputsize=yahoo_outputsize)
+        
+        # Post-fetch processing (common for both AV and YF data)
+        if not time_series_data:
+            await ctx.send(f"Could not retrieve time series data for {symbol_for_display} ({display_label}) from any provider. The symbol might be invalid or there's no data.", ephemeral=True)
             return
-        if isinstance(time_series_data, dict) and "error" in time_series_data:
-            error_type = time_series_data["error"]
+        if isinstance(time_series_data, dict) and "error" in time_series_data: # Should only be AV at this point if YF also failed with dict error (unlikely for YF client)
             error_message = time_series_data.get("message", "An unspecified API error occurred.")
-            if error_type == "api_limit":
-                await ctx.send(f"Could not retrieve chart data for {symbol_upper}: Alpha Vantage API limit reached. Please try again later. ({error_message})", ephemeral=True)
-            elif error_type == "config_error":
-                logger.error(f"Stock chart config error for {symbol_upper}: {error_message}")
-                await ctx.send(f"Could not retrieve chart data for {symbol_upper} due to a server configuration issue.", ephemeral=True)
-            elif error_type == "api_error": # e.g. invalid symbol
-                 await ctx.send(f"Could not retrieve chart data for {symbol_upper}: {error_message}", ephemeral=True)
-            else:
-                logger.error(f"Stock chart: Unknown error type '{error_type}' for {symbol_upper}: {error_message}")
-                await ctx.send(f"Error fetching chart data for {symbol_upper}. An unexpected error occurred with the data provider.", ephemeral=True)
+            await ctx.send(f"Error fetching chart data for {symbol_for_display} ({display_label}): {error_message}", ephemeral=True)
             return
         
         if not isinstance(time_series_data, list) or not time_series_data:
-            await ctx.send(f"No valid time series data points found for {symbol_upper} ({display_label}) to generate a chart.", ephemeral=True)
+            await ctx.send(f"No valid time series data points found for {symbol_for_display} ({display_label}) from any provider to generate a chart.", ephemeral=True)
             return
 
         # For YTD, we need to filter data to be from the start of the current year
@@ -680,27 +769,27 @@ class Stocks(commands.Cog):
                 
                 time_series_data = filtered_data
                 if not time_series_data:
-                    await ctx.send(f"No data found for {symbol_upper} since the start of this year for the YTD chart.", ephemeral=True)
+                    await ctx.send(f"No data found for {symbol_for_display} since the start of this year for the YTD chart.", ephemeral=True)
                     return
             except Exception as e:
-                logger.error(f"Error filtering YTD data for {symbol_upper}: {e}")
-                await ctx.send(f"An error occurred while processing YTD data for {symbol_upper}.", ephemeral=True)
+                logger.error(f"Error filtering YTD data for {symbol_for_display}: {e}")
+                await ctx.send(f"An error occurred while processing YTD data for {symbol_for_display}.", ephemeral=True)
                 return
 
 
-        logger.info(f"Generating chart URL for {symbol_upper} ({display_label}) with {len(time_series_data)} data points.")
-        chart_url = generate_stock_chart_url(symbol_upper, display_label, time_series_data)
+        logger.info(f"Generating chart URL for {symbol_for_display} ({display_label}) with {len(time_series_data)} data points.")
+        chart_url = generate_stock_chart_url(symbol_for_display, display_label, time_series_data)
 
         if chart_url:
             embed = discord.Embed(
-                title=f"📈 Stock Chart for {symbol_upper} ({display_label})",
+                title=f"📈 Stock Chart for {symbol_for_display} ({display_label})",
                 color=discord.Color.blue()
             )
             embed.set_image(url=chart_url)
-            embed.set_footer(text="Chart generated using QuickChart.io | Data from Alpha Vantage")
+            embed.set_footer(text=f"Chart generated using QuickChart.io | Data from {data_source}")
             await ctx.send(embed=embed)
         else:
-            await ctx.send(f"Sorry, I couldn't generate the chart for {symbol_upper} ({display_label}) at this time.", ephemeral=True)
+            await ctx.send(f"Sorry, I couldn't generate the chart for {symbol_for_display} ({display_label}) at this time.", ephemeral=True)
 
     @commands.hybrid_command(name="stock_news", description="Get recent news for a stock symbol.")
     @discord.app_commands.describe(symbol="The stock symbol (e.g., AAPL, MSFT)")
@@ -974,6 +1063,76 @@ class Stocks(commands.Cog):
                 logger.warning(f"Could not delete portfolio status message: {e}")
 
         await ctx.send(embed=embed, ephemeral=False)
+
+    @commands.hybrid_command(name="stock_debug", description="Debug stock API connections for a symbol.")
+    @discord.app_commands.describe(symbol="The stock symbol to debug (e.g., LPP, AAPL)")
+    async def stock_debug(self, ctx: commands.Context, *, symbol: str):
+        """
+        Debug command to test both Alpha Vantage and Yahoo Finance APIs for a symbol.
+        This helps diagnose issues with stock price lookups.
+        """
+        if not await self._is_admin_or_owner(ctx):
+            await ctx.send("This command is restricted to bot administrators.", ephemeral=True)
+            return
+            
+        upper_symbol = symbol.upper()
+        
+        embed = discord.Embed(title=f"🔧 Stock API Debug for {upper_symbol}", color=discord.Color.blue())
+        
+        # Test Alpha Vantage
+        av_result = alpha_vantage_client.get_stock_price(upper_symbol)
+        
+        if av_result is None:
+            av_status = "❌ Failed - No data returned"
+        elif "error" in av_result:
+            av_status = f"❌ Error - {av_result.get('error')}: {av_result.get('message', 'Unknown error')}"
+        elif "01. symbol" in av_result and "05. price" in av_result:
+            av_status = f"✅ Success - Price: ${av_result['05. price']}"
+        else:
+            av_status = f"⚠️ Unexpected format - {av_result}"
+        
+        embed.add_field(name="🔍 Alpha Vantage Test", value=av_status, inline=False)
+        
+        # Test Yahoo Finance
+        normalized_symbol = yahoo_finance_client.normalize_symbol(upper_symbol)
+        yf_result = yahoo_finance_client.get_stock_price(normalized_symbol)
+        
+        if yf_result is None:
+            yf_status = "❌ Failed - No data returned"
+        elif "error" in yf_result:
+            yf_status = f"❌ Error - {yf_result.get('error')}: {yf_result.get('message', 'Unknown error')}"
+        elif "01. symbol" in yf_result and "05. price" in yf_result:
+            currency = yf_result.get('currency', 'USD')
+            exchange = yf_result.get('exchange', 'Unknown')
+            yf_status = f"✅ Success - Price: {yf_result['05. price']} {currency} ({exchange})"
+        else:
+            yf_status = f"⚠️ Unexpected format - {yf_result}"
+        
+        embed.add_field(name=f"🔍 Yahoo Finance Test ({upper_symbol} → {normalized_symbol})", value=yf_status, inline=False)
+        
+        # Overall recommendation
+        if (av_result and "01. symbol" in av_result) or (yf_result and "01. symbol" in yf_result):
+            recommendation = "✅ At least one API is working - stock_price command should succeed"
+        else:
+            recommendation = "❌ Both APIs failed - stock_price command will fail"
+        
+        embed.add_field(name="📋 Recommendation", value=recommendation, inline=False)
+        embed.set_footer(text="This is a diagnostic command for troubleshooting")
+        
+        await ctx.send(embed=embed, ephemeral=True)
+    
+    async def _is_admin_or_owner(self, ctx) -> bool:
+        """Check if user is bot owner or has admin permissions"""
+        # Check if user is bot owner
+        app_info = await self.bot.application_info()
+        if ctx.author.id == app_info.owner.id:
+            return True
+        
+        # Check if user has admin permissions in the guild
+        if hasattr(ctx.author, 'guild_permissions') and ctx.author.guild_permissions.administrator:
+            return True
+            
+        return False
 
 async def setup(bot):
     await bot.add_cog(Stocks(bot))

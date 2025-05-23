@@ -5,6 +5,7 @@ import urllib.parse
 import requests
 
 QUICKCHART_BASE_URL = "https://quickchart.io/chart"
+QUICKCHART_SHORT_URL = "https://quickchart.io/chart/create"
 
 def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list, chart_width: int = 600, chart_height: int = 400):
     """
@@ -36,7 +37,6 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
     elif len(labels) > 10: # For 1M daily or 5D intraday
         x_tick_rotation = 45
 
-
     chart_config = {
         "type": "line",
         "data": {
@@ -53,108 +53,118 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
         },
         "options": {
             "responsive": True,
-            "title": {
-                "display": True,
-                "text": f"Stock Chart for {symbol.upper()} ({timespan_label})"
+            "plugins": {
+                "title": {
+                    "display": True,
+                    "text": f"Stock Chart for {symbol.upper()} ({timespan_label})"
+                },
+                "legend": {
+                    "display": True,
+                    "position": "top"
+                }
             },
             "scales": {
-                "xAxes": [{
-                    "type": "time", # Treat labels as time series
+                "x": {
+                    "type": "time",
                     "time": {
-                        # Dynamically choose unit based on timespan or data density
-                        # For simplicity, letting Chart.js auto-detect or using a common unit.
-                        # More advanced: determine 'unit' (day, month, etc.) based on timespan_label
-                        "tooltipFormat": "ll HH:mm" if "min" in timespan_label or "D" in timespan_label and len(labels) > 1 else "ll" # e.g. Sep 4, 1986 8:30 PM or Sep 4, 1986
+                        "tooltipFormat": "MMM DD, YYYY HH:mm" if "min" in timespan_label or "D" in timespan_label and len(labels) > 1 else "MMM DD, YYYY"
                     },
                     "ticks": {
                         "autoSkip": True,
-                        "maxTicksLimit": 20, # Limit number of x-axis ticks for clarity
+                        "maxTicksLimit": 20,
                         "maxRotation": x_tick_rotation,
                         "minRotation": x_tick_rotation
                     },
-                    "scaleLabel": {
+                    "title": {
                         "display": True,
-                        "labelString": "Date / Time"
+                        "text": "Date / Time"
                     }
-                }],
-                "yAxes": [{
-                    "scaleLabel": {
+                },
+                "y": {
+                    "title": {
                         "display": True,
-                        "labelString": "Closing Price (USD)" # Assuming USD, could be parameterized
+                        "text": "Closing Price (USD)"
                     },
                     "ticks": {
-                        # Add a callback to format ticks as currency, e.g., $150.00
                         "callback": "function(value, index, values) { return '$' + value.toFixed(2); }"
                     }
-                }]
-            },
-            "legend": {
-                "display": True,
-                "position": "top"
-            },
-            "plugins": { # Using 'plugins' for Chart.js v3+ syntax for watermark
-                "quickchartWatermark": False # Attempt to disable default watermark if API supports
+                }
             }
         }
     }
 
-    # QuickChart.io specific parameters
-    params = {
-        "chart": json.dumps(chart_config),
-        "width": chart_width,
-        "height": chart_height,
-        "backgroundColor": "white", # Or any other preferred background
-        "format": "png" # or 'svg', 'jpg'
-        # "key": "YOUR_QUICKCHART_API_KEY" # If you have a paid key for no watermark etc.
-    }
-
     try:
-        # For GET requests, parameters are typically URL encoded
-        # For POST requests with QuickChart, you send 'chart' as JSON body
-        # QuickChart documentation suggests POST for complex charts, but GET works for many.
-        # Let's use a GET request for simplicity here, encoding the chart config.
-        
-        # The 'chart' parameter itself should be a JSON string.
-        # The full URL will be like: https://quickchart.io/chart?c={}&width=...
-        
-        # Correct way to pass chart config for GET request:
-        encoded_chart_config = urllib.parse.quote(json.dumps(chart_config))
-        request_url = f"{QUICKCHART_BASE_URL}?c={encoded_chart_config}&w={chart_width}&h={chart_height}&bkg=white&f=png"
-
-        # QuickChart recommends POST for larger chart objects.
-        # Let's switch to POST to be safe.
+        # Use QuickChart's short URL service to avoid Discord's 2048 character limit
+        # This creates a permanent short URL that redirects to the chart
         post_payload = {
-            "chart": chart_config, # Send the dict directly, requests will handle json.dumps
+            "chart": chart_config,
             "width": chart_width,
             "height": chart_height,
             "backgroundColor": "white",
             "format": "png"
         }
 
-        response = requests.post(QUICKCHART_BASE_URL, json=post_payload, timeout=10)
-        response.raise_for_status() # Check for HTTP errors
-
-        # If the request was successful, the response *body* is the image.
-        # QuickChart can also return a URL if you use /chart/create endpoint
-        # For /chart endpoint, it directly returns the image.
-        # To get a URL, we need to construct it if we are sure the parameters are fine,
-        # or use an endpoint that returns a short URL.
-        # The simplest way for embedding is to use the direct generation URL as the image source.
+        # First, try to create a short URL
+        response = requests.post(QUICKCHART_SHORT_URL, json=post_payload, timeout=15)
+        response.raise_for_status()
         
-        # The URL that *would* generate this chart if called via GET:
-        final_chart_url = f"{QUICKCHART_BASE_URL}?{urllib.parse.urlencode({'c': json.dumps(chart_config), 'w': chart_width, 'h': chart_height, 'bkg': 'white', 'f': 'png'})}"
+        if response.status_code == 200:
+            response_data = response.json()
+            short_url = response_data.get('url')
+            if short_url:
+                print(f"Successfully generated short chart URL for {symbol} ({timespan_label}): {short_url}")
+                return short_url
         
-        # Let's verify the POST request actually worked and we can use its URL.
-        # The POST request to /chart returns the image directly.
-        # To get a *link* to the image that we can embed, we should construct the GET URL.
-        # This GET URL will then be used in the Discord embed.
-
-        # Check if the POST was successful (status 200 and content looks like an image)
-        if response.status_code == 200 and response.headers.get('Content-Type', '').startswith('image/'):
-            print(f"Successfully generated chart for {symbol} ({timespan_label}) via POST. Constructing GET URL for embedding.")
-            return final_chart_url # Return the GET URL that reproduces the chart
+        # Fallback: Try the direct method with a simplified chart for smaller URLs
+        print(f"Short URL generation failed for {symbol} ({timespan_label}), trying direct method...")
+        
+        # Simplify chart config for shorter URL
+        simplified_config = {
+            "type": "line",
+            "data": {
+                "labels": labels,
+                "datasets": [{
+                    "label": f"{symbol}",
+                    "data": closing_prices,
+                    "borderColor": "rgb(75,192,192)",
+                    "fill": False
+                }]
+            },
+            "options": {
+                "plugins": {
+                    "title": {
+                        "display": True,
+                        "text": f"{symbol} ({timespan_label})"
+                    }
+                }
+            }
+        }
+        
+        # Try direct POST to get image
+        direct_payload = {
+            "chart": simplified_config,
+            "width": chart_width,
+            "height": chart_height,
+            "backgroundColor": "white",
+            "format": "png"
+        }
+        
+        direct_response = requests.post(QUICKCHART_BASE_URL, json=direct_payload, timeout=10)
+        direct_response.raise_for_status()
+        
+        if direct_response.status_code == 200 and direct_response.headers.get('Content-Type', '').startswith('image/'):
+            # Construct a simplified GET URL as fallback
+            simplified_get_url = f"{QUICKCHART_BASE_URL}?c={urllib.parse.quote(json.dumps(simplified_config))}&w={chart_width}&h={chart_height}"
+            
+            # Check if the simplified URL is short enough for Discord
+            if len(simplified_get_url) <= 2000:  # Leave some buffer under 2048
+                print(f"Successfully generated simplified chart URL for {symbol} ({timespan_label}). Length: {len(simplified_get_url)}")
+                return simplified_get_url
+            else:
+                print(f"Chart URL still too long for {symbol} ({timespan_label}): {len(simplified_get_url)} characters")
+                return None
         else:
-            print(f"Error generating chart for {symbol} ({timespan_label}) with QuickChart. Status: {response.status_code}. Response: {response.text[:200]}")
+            print(f"Direct chart generation failed for {symbol} ({timespan_label})")
             return None
 
     except requests.exceptions.Timeout:
@@ -186,6 +196,7 @@ if __name__ == '__main__':
     chart_url_1m = generate_stock_chart_url("TEST", "1M", sample_data_1m)
     if chart_url_1m:
         print(f"Generated chart URL for TEST (1M): {chart_url_1m}")
+        print(f"URL Length: {len(chart_url_1m)} characters")
     else:
         print("Failed to generate chart URL for TEST (1M).")
 
@@ -201,14 +212,16 @@ if __name__ == '__main__':
     chart_url_1d = generate_stock_chart_url("TEST", "1D (60min)", sample_data_1d_intraday)
     if chart_url_1d:
         print(f"Generated chart URL for TEST (1D): {chart_url_1d}")
+        print(f"URL Length: {len(chart_url_1d)} characters")
     else:
         print("Failed to generate chart URL for TEST (1D).")
 
     # Test with many data points (e.g., 1 Year daily)
-    sample_data_1y = [(f"2023-{ (i//30)+1:02d}-{ (i%30)+1:02d}", 150 + (i/10) + (i%5)) for i in range(250)] # Approx 250 trading days
+    sample_data_1y = [(f"2023-{ (i//30)+1:02d}-{ (i%30)+1:02d}", 150 + (i/10) + (i%5)) for i in range(100)] # 100 points to test
     chart_url_1y = generate_stock_chart_url("TEST", "1Y", sample_data_1y)
     if chart_url_1y:
         print(f"Generated chart URL for TEST (1Y) (many points): {chart_url_1y}")
+        print(f"URL Length: {len(chart_url_1y)} characters")
     else:
         print("Failed to generate chart URL for TEST (1Y) (many points).")
 

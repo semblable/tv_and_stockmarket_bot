@@ -20,6 +20,29 @@ class TVShows(commands.Cog):
         logger.info("TVShows Cog: Initializing and starting check_new_episodes task.")
         self.check_new_episodes.start() # Start the background task
 
+    async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False):
+        """Helper method to send responses that work with both slash commands and prefix commands"""
+        if ctx.interaction:
+            # Use followup for slash commands
+            if embeds:
+                return await ctx.followup.send(content=content, embeds=embeds, ephemeral=ephemeral, wait=wait)
+            elif content and embed:
+                return await ctx.followup.send(content=content, embed=embed, ephemeral=ephemeral, wait=wait)
+            elif embed:
+                return await ctx.followup.send(embed=embed, ephemeral=ephemeral, wait=wait)
+            else:
+                return await ctx.followup.send(content, ephemeral=ephemeral, wait=wait)
+        else:
+            # Use regular send for prefix commands (ignore ephemeral)
+            if embeds:
+                return await ctx.send(content=content, embeds=embeds)
+            elif content and embed:
+                return await ctx.send(content=content, embed=embed)
+            elif embed:
+                return await ctx.send(embed=embed)
+            else:
+                return await ctx.send(content)
+
     def cog_unload(self):
         logger.info("TVShows Cog: Unloading and cancelling check_new_episodes task.")
         self.check_new_episodes.cancel() # Stop the background task when cog is unloaded
@@ -40,14 +63,14 @@ Usage examples:
 `/tv_subscribe show_name:Loki`
         """
         try:
-            search_results = tmdb_client.search_tv_show(show_name)
+            search_results = tmdb_client.search_tv_shows(show_name)
         except Exception as e:
             print(f"Error searching for TV show '{show_name}': {e}")
-            await ctx.send(f"Sorry, there was an error searching for '{show_name}'. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, f"Sorry, there was an error searching for '{show_name}'. Please try again later.", ephemeral=True)
             return
 
         if not search_results:
-            await ctx.send(f"No shows found for '{show_name}'.", ephemeral=True)
+            await self.send_response(ctx, f"No shows found for '{show_name}'.", ephemeral=True)
             return
 
         selected_show = None # Initialize selected_show
@@ -75,8 +98,7 @@ Usage examples:
                 
                 embeds_list.append(show_embed)
 
-            # Send the message with content and list of embeds (not ephemeral, so bot can react)
-            prompt_msg_obj = await ctx.send(content=message_content, embeds=embeds_list)
+            prompt_msg_obj = await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=False, wait=True) # Send and wait for message object
 
             for i in range(len(display_results)):
                 if i < len(NUMBER_EMOJIS): # Ensure we don't run out of emojis
@@ -104,14 +126,14 @@ Usage examples:
                     # await prompt_msg_obj.clear_reactions() # Requires manage_messages permission
                 else:
                     # This case should ideally not be reached if the check function is correct
-                    await ctx.send("Invalid reaction. Subscription cancelled.", ephemeral=True)
+                    await self.send_response(ctx, "Invalid reaction. Subscription cancelled.", ephemeral=True)
                     try:
                         await prompt_msg_obj.delete()
                     except discord.HTTPException:
                         pass # Ignore if already deleted or no perms
                     return
             except asyncio.TimeoutError:
-                await ctx.send("Selection timed out. Subscription cancelled.", ephemeral=True)
+                await self.send_response(ctx, "Selection timed out. Subscription cancelled.", ephemeral=True)
                 try:
                     # await prompt_msg_obj.edit(content="Selection timed out.", embed=None, view=None)
                     await prompt_msg_obj.delete() # Clean up the prompt message
@@ -120,7 +142,7 @@ Usage examples:
                 return
             except Exception as e:
                 print(f"Error during reaction-based show selection for '{show_name}' by {ctx.author.id}: {e}")
-                await ctx.send("An error occurred during selection. Subscription cancelled.", ephemeral=True)
+                await self.send_response(ctx, "An error occurred during selection. Subscription cancelled.", ephemeral=True)
                 try:
                     await prompt_msg_obj.delete()
                 except discord.HTTPException:
@@ -150,7 +172,7 @@ Usage examples:
 
 
             if selected_show is None: # Should be caught by earlier returns if selection failed
-                await ctx.send("Failed to make a selection. Subscription cancelled.", ephemeral=True)
+                await self.send_response(ctx, "Failed to make a selection. Subscription cancelled.", ephemeral=True)
                 return
 
         elif len(search_results) == 1:
@@ -167,13 +189,13 @@ Usage examples:
             # Use the new method signature which includes poster_path
             success = self.db_manager.add_tv_show_subscription(ctx.author.id, show_id, actual_show_name, poster_path)
             if success: # This now reflects DB operation success (MERGE)
-                await ctx.send(f"Successfully subscribed to {actual_show_name}!", ephemeral=True)
+                await self.send_response(ctx, f"Successfully subscribed to {actual_show_name}!", ephemeral=True)
             else:
                 # If MERGE fails, it's a DB issue. "Already subscribed" is handled by MERGE.
-                await ctx.send(f"Could not subscribe to {actual_show_name} due to a database error. Please try again later.", ephemeral=True)
+                await self.send_response(ctx, f"Could not subscribe to {actual_show_name} due to a database error. Please try again later.", ephemeral=True)
         except Exception as e:
             print(f"Error adding TV subscription for user {ctx.author.id} to show {show_id} ('{actual_show_name}'): {e}")
-            await ctx.send(f"Sorry, there was an error subscribing to '{actual_show_name}'. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, f"Sorry, there was an error subscribing to '{actual_show_name}'. Please try again later.", ephemeral=True)
 
     @commands.hybrid_command(name="tv_unsubscribe", description="Unsubscribe from TV show notifications.")
     @discord.app_commands.describe(show_name="The name of the TV show to unsubscribe from")
@@ -191,11 +213,11 @@ Usage examples:
             subscriptions = self.db_manager.get_user_tv_subscriptions(user_id) # Returns list of dicts
         except Exception as e:
             print(f"Error getting subscriptions for user {user_id}: {e}")
-            await ctx.send("Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, "Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
             return
 
         if not subscriptions:
-            await ctx.send("You are not subscribed to any TV shows.", ephemeral=True)
+            await self.send_response(ctx, "You are not subscribed to any TV shows.", ephemeral=True)
             return
 
         show_to_unsubscribe = None # This will store the final selected subscription object
@@ -208,7 +230,7 @@ Usage examples:
                 matching_subscriptions.append(sub)
 
         if not matching_subscriptions:
-            await ctx.send(f"No show matching '{show_name}' found in your subscriptions. Use `/my_tv_shows` to see your current subscriptions.", ephemeral=True)
+            await self.send_response(ctx, f"No show matching '{show_name}' found in your subscriptions. Use `/my_tv_shows` to see your current subscriptions.", ephemeral=True)
             return
 
         if len(matching_subscriptions) == 1:
@@ -255,10 +277,10 @@ Usage examples:
 
 
             if not embeds_list: # Should not happen if matching_subscriptions is not empty
-                await ctx.send("Could not prepare selection list. Please try again.", ephemeral=True)
+                await self.send_response(ctx, "Could not prepare selection list. Please try again.", ephemeral=True)
                 return
 
-            prompt_msg_obj = await ctx.send(content=message_content, embeds=embeds_list)
+            prompt_msg_obj = await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=False, wait=True) # Send and wait for message object
 
             for i in range(len(display_results)): # display_results is matching_subscriptions[:5]
                 if i < len(NUMBER_EMOJIS):
@@ -282,18 +304,18 @@ Usage examples:
                     # display_results are the filtered subscription dicts from DB
                     show_to_unsubscribe = display_results[choice_idx]
                 else:
-                    await ctx.send("Invalid reaction. Unsubscription cancelled.", ephemeral=True)
+                    await self.send_response(ctx, "Invalid reaction. Unsubscription cancelled.", ephemeral=True)
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                     return
             except asyncio.TimeoutError:
-                await ctx.send("Selection timed out. Unsubscription cancelled.", ephemeral=True)
+                await self.send_response(ctx, "Selection timed out. Unsubscription cancelled.", ephemeral=True)
                 try: await prompt_msg_obj.delete()
                 except discord.HTTPException: pass
                 return
             except Exception as e:
                 print(f"Error during reaction-based unsubscribe selection for '{show_name}' by {ctx.author.id}: {e}")
-                await ctx.send("An error occurred during selection. Unsubscription cancelled.", ephemeral=True)
+                await self.send_response(ctx, "An error occurred during selection. Unsubscription cancelled.", ephemeral=True)
                 try: await prompt_msg_obj.delete()
                 except discord.HTTPException: pass
                 return
@@ -302,8 +324,6 @@ Usage examples:
                     if 'prompt_msg_obj' in locals() and prompt_msg_obj:
                         if show_to_unsubscribe: # A choice was made
                              await prompt_msg_obj.clear_reactions()
-                        # If not deleted in timeout/error, and no choice made (should not happen)
-                        # else: await prompt_msg_obj.delete() # Or just leave it if we want to show the selection
                 except discord.Forbidden:
                     print(f"Bot lacks 'Manage Messages' permission to clear reactions on message {prompt_msg_obj.id if 'prompt_msg_obj' in locals() else 'N/A'}.")
                 except discord.HTTPException as e:
@@ -312,7 +332,7 @@ Usage examples:
                     print(f"Generic error during reaction/message cleanup for unsubscribe: {e}")
 
             if not show_to_unsubscribe: # If selection failed and didn't return earlier
-                await ctx.send("Failed to make a selection. Unsubscription cancelled.", ephemeral=True)
+                await self.send_response(ctx, "Failed to make a selection. Unsubscription cancelled.", ephemeral=True)
                 return
         
         show_id_to_remove = show_to_unsubscribe['tmdb_id'] # Key is 'tmdb_id'
@@ -321,13 +341,13 @@ Usage examples:
         try:
             success = self.db_manager.remove_tv_show_subscription(user_id, show_id_to_remove)
             if success: # This reflects DB operation success
-                await ctx.send(f"Successfully unsubscribed from **{name_of_show_unsubscribed}**.", ephemeral=True)
+                await self.send_response(ctx, f"Successfully unsubscribed from **{name_of_show_unsubscribed}**.", ephemeral=True)
             else:
                 # If DB operation fails
-                await ctx.send(f"Could not unsubscribe from **{name_of_show_unsubscribed}** due to a database error.", ephemeral=True)
+                await self.send_response(ctx, f"Could not unsubscribe from **{name_of_show_unsubscribed}** due to a database error.", ephemeral=True)
         except Exception as e:
             print(f"Error removing TV subscription for user {user_id} from show {show_id_to_remove} ('{name_of_show_unsubscribed}'): {e}")
-            await ctx.send(f"Sorry, there was an error unsubscribing from '{name_of_show_unsubscribed}'. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, f"Sorry, there was an error unsubscribing from '{name_of_show_unsubscribed}'. Please try again later.", ephemeral=True)
 
     @commands.hybrid_command(name="my_tv_shows", description="Lists your subscribed TV shows.")
     async def my_tv_shows(self, ctx: commands.Context):
@@ -346,11 +366,11 @@ Usage examples:
             subscriptions = self.db_manager.get_user_tv_subscriptions(user_id) # Returns list of dicts
         except Exception as e:
             print(f"Error getting subscriptions for user {user_id}: {e}")
-            await ctx.followup.send("Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, "Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
             return
 
         if not subscriptions:
-            await ctx.followup.send("You are not subscribed to any TV shows. Use `/tv_subscribe` to add some!", ephemeral=True)
+            await self.send_response(ctx, "You are not subscribed to any TV shows. Use `/tv_subscribe` to add some!", ephemeral=True)
             return
 
         embed = discord.Embed(
@@ -361,7 +381,7 @@ Usage examples:
 
         if not subscriptions: # This check is technically redundant due to the one above, but good for safety.
             embed.description = "You are not subscribed to any TV shows yet."
-            await ctx.followup.send(embed=embed, ephemeral=True)
+            await self.send_response(ctx, embed=embed, ephemeral=True)
             return
         
         # Limit the number of shows displayed directly in one embed to avoid hitting limits
@@ -444,7 +464,7 @@ Usage examples:
 
 
         try:
-            await ctx.followup.send(embed=embed, ephemeral=True)
+            await self.send_response(ctx, embed=embed, ephemeral=True)
         except discord.HTTPException as e:
             print(f"Error sending embed for my_tv_shows for user {user_id}: {e}")
             # Basic text fallback if embed fails (e.g., too long, though field limiting should help)
@@ -461,10 +481,10 @@ Usage examples:
             if len(fallback_text) > 2000:
                 fallback_text = fallback_text[:1997] + "..."
 
-            await ctx.followup.send(fallback_text, ephemeral=True)
+            await self.send_response(ctx, fallback_text, ephemeral=True)
         except Exception as e:
             print(f"Unexpected error sending my_tv_shows for user {user_id}: {e}")
-            await ctx.followup.send("Sorry, an unexpected error occurred while displaying your shows.", ephemeral=True)
+            await self.send_response(ctx, "Sorry, an unexpected error occurred while displaying your shows.", ephemeral=True)
 
     @commands.hybrid_command(name="tv_info", description="Get detailed information about a TV show.")
     @discord.app_commands.describe(show_name="The name of the TV show to get information for")
@@ -480,14 +500,14 @@ Usage examples:
         await ctx.defer(ephemeral=True) # Defer for potentially long-running API calls & selection
 
         try:
-            search_results = tmdb_client.search_tv_show(show_name)
+            search_results = tmdb_client.search_tv_shows(show_name)
         except Exception as e:
             print(f"Error searching for TV show '{show_name}' in tv_info: {e}")
-            await ctx.followup.send(f"Sorry, there was an error searching for '{show_name}'. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, f"Sorry, there was an error searching for '{show_name}'. Please try again later.", ephemeral=True)
             return
 
         if not search_results:
-            await ctx.followup.send(f"No shows found for '{show_name}'.", ephemeral=True)
+            await self.send_response(ctx, f"No shows found for '{show_name}'.", ephemeral=True)
             return
 
         selected_show_tmdb_search_data = None # This will store the basic show data from search results
@@ -522,7 +542,7 @@ Usage examples:
                 
                 embeds_list.append(show_embed)
 
-            prompt_msg_obj = await ctx.followup.send(content=message_content, embeds=embeds_list, ephemeral=False, wait=True) # Send and wait for message object
+            prompt_msg_obj = await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=False, wait=True) # Send and wait for message object
 
             for i in range(len(display_results)):
                 if i < len(NUMBER_EMOJIS):
@@ -547,18 +567,18 @@ Usage examples:
                     # await prompt_msg_obj.edit(content=f"You selected: {selected_show_tmdb_search_data['name']}", embed=None, view=None)
                     # await prompt_msg_obj.clear_reactions()
                 else:
-                    await ctx.followup.send("Invalid reaction. Show information request cancelled.", ephemeral=True)
+                    await self.send_response(ctx, "Invalid reaction. Show information request cancelled.", ephemeral=True)
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                     return
             except asyncio.TimeoutError:
-                await ctx.followup.send("Selection timed out. Show information request cancelled.", ephemeral=True)
+                await self.send_response(ctx, "Selection timed out. Show information request cancelled.", ephemeral=True)
                 try: await prompt_msg_obj.delete()
                 except discord.HTTPException: pass
                 return
             except Exception as e:
                 print(f"Error during reaction-based show selection for tv_info '{show_name}' by {ctx.author.id}: {e}")
-                await ctx.followup.send("An error occurred during selection. Show information request cancelled.", ephemeral=True)
+                await self.send_response(ctx, "An error occurred during selection. Show information request cancelled.", ephemeral=True)
                 try: await prompt_msg_obj.delete()
                 except discord.HTTPException: pass
                 return
@@ -576,7 +596,7 @@ Usage examples:
 
 
             if selected_show_tmdb_search_data is None:
-                await ctx.followup.send("Failed to make a selection. Show information request cancelled.", ephemeral=True)
+                await self.send_response(ctx, "Failed to make a selection. Show information request cancelled.", ephemeral=True)
                 return
         
         # At this point, selected_show_tmdb_search_data is the basic data from the search result.
@@ -587,11 +607,11 @@ Usage examples:
             full_show_details = tmdb_client.get_show_details(show_id, append_to_response="credits,keywords,external_ids,content_ratings")
         except Exception as e:
             print(f"Error fetching full details for show ID {show_id} in tv_info: {e}")
-            await ctx.followup.send(f"Sorry, there was an error fetching detailed information for '{selected_show_tmdb_search_data['name']}'. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, f"Sorry, there was an error fetching detailed information for '{selected_show_tmdb_search_data['name']}'. Please try again later.", ephemeral=True)
             return
 
         if not full_show_details:
-            await ctx.followup.send(f"Could not retrieve detailed information for '{selected_show_tmdb_search_data['name']}'.", ephemeral=True)
+            await self.send_response(ctx, f"Could not retrieve detailed information for '{selected_show_tmdb_search_data['name']}'.", ephemeral=True)
             return
 
         # Construct the embed using full_show_details
@@ -672,13 +692,13 @@ Usage examples:
         embed.set_footer(text="Data provided by TMDB.")
         
         try:
-            await ctx.followup.send(embed=embed, ephemeral=True)
+            await self.send_response(ctx, embed=embed, ephemeral=True)
         except discord.HTTPException as e:
             print(f"Error sending tv_info embed for {show_id}: {e}")
-            await ctx.followup.send("Failed to send the detailed information embed. It might be too large.", ephemeral=True)
+            await self.send_response(ctx, "Failed to send the detailed information embed. It might be too large.", ephemeral=True)
         except Exception as e:
             print(f"Unexpected error sending tv_info for {show_id}: {e}")
-            await ctx.followup.send("An unexpected error occurred while displaying TV show info.", ephemeral=True)
+            await self.send_response(ctx, "An unexpected error occurred while displaying TV show info.", ephemeral=True)
 
     @commands.hybrid_command(name="tv_schedule", description="Displays your upcoming TV show episode schedule for the next 7 days.")
     async def tv_schedule(self, ctx: commands.Context):
@@ -693,11 +713,11 @@ Usage examples:
             subscriptions = self.db_manager.get_user_tv_subscriptions(user_id)
         except Exception as e:
             print(f"Error getting subscriptions for user {user_id} in tv_schedule: {e}")
-            await ctx.followup.send("Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, "Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
             return
 
         if not subscriptions:
-            await ctx.followup.send("You are not subscribed to any TV shows. Use `/tv_subscribe` to add some!", ephemeral=True)
+            await self.send_response(ctx, "You are not subscribed to any TV shows. Use `/tv_subscribe` to add some!", ephemeral=True)
             return
 
         today = date.today()
@@ -710,12 +730,12 @@ Usage examples:
             # Send a preliminary message if the main one will take time.
             # Since we already deferred, this message will be separate if the user has many subs.
             # If not many subs, this won't be sent, and the final result will come faster.
-            await ctx.followup.send("You have many subscriptions! Generating your schedule might take a moment...", ephemeral=True)
+            await self.send_response(ctx, "You have many subscriptions! Generating your schedule might take a moment...", ephemeral=True)
 
 
         for sub_idx, sub in enumerate(subscriptions):
-            show_id = sub['show_id']
-            stored_show_name = sub['show_name'] 
+            show_id = sub['show_tmdb_id']
+            show_name_stored = sub['show_name'] 
 
             try:
                 show_details_tmdb = tmdb_client.get_show_details(show_id)
@@ -738,7 +758,7 @@ Usage examples:
                                 ep_name = next_ep.get('name', 'TBA')
                                 ep_season = next_ep.get('season_number', 0) 
                                 ep_num = next_ep.get('episode_number', 0) 
-                                current_show_name = show_details_tmdb.get('name', stored_show_name)
+                                current_show_name = show_details_tmdb.get('name', show_name_stored)
 
                                 episode_info = {
                                     'show_name': current_show_name,
@@ -767,7 +787,7 @@ Usage examples:
         if not upcoming_episodes_by_date:
             # If a preliminary message was sent, we need to edit it or send a new followup.
             # For simplicity, always send a new followup. ctx.followup can be called multiple times.
-            await ctx.followup.send("✨ No episodes for your subscribed shows are scheduled to air in the next 7 days.", ephemeral=True)
+            await self.send_response(ctx, "✨ No episodes for your subscribed shows are scheduled to air in the next 7 days.", ephemeral=True)
             return
 
         embed = discord.Embed(
@@ -806,20 +826,20 @@ Usage examples:
                 embed.add_field(name=f"📅 **{date_header}**", value=field_value, inline=False)
         
         if not embed.fields:
-             await ctx.followup.send("✨ No episodes for your subscribed shows are scheduled to air in the next 7 days (or an error occurred formatting them).", ephemeral=True)
+             await self.send_response(ctx, "✨ No episodes for your subscribed shows are scheduled to air in the next 7 days (or an error occurred formatting them).", ephemeral=True)
         else:
             try:
-                await ctx.followup.send(embed=embed, ephemeral=True)
+                await self.send_response(ctx, embed=embed, ephemeral=True)
             except discord.HTTPException as e:
                 print(f"Error sending schedule embed for user {user_id}: {e}")
                 # Check if the error is due to embed size
                 if e.code == 50035: # Invalid Form Body - often due to embed size
-                     await ctx.followup.send("Sorry, your schedule is too large to display in a single message. We are working on a fix for this!", ephemeral=True)
+                     await self.send_response(ctx, "Sorry, your schedule is too large to display in a single message. We are working on a fix for this!", ephemeral=True)
                 else:
-                    await ctx.followup.send("Sorry, there was an error displaying your schedule.", ephemeral=True)
+                    await self.send_response(ctx, "Sorry, there was an error displaying your schedule.", ephemeral=True)
             except Exception as e_send:
                 print(f"Unexpected error sending schedule embed for user {user_id}: {e_send}")
-                await ctx.followup.send("An unexpected error occurred while trying to send your schedule.", ephemeral=True)
+                await self.send_response(ctx, "An unexpected error occurred while trying to send your schedule.", ephemeral=True)
 
     @commands.hybrid_command(name="tv_trending", description="Shows trending TV shows from TMDB.")
     @discord.app_commands.describe(time_window="Time window for trending: 'day' or 'week'. Defaults to 'week'.")
@@ -836,18 +856,18 @@ Usage examples:
         await ctx.defer(ephemeral=False) # Not ephemeral as it's a general info command
 
         if time_window.lower() not in ['day', 'week']:
-            await ctx.followup.send("Invalid time window. Please use 'day' or 'week'.", ephemeral=True)
+            await self.send_response(ctx, "Invalid time window. Please use 'day' or 'week'.", ephemeral=True)
             return
 
         try:
             trending_shows = tmdb_client.get_trending_tv_shows(time_window=time_window.lower())
         except Exception as e:
             print(f"Error fetching trending TV shows (window: {time_window}): {e}")
-            await ctx.followup.send(f"Sorry, there was an error fetching trending shows. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, f"Sorry, there was an error fetching trending shows. Please try again later.", ephemeral=True)
             return
 
         if not trending_shows:
-            await ctx.followup.send(f"No trending shows found for the '{time_window}' window at the moment.", ephemeral=True)
+            await self.send_response(ctx, f"No trending shows found for the '{time_window}' window at the moment.", ephemeral=True)
             return
 
         title_time_window = "Day" if time_window.lower() == 'day' else "Week"
@@ -884,13 +904,13 @@ Usage examples:
             embed.add_field(name=field_name, value=field_value, inline=False)
 
         try:
-            await ctx.followup.send(embed=embed)
+            await self.send_response(ctx, embed=embed)
         except discord.HTTPException as e:
             print(f"Error sending trending shows embed: {e}")
-            await ctx.followup.send("Sorry, there was an error displaying the trending shows.", ephemeral=True)
+            await self.send_response(ctx, "Sorry, there was an error displaying the trending shows.", ephemeral=True)
         except Exception as e:
             print(f"Unexpected error sending trending shows: {e}")
-            await ctx.followup.send("An unexpected error occurred.", ephemeral=True)
+            await self.send_response(ctx, "An unexpected error occurred.", ephemeral=True)
 
 
     @tasks.loop(minutes=30) # Check every 30 minutes for testing, change to hours=6 or hours=12 for production
@@ -929,7 +949,7 @@ Usage examples:
 
 
             for sub in user_subs:
-                show_id = sub['show_id']
+                show_id = sub['show_tmdb_id']
                 show_name_stored = sub['show_name'] # Name as stored by user
                 last_notified_ep_details = sub.get('last_notified_episode_details') # dict or None
 

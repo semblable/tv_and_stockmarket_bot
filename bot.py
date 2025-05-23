@@ -242,21 +242,88 @@ def get_tracked_stocks(discord_user_id):
         print(f"Error in /tracked_stocks: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
-@flask_app.route('/api/internal/user/<discord_user_id>/stock_alerts', methods=['GET'])
+@flask_app.route('/api/internal/user/<discord_user_id>/tracked_stock', methods=['POST'])
 @require_internal_api_key
-def get_stock_alerts(discord_user_id):
+def add_tracked_stock(discord_user_id):
     # Access db_manager via bot object
     if not bot.db_manager:
         return jsonify({"error": "Database manager not available"}), 503
+    flask_app.logger.info(f"[BOT API LOGGER] Attempting to add tracked stock for discord_user_id: {discord_user_id}")
     try:
         user_id = int(discord_user_id)
-        alerts = bot.db_manager.get_user_all_stock_alerts(user_id) # Use instance via bot
-        return jsonify(alerts), 200
     except ValueError:
+        flask_app.logger.error(f"[BOT API LOGGER] ValueError converting discord_user_id '{discord_user_id}' to int for add tracked stock.")
+        return jsonify({"error": "Invalid user ID format"}), 400
+
+    if not request.is_json:
+        flask_app.logger.warning(f"[BOT API LOGGER] Add tracked stock request for user_id {user_id} is not JSON.")
+        return jsonify({"error": "Invalid payload: request must be JSON"}), 400
+
+    data = request.get_json()
+    symbol = data.get('symbol')
+    quantity = data.get('quantity')
+    purchase_price = data.get('purchase_price')
+
+    if not isinstance(symbol, str) or not symbol.strip():
+        flask_app.logger.warning(f"[BOT API LOGGER] Invalid payload for add tracked stock for user_id {user_id}. Missing or invalid symbol. Payload: {data}")
+        return jsonify({"error": "Invalid payload: missing or invalid symbol"}), 400
+
+    # Validate optional numeric fields
+    if quantity is not None:
+        try:
+            quantity = float(quantity)
+            if quantity <= 0:
+                return jsonify({"error": "Invalid payload: quantity must be positive"}), 400
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid payload: quantity must be a number"}), 400
+
+    if purchase_price is not None:
+        try:
+            purchase_price = float(purchase_price)
+            if purchase_price <= 0:
+                return jsonify({"error": "Invalid payload: purchase_price must be positive"}), 400
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid payload: purchase_price must be a number"}), 400
+
+    flask_app.logger.info(f"[BOT API LOGGER] Calling db_manager.add_tracked_stock for user_id {user_id}, symbol {symbol}")
+    success = bot.db_manager.add_tracked_stock(user_id, symbol.strip().upper(), quantity, purchase_price) # Use instance via bot
+
+    if success:
+        flask_app.logger.info(f"[BOT API LOGGER] Successfully added/updated tracked stock ({symbol}) for user_id {user_id}.")
+        return jsonify({"message": "Stock added/updated successfully"}), 201
+    else:
+        flask_app.logger.error(f"[BOT API LOGGER] Failed to add tracked stock ({symbol}) for user_id {user_id} due to db_manager failure.")
+        return jsonify({"error": "Failed to add tracked stock"}), 500
+
+@flask_app.route('/api/internal/user/<discord_user_id>/stock_alerts', methods=['GET'])
+@require_internal_api_key
+def get_stock_alerts(discord_user_id):
+    flask_app.logger.info(f"[BOT API LOGGER] /stock_alerts: Entered for user {discord_user_id}")
+    if not bot.db_manager:
+        flask_app.logger.error("[BOT API LOGGER] /stock_alerts: bot.db_manager is None.")
+        return jsonify({"error": "Database manager not available"}), 503
+    try:
+        flask_app.logger.info(f"[BOT API LOGGER] /stock_alerts: Attempting int conversion for {discord_user_id}")
+        user_id = int(discord_user_id)
+        flask_app.logger.info(f"[BOT API LOGGER] /stock_alerts: Converted to user_id {user_id}. Calling get_user_all_stock_alerts.")
+        alerts = bot.db_manager.get_user_all_stock_alerts(user_id)
+        alerts_type = type(alerts)
+        alerts_len = len(alerts) if isinstance(alerts, (list, tuple, dict, str)) else 'N/A'
+        flask_app.logger.info(f"[BOT API LOGGER] /stock_alerts: get_user_all_stock_alerts returned: {alerts_type} len: {alerts_len}")
+        flask_app.logger.info(f"[BOT API LOGGER] /stock_alerts: Attempting jsonify.")
+        response = jsonify(alerts)
+        flask_app.logger.info(f"[BOT API LOGGER] /stock_alerts: jsonify successful. Returning response.")
+        return response, 200
+    except ValueError:
+        flask_app.logger.error(f"[BOT API LOGGER] /stock_alerts: ValueError converting discord_user_id '{discord_user_id}' to int.", exc_info=True)
         return jsonify({"error": "Invalid user ID format"}), 400
     except Exception as e:
-        print(f"Error in /stock_alerts: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        flask_app.logger.error(f"[BOT API LOGGER] /stock_alerts: General Exception for discord_user_id {discord_user_id}: {e}", exc_info=True)
+        try:
+            return jsonify({"error": "Internal server error"}), 500
+        except Exception as e_jsonify:
+            flask_app.logger.error(f"[BOT API LOGGER] /stock_alerts: CRITICAL - jsonify failed in except block: {e_jsonify}", exc_info=True)
+            return "Internal Server Error - jsonify failed", 500 # Plain text
 
 @flask_app.route('/api/internal/user/<discord_user_id>/settings', methods=['GET'])
 @require_internal_api_key

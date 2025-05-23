@@ -14,8 +14,9 @@ logger.info("config.py: Attempting to load .env file...")
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env') # Explicitly define path to .env
 if os.path.exists(dotenv_path):
     logger.info(f"config.py: .env file found at {dotenv_path}")
-    load_dotenv(dotenv_path=dotenv_path)
-    logger.info("config.py: load_dotenv() called.")
+    # Handle potential BOM in .env file by explicitly specifying encoding
+    load_dotenv(dotenv_path=dotenv_path, encoding='utf-8-sig')
+    logger.info("config.py: load_dotenv() called with utf-8-sig encoding.")
 else:
     logger.warning(f"config.py: .env file NOT found at {dotenv_path}. Environment variables should be set directly.")
 

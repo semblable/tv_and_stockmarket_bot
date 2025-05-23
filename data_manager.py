@@ -25,7 +25,8 @@ class DataManager:
                 logger.info(f"Ensured directory exists: {db_dir}")
 
             # Connect to SQLite database (creates the file if it doesn't exist)
-            self.conn = sqlite3.connect(SQLITE_DB_PATH)
+            # Use check_same_thread=False to allow cross-thread access
+            self.conn = sqlite3.connect(SQLITE_DB_PATH, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row # Access columns by name
             logger.info(f"Successfully connected to SQLite database at {SQLITE_DB_PATH}.")
             self._initialize_db()
@@ -467,6 +468,20 @@ class DataManager:
         # A more complex approach would be needed if strict "changed" status is required.
         # For now, assume if it ran, it's fine.
         return self._execute_query(query, params, commit=True)
+
+    def get_user_all_stock_alerts(self, user_id: int):
+        user_id_str = str(user_id)
+        query = """
+        SELECT symbol, target_above, active_above, target_below, active_below,
+               dpc_above_target, dpc_above_active, dpc_below_target, dpc_below_active
+        FROM stock_alerts WHERE user_id = :user_id
+        """
+        params = {"user_id": user_id_str}
+        alerts = self._execute_query(query, params, fetch_all=True)
+        for alert in alerts:
+            for key in ['active_above', 'active_below', 'dpc_above_active', 'dpc_below_active']:
+                if key in alert: alert[key] = bool(alert[key])
+        return alerts
 
     def get_all_active_alerts_for_monitoring(self):
         query = """

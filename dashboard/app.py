@@ -4,38 +4,47 @@ import requests
 from requests_oauthlib import OAuth2Session
 import os
 import logging # Added for enhanced logging
+import traceback
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import Config
 import internal_api_client # Import the new API client
 from api_clients import tmdb_client # Import the TMDB client
 
-app = Flask(__name__)
-app.config.from_object(Config)
+try:
+    app = Flask(__name__)
+    app.config.from_object(Config)
 
-# Configure basic logging
-logging.basicConfig(level=logging.INFO)
-app.logger.setLevel(logging.INFO) # Ensure app logger also respects this level
+    # Configure basic logging
+    logging.basicConfig(level=logging.INFO)
+    app.logger.setLevel(logging.INFO) # Ensure app logger also respects this level
 
-# Apply ProxyFix to handle X-Forwarded-Proto and other headers correctly
-# This is important for OAuth2 callbacks when running behind a reverse proxy (like on Render)
-# It ensures that url_for generates HTTPS URLs when the proxy terminates SSL.
-# x_for=1 means trust X-Forwarded-For (client IP)
-# x_proto=1 means trust X-Forwarded-Proto (http/https)
-# x_host=1 means trust X-Forwarded-Host
-# x_prefix=1 means trust X-Forwarded-Prefix (if app is under a subpath)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    # Apply ProxyFix to handle X-Forwarded-Proto and other headers correctly
+    # This is important for OAuth2 callbacks when running behind a reverse proxy (like on Render)
+    # It ensures that url_for generates HTTPS URLs when the proxy terminates SSL.
+    # x_for=1 means trust X-Forwarded-For (client IP)
+    # x_proto=1 means trust X-Forwarded-Proto (http/https)
+    # x_host=1 means trust X-Forwarded-Host
+    # x_prefix=1 means trust X-Forwarded-Prefix (if app is under a subpath)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
-# Ensure the templates and static folders exist, Flask might not create them.
-# However, write_to_file will create parent directories if they don't exist.
-# For templates, we'll create them explicitly later.
-# For static, it's good practice to have it.
-static_dir = os.path.join(os.path.dirname(__file__), 'static')
-if not os.path.exists(static_dir):
-    os.makedirs(static_dir)
-templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
-if not os.path.exists(templates_dir):
-    os.makedirs(templates_dir)
+    # Ensure the templates and static folders exist, Flask might not create them.
+    # However, write_to_file will create parent directories if they don't exist.
+    # For templates, we'll create them explicitly later.
+    # For static, it's good practice to have it.
+    static_dir = os.path.join(os.path.dirname(__file__), 'static')
+    if not os.path.exists(static_dir):
+        os.makedirs(static_dir)
+    templates_dir = os.path.join(os.path.dirname(__file__), 'templates')
+    if not os.path.exists(templates_dir):
+        os.makedirs(templates_dir)
+
+    print("Flask app initialized successfully up to this point.", flush=True)
+
+except Exception as e:
+    print(f"!!!!!! FLASK APP FAILED TO INITIALIZE !!!!!!", flush=True)
+    print(traceback.format_exc(), flush=True)
+    raise # Re-raise to ensure Gunicorn also sees it
 
 
 def login_required(f):
@@ -252,7 +261,7 @@ def add_movie():
     title = request.form.get('title')
     poster_path = request.form.get('poster_path')
 
-    if not tmdb_id_str or not title: # poster_path can be optional
+    if not tmdb_id_str or not title: # poster_path can be optional (empty string)
         flash("Missing tmdb_id or title for the movie.", "error")
         return redirect(url_for('dashboard'))
 
@@ -275,6 +284,64 @@ def add_movie():
         flash(f"Movie '{title}' added successfully!", "success")
         
     return redirect(url_for('dashboard'))
+
+@app.route('/dashboard/add_stock', methods=['POST'])
+@login_required
+def add_stock():
+    user = session.get('discord_user')
+    if not user or 'id' not in user:
+        flash("User session not found or invalid. Please log in again.", "error")
+        return redirect(url_for('login'))
+
+    user_id = user['id']
+    symbol = request.form.get('symbol')
+    quantity_str = request.form.get('quantity')
+    purchase_price_str = request.form.get('purchase_price')
+
+    if not symbol or not symbol.strip():
+        flash("Missing stock symbol.", "error")
+        return redirect(url_for('dashboard'))
+
+    symbol = symbol.strip().upper()
+    quantity = None
+    purchase_price = None
+
+    # Parse optional quantity
+    if quantity_str and quantity_str.strip():
+        try:
+            quantity = float(quantity_str)
+            if quantity <= 0:
+                flash("Quantity must be positive.", "error")
+                return redirect(url_for('dashboard'))
+        except ValueError:
+            flash("Invalid quantity format.", "error")
+            return redirect(url_for('dashboard'))
+
+    # Parse optional purchase price
+    if purchase_price_str and purchase_price_str.strip():
+        try:
+            purchase_price = float(purchase_price_str)
+            if purchase_price <= 0:
+                flash("Purchase price must be positive.", "error")
+                return redirect(url_for('dashboard'))
+        except ValueError:
+            flash("Invalid purchase price format.", "error")
+            return redirect(url_for('dashboard'))
+
+    response_json, error_message = internal_api_client.add_tracked_stock(
+        user_id=user_id,
+        symbol=symbol,
+        quantity=quantity,
+        purchase_price=purchase_price
+    )
+
+    if error_message:
+        flash(f"Error adding stock: {error_message}", "error")
+    else:
+        flash(f"Stock '{symbol}' added successfully!", "success")
+        
+    return redirect(url_for('dashboard'))
+
 @app.route('/dashboard/remove_tv_show/<int:tmdb_id>', methods=['POST'])
 @login_required
 def remove_tv_show(tmdb_id: int):
@@ -301,6 +368,7 @@ def remove_tv_show(tmdb_id: int):
         app.logger.info(f"Successfully removed TV show subscription for user_id: {user_id}, tmdb_id: {tmdb_id}")
         
     return redirect(url_for('dashboard'))
+
 @app.route('/dashboard/search_tv_shows', methods=['GET'])
 @login_required
 def search_tv_shows_route():
@@ -321,6 +389,7 @@ def search_tv_shows_route():
     # or an empty list if no results or an error occurred.
     # So, we can directly return it.
     return jsonify(results)
+
 @app.route('/logout')
 def logout():
     session.pop('discord_user', None)

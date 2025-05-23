@@ -109,10 +109,7 @@
                             <input type="text" id="movie_poster_path" name="poster_path" placeholder="e.g., /xyz.jpg">
                         </div>
                         <button type="submit">Add Movie</button>
-                    </form>
-                </section>
-
-                <section id="tv_shows">
+                                        </form>                </section>                <section id="add_stock_form">                    <h2>Add Stock to Track</h2>                    <form method="POST" action="{{ url_for('add_stock') }}">                        <div class="form-group">                            <label for="stock_symbol">Stock Symbol:</label>                            <input type="text" id="stock_symbol" name="symbol" placeholder="e.g., AAPL, MSFT, TSLA" required>                        </div>                        <div class="form-group">                            <label for="stock_quantity">Quantity (optional):</label>                            <input type="number" id="stock_quantity" name="quantity" placeholder="e.g., 10.5" step="0.01" min="0">                        </div>                        <div class="form-group">                            <label for="stock_purchase_price">Purchase Price (optional):</label>                            <input type="number" id="stock_purchase_price" name="purchase_price" placeholder="e.g., 150.75" step="0.01" min="0">                        </div>                        <button type="submit">Add Stock</button>                    </form>                </section>                <section id="tv_shows">
                     <h2>TV Show Subscriptions</h2>
                     {% if data.tv_shows %}
                         <ul>
@@ -151,7 +148,16 @@
                     {% if data.stocks %}
                         <ul>
                         {% for stock in data.stocks %}
-                            <li>{{ stock.get('symbol', 'N/A') }} - Last Price: {{ stock.get('price', 'N/A') }} ({{ stock.get('timestamp', 'N/A') }})</li>
+                            <li>
+                                <strong>{{ stock.get('symbol', 'N/A') }}</strong>
+                                {% if stock.get('quantity') %}
+                                    - Quantity: {{ stock.get('quantity') }}
+                                {% endif %}
+                                {% if stock.get('purchase_price') %}
+                                    - Purchase Price: ${{ "%.2f"|format(stock.get('purchase_price')) }}
+                                {% endif %}
+                                <!-- You could add current price, gain/loss here if available -->
+                            </li>
                         {% else %}
                             <li>No tracked stocks found.</li>
                         {% endfor %}
