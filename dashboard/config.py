@@ -28,6 +28,9 @@ class Config:
     # OAuth2 Scopes
     DISCORD_SCOPES = ['identify', 'email', 'guilds']
 
+# API Keys
+TMDB_API_KEY = os.environ.get("TMDB_API_KEY")
+
 if not Config.DISCORD_CLIENT_ID or not Config.DISCORD_CLIENT_SECRET or not Config.DISCORD_REDIRECT_URI:
     print("Warning: Discord OAuth2 credentials (DASHBOARD_CLIENT_ID, DASHBOARD_CLIENT_SECRET, DASHBOARD_REDIRECT_URI) are not fully configured in .env")
 
