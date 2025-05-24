@@ -392,7 +392,7 @@ Usage examples:
                 # If MERGE fails, it's a DB issue. "Already subscribed" is handled by MERGE.
                 await self.send_response(ctx, f"Could not subscribe to {actual_show_name} due to a database error. Please try again later.", ephemeral=True)
         except Exception as e:
-            print(f"Error adding TV subscription for user {ctx.author.id} to show {show_id} ('{actual_show_name}'): {e}")
+            logger.exception(f"Error adding TV subscription for user {ctx.author.id} to show {show_id} ('{actual_show_name}')")
             await self.send_response(ctx, f"Sorry, there was an error subscribing to '{actual_show_name}'. Please try again later.", ephemeral=True)
 
     @commands.hybrid_command(name="tv_unsubscribe", description="Unsubscribe from TV show notifications.")
