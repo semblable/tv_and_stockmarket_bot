@@ -322,10 +322,17 @@ class Utility(commands.Cog):
                 # Filter out movies with release dates in the past (TMDB might sometimes return them)
                 # And ensure release_date is present
                 today_date = datetime.date.today()
-                valid_movies = [
-                    m for m in movies_data
-                    if m.get('release_date') and datetime.datetime.strptime(m['release_date'], '%Y-%m-%d').date() >= today_date
-                ]
+                valid_movies = []
+                for m in movies_data:
+                    if m.get('release_date'):
+                        try:
+                            release_date_obj = datetime.datetime.strptime(m['release_date'], '%Y-%m-%d').date()
+                            if release_date_obj >= today_date:
+                                valid_movies.append(m)
+                        except ValueError:
+                            # Optionally, log the error or the movie that was skipped
+                            # print(f"Skipping movie due to invalid date format: {m.get('title', 'N/A')} - {m['release_date']}")
+                            pass # Movie with invalid date format is skipped
                 # Sort by release date (already done in client, but good to ensure)
                 valid_movies.sort(key=lambda x: x['release_date'])
 

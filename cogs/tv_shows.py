@@ -62,8 +62,10 @@ Usage examples:
 `!tv_subscribe The Witcher`
 `/tv_subscribe show_name:Loki`
         """
+        await ctx.defer(ephemeral=True)
+        
         try:
-            search_results = tmdb_client.search_tv_shows(show_name)
+            search_results = await self.bot.loop.run_in_executor(None, tmdb_client.search_tv_shows, show_name)
         except Exception as e:
             print(f"Error searching for TV show '{show_name}': {e}")
             await self.send_response(ctx, f"Sorry, there was an error searching for '{show_name}'. Please try again later.", ephemeral=True)
@@ -187,7 +189,7 @@ Usage examples:
 
         try:
             # Use the new method signature which includes poster_path
-            success = self.db_manager.add_tv_show_subscription(ctx.author.id, show_id, actual_show_name, poster_path)
+            success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tv_show_subscription, ctx.author.id, show_id, actual_show_name, poster_path)
             if success: # This now reflects DB operation success (MERGE)
                 await self.send_response(ctx, f"Successfully subscribed to {actual_show_name}!", ephemeral=True)
             else:
@@ -205,12 +207,14 @@ Allows a user to unsubscribe from notifications for a specific TV show.
 If multiple subscribed shows match the name, you'll be prompted.
 
 Usage examples:
-`!tv_unsubscribe The Boys`
-`/tv_unsubscribe show_name:Severance`
+`!tv_unsubscribe The Witcher`
+`/tv_unsubscribe show_name:Loki`
         """
+        await ctx.defer(ephemeral=True)
         user_id = ctx.author.id
+
         try:
-            subscriptions = self.db_manager.get_user_tv_subscriptions(user_id) # Returns list of dicts
+            subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tv_subscriptions, user_id)
         except Exception as e:
             print(f"Error getting subscriptions for user {user_id}: {e}")
             await self.send_response(ctx, "Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
@@ -220,69 +224,42 @@ Usage examples:
             await self.send_response(ctx, "You are not subscribed to any TV shows.", ephemeral=True)
             return
 
-        show_to_unsubscribe = None # This will store the final selected subscription object
-        
-        # Find all partial matches (case-insensitive) in subscribed shows
-        matching_subscriptions = []
-        # Subscriptions is now a list of dicts, each with 'tmdb_id', 'title', 'poster_path'
-        for sub in subscriptions:
-            if show_name.lower() in sub['title'].lower(): # Compare with 'title'
-                matching_subscriptions.append(sub)
+        # subscriptions is a list of dicts, each having keys: {'tmdb_id': ..., 'title': ..., 'poster_path': ...}
+        matching_subscriptions = [
+            sub for sub in subscriptions if show_name.lower() in sub['title'].lower()
+        ]
 
         if not matching_subscriptions:
-            await self.send_response(ctx, f"No show matching '{show_name}' found in your subscriptions. Use `/my_tv_shows` to see your current subscriptions.", ephemeral=True)
+            await self.send_response(ctx, f"No show matching '{show_name}' found in your subscriptions. Use `/my_tv_shows` to see them.", ephemeral=True)
             return
 
+        selected_show_to_unsubscribe = None
+
         if len(matching_subscriptions) == 1:
-            show_to_unsubscribe = matching_subscriptions[0]
-        else: # Multiple matches, initiate selection process
-            display_results = matching_subscriptions[:5] # Limit to top 5 results for selection
+            selected_show_to_unsubscribe = matching_subscriptions[0]
+        else:
+            display_results = matching_subscriptions[:5]
 
             embeds_list = []
-            message_content = "Multiple subscribed shows match. Please react with the number of the show you want to unsubscribe from:"
-            
-            fetched_show_details_for_selection = [] # To store TMDB details for selected shows
+            message_content = "Multiple subscribed shows match. React with the number to unsubscribe:"
 
             for i, sub_data_item in enumerate(display_results):
-                try: # Add try block, correctly indented
-                    # We already have title and poster_path from the subscription data.
-                    # We might need first_air_date for the year, requiring a TMDB call if not stored.
-                    # For now, let's simplify and use the stored title. Poster is also available.
-                    # If year is desired, a TMDB call for get_show_details(sub_data_item['tmdb_id']) would be needed.
+                show_embed = discord.Embed(
+                    description=f"{NUMBER_EMOJIS[i]} **{sub_data_item['title']}**",
+                    color=discord.Color.red() # Red for unsubscribe
+                )
+                
+                poster_path = sub_data_item.get('poster_path')
+                if poster_path:
+                    poster_url = tmdb_client.get_poster_url(poster_path, size="w154")
+                    if poster_url:
+                        show_embed.set_thumbnail(url=poster_url)
+                
+                embeds_list.append(show_embed)
 
-                    # For simplicity, we'll display without the year for unsubscribe selection,
-                    # using the stored title and poster.
-                    display_title = sub_data_item.get('title', 'Unknown Show')
+            prompt_msg_obj = await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
 
-                    show_embed = discord.Embed(
-                        description=f"{NUMBER_EMOJIS[i]} **{display_title}**",
-                        color=discord.Color.red()
-                    )
-
-                    poster_path = sub_data_item.get('poster_path')
-                    if poster_path:
-                        poster_url = tmdb_client.get_poster_url(poster_path, size="w154")
-                        if poster_url:
-                            show_embed.set_thumbnail(url=poster_url)
-
-                    embeds_list.append(show_embed)
-                    # No need for fetched_show_details_for_selection if we use sub_data_item directly
-                except Exception as e: # Correctly indented except
-                    print(f"Error preparing embed for show ID {sub_data_item.get('tmdb_id')} during unsubscribe selection: {e}")
-                    fallback_embed = discord.Embed(
-                        description=f"{NUMBER_EMOJIS[i]} **{sub_data_item.get('title', 'Error Displaying Show')}**",
-                        color=discord.Color.red()
-                    )
-                    embeds_list.append(fallback_embed) # Append fallback embed even if error
-
-
-            if not embeds_list: # Should not happen if matching_subscriptions is not empty
-                await self.send_response(ctx, "Could not prepare selection list. Please try again.", ephemeral=True)
-                return
-
-            prompt_msg_obj = await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=False, wait=True) # Send and wait for message object
-
-            for i in range(len(display_results)): # display_results is matching_subscriptions[:5]
+            for i in range(len(display_results)):
                 if i < len(NUMBER_EMOJIS):
                     await prompt_msg_obj.add_reaction(NUMBER_EMOJIS[i])
             
@@ -293,7 +270,6 @@ Usage examples:
 
             try:
                 reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
-                
                 choice_idx = -1
                 for i, emoji_str in enumerate(NUMBER_EMOJIS[:len(display_results)]):
                     if str(reaction.emoji) == emoji_str:
@@ -301,10 +277,11 @@ Usage examples:
                         break
                 
                 if 0 <= choice_idx < len(display_results):
-                    # display_results are the filtered subscription dicts from DB
-                    show_to_unsubscribe = display_results[choice_idx]
+                    selected_show_to_unsubscribe = display_results[choice_idx]
+                    try: await prompt_msg_obj.delete()
+                    except discord.HTTPException: pass
                 else:
-                    await self.send_response(ctx, "Invalid reaction. Unsubscription cancelled.", ephemeral=True)
+                    await self.send_response(ctx, "Invalid selection. Unsubscription cancelled.", ephemeral=True)
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                     return
@@ -314,37 +291,25 @@ Usage examples:
                 except discord.HTTPException: pass
                 return
             except Exception as e:
-                print(f"Error during reaction-based unsubscribe selection for '{show_name}' by {ctx.author.id}: {e}")
+                print(f"Error during reaction-based show unsubscription selection for '{show_name}' by {ctx.author.id}: {e}")
                 await self.send_response(ctx, "An error occurred during selection. Unsubscription cancelled.", ephemeral=True)
                 try: await prompt_msg_obj.delete()
                 except discord.HTTPException: pass
                 return
-            finally:
-                try:
-                    if 'prompt_msg_obj' in locals() and prompt_msg_obj:
-                        if show_to_unsubscribe: # A choice was made
-                             await prompt_msg_obj.clear_reactions()
-                except discord.Forbidden:
-                    print(f"Bot lacks 'Manage Messages' permission to clear reactions on message {prompt_msg_obj.id if 'prompt_msg_obj' in locals() else 'N/A'}.")
-                except discord.HTTPException as e:
-                    print(f"HTTPException while trying to manage reactions/message for unsubscribe: {e}")
-                except Exception as e:
-                    print(f"Generic error during reaction/message cleanup for unsubscribe: {e}")
 
-            if not show_to_unsubscribe: # If selection failed and didn't return earlier
-                await self.send_response(ctx, "Failed to make a selection. Unsubscription cancelled.", ephemeral=True)
-                return
-        
-        show_id_to_remove = show_to_unsubscribe['tmdb_id'] # Key is 'tmdb_id'
-        name_of_show_unsubscribed = show_to_unsubscribe['title'] # Key is 'title'
+        if not selected_show_to_unsubscribe:
+            await self.send_response(ctx, "Could not identify show to unsubscribe from. Please try again.", ephemeral=True)
+            return
+
+        show_id_to_remove = selected_show_to_unsubscribe['tmdb_id']
+        name_of_show_unsubscribed = selected_show_to_unsubscribe['title']
 
         try:
-            success = self.db_manager.remove_tv_show_subscription(user_id, show_id_to_remove)
-            if success: # This reflects DB operation success
+            success = await self.bot.loop.run_in_executor(None, self.db_manager.remove_tv_subscription, user_id, show_id_to_remove)
+            if success:
                 await self.send_response(ctx, f"Successfully unsubscribed from **{name_of_show_unsubscribed}**.", ephemeral=True)
             else:
-                # If DB operation fails
-                await self.send_response(ctx, f"Could not unsubscribe from **{name_of_show_unsubscribed}** due to a database error.", ephemeral=True)
+                await self.send_response(ctx, f"Could not unsubscribe from **{name_of_show_unsubscribed}** due to a database error. Please try again later.", ephemeral=True)
         except Exception as e:
             print(f"Error removing TV subscription for user {user_id} from show {show_id_to_remove} ('{name_of_show_unsubscribed}'): {e}")
             await self.send_response(ctx, f"Sorry, there was an error unsubscribing from '{name_of_show_unsubscribed}'. Please try again later.", ephemeral=True)
@@ -363,7 +328,7 @@ Usage examples:
         await ctx.defer(ephemeral=True)
 
         try:
-            subscriptions = self.db_manager.get_user_tv_subscriptions(user_id) # Returns list of dicts
+            subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tv_subscriptions, user_id)
         except Exception as e:
             print(f"Error getting subscriptions for user {user_id}: {e}")
             await self.send_response(ctx, "Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
@@ -404,7 +369,7 @@ Usage examples:
 
             try:
                 # Add timeout and error handling for TMDB API calls
-                show_details_tmdb = tmdb_client.get_show_details(show_id)
+                show_details_tmdb = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id)
 
                 if show_details_tmdb and show_details_tmdb.get('next_episode_to_air'):
                     next_ep = show_details_tmdb['next_episode_to_air']
@@ -494,7 +459,7 @@ Usage examples:
         await ctx.defer(ephemeral=True) # Defer for potentially long-running API calls & selection
 
         try:
-            search_results = tmdb_client.search_tv_shows(show_name)
+            search_results = await self.bot.loop.run_in_executor(None, tmdb_client.search_tv_shows, show_name)
         except Exception as e:
             print(f"Error searching for TV show '{show_name}' in tv_info: {e}")
             await self.send_response(ctx, f"Sorry, there was an error searching for '{show_name}'. Please try again later.", ephemeral=True)
@@ -509,11 +474,6 @@ Usage examples:
         if len(search_results) == 1:
             selected_show_tmdb_search_data = search_results[0]
         elif len(search_results) > 1:
-            # Implement interactive selection logic here (similar to tv_subscribe)
-            # For now, let's just pick the first one for placeholder
-            # selected_show_tmdb_search_data = search_results[0] 
-            # await ctx.followup.send("Multiple results found. Selection logic to be implemented.", ephemeral=True)
-            # return
             display_results = search_results[:5] # Limit to top 5 results
 
             embeds_list = []
@@ -558,47 +518,33 @@ Usage examples:
                 
                 if 0 <= choice_idx < len(display_results):
                     selected_show_tmdb_search_data = display_results[choice_idx]
-                    # await prompt_msg_obj.edit(content=f"You selected: {selected_show_tmdb_search_data['name']}", embed=None, view=None)
-                    # await prompt_msg_obj.clear_reactions()
+                    try: await prompt_msg_obj.delete()
+                    except discord.HTTPException: pass
                 else:
-                    await self.send_response(ctx, "Invalid reaction. Show information request cancelled.", ephemeral=True)
+                    await self.send_response(ctx, "Invalid reaction. TV info cancelled.", ephemeral=True)
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                     return
             except asyncio.TimeoutError:
-                await self.send_response(ctx, "Selection timed out. Show information request cancelled.", ephemeral=True)
+                await self.send_response(ctx, "Selection timed out. TV info cancelled.", ephemeral=True)
                 try: await prompt_msg_obj.delete()
                 except discord.HTTPException: pass
                 return
             except Exception as e:
-                print(f"Error during reaction-based show selection for tv_info '{show_name}' by {ctx.author.id}: {e}")
-                await self.send_response(ctx, "An error occurred during selection. Show information request cancelled.", ephemeral=True)
+                print(f"Error during reaction-based show selection for TV info '{show_name}' by {ctx.author.id}: {e}")
+                await self.send_response(ctx, "An error occurred during selection. TV info cancelled.", ephemeral=True)
                 try: await prompt_msg_obj.delete()
                 except discord.HTTPException: pass
                 return
-            finally:
-                try:
-                    if 'prompt_msg_obj' in locals() and prompt_msg_obj:
-                        if selected_show_tmdb_search_data: # A choice was made
-                             await prompt_msg_obj.clear_reactions()
-                except discord.Forbidden:
-                    print(f"Bot lacks 'Manage Messages' permission to clear reactions on message {prompt_msg_obj.id if 'prompt_msg_obj' in locals() else 'N/A'} for tv_info.")
-                except discord.HTTPException as e:
-                    print(f"HTTPException while trying to manage reactions/message for tv_info: {e}")
-                except Exception as e:
-                    print(f"Generic error during reaction/message cleanup for tv_info: {e}")
-
-
-            if selected_show_tmdb_search_data is None:
-                await self.send_response(ctx, "Failed to make a selection. Show information request cancelled.", ephemeral=True)
-                return
         
-        # At this point, selected_show_tmdb_search_data is the basic data from the search result.
-        # Now fetch full details using its ID.
+        if not selected_show_tmdb_search_data or 'id' not in selected_show_tmdb_search_data:
+            await self.send_response(ctx, "Could not determine the show to fetch details for. Please try again.", ephemeral=True)
+            return
+
         show_id = selected_show_tmdb_search_data['id']
-        
+
         try:
-            full_show_details = tmdb_client.get_show_details(show_id, append_to_response="credits,keywords,external_ids,content_ratings")
+            full_show_details = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id, "credits,keywords,external_ids,content_ratings")
         except Exception as e:
             print(f"Error fetching full details for show ID {show_id} in tv_info: {e}")
             await self.send_response(ctx, f"Sorry, there was an error fetching detailed information for '{selected_show_tmdb_search_data['name']}'. Please try again later.", ephemeral=True)
@@ -642,11 +588,6 @@ Usage examples:
         networks = [net['name'] for net in full_show_details.get('networks', [])]
         if networks:
             embed.add_field(name="Networks", value=", ".join(networks), inline=False)
-        
-        # Production Companies
-        # companies = [comp['name'] for comp in full_show_details.get('production_companies', [])]
-        # if companies:
-        #     embed.add_field(name="Production Companies", value=", ".join(companies[:3]), inline=False) # Limit to 3
 
         # Rating (Vote Average)
         vote_avg = full_show_details.get('vote_average')
@@ -704,7 +645,7 @@ Usage examples:
         await ctx.defer(ephemeral=True)
 
         try:
-            subscriptions = self.db_manager.get_user_tv_subscriptions(user_id)
+            subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tv_subscriptions, user_id)
         except Exception as e:
             print(f"Error getting subscriptions for user {user_id} in tv_schedule: {e}")
             await self.send_response(ctx, "Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
@@ -726,13 +667,12 @@ Usage examples:
             # If not many subs, this won't be sent, and the final result will come faster.
             await self.send_response(ctx, "You have many subscriptions! Generating your schedule might take a moment...", ephemeral=True)
 
-
         for sub_idx, sub in enumerate(subscriptions):
             show_id = sub['show_tmdb_id']
             show_name_stored = sub['show_name'] 
 
             try:
-                show_details_tmdb = tmdb_client.get_show_details(show_id)
+                show_details_tmdb = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id)
 
                 if show_details_tmdb and show_details_tmdb.get('next_episode_to_air'):
                     next_ep = show_details_tmdb['next_episode_to_air']
@@ -798,35 +738,23 @@ Usage examples:
 
             episodes_text_list = []
             for ep_info in episodes_on_this_date:
-                s_num = int(ep_info['season_number']) if ep_info['season_number'] is not None else 0
-                e_num = int(ep_info['episode_number']) if ep_info['episode_number'] is not None else 0
-                ep_title = ep_info['episode_name'] if ep_info['episode_name'] and ep_info['episode_name'] != "TBA" else "Episode Title TBA"
+                episode_display = f"**{ep_info['show_name']}** - S{ep_info['season_number']:02d}E{ep_info['episode_number']:02d} \"{ep_info['episode_name']}\""
+                episodes_text_list.append(episode_display)
 
-                episodes_text_list.append(
-                    f"📺 **{ep_info['show_name']}** (S{s_num:02d}E{e_num:02d}) - *{ep_title}*"
-                )
-            
-            if episodes_text_list:
-                field_value = "\n".join(episodes_text_list)
-                if len(field_value) > 1024:
-                    field_value = field_value[:1020] + "..." 
-                embed.add_field(name=f"📅 **{date_header}**", value=field_value, inline=False)
-        
-        if not embed.fields:
-             await self.send_response(ctx, "✨ No episodes for your subscribed shows are scheduled to air in the next 7 days (or an error occurred formatting them).", ephemeral=True)
-        else:
-            try:
-                await self.send_response(ctx, embed=embed, ephemeral=True)
-            except discord.HTTPException as e:
-                print(f"Error sending schedule embed for user {user_id}: {e}")
-                # Check if the error is due to embed size
-                if e.code == 50035: # Invalid Form Body - often due to embed size
-                     await self.send_response(ctx, "Sorry, your schedule is too large to display in a single message. We are working on a fix for this!", ephemeral=True)
-                else:
-                    await self.send_response(ctx, "Sorry, there was an error displaying your schedule.", ephemeral=True)
-            except Exception as e_send:
-                print(f"Unexpected error sending schedule embed for user {user_id}: {e_send}")
-                await self.send_response(ctx, "An unexpected error occurred while trying to send your schedule.", ephemeral=True)
+            field_value = "\n".join(episodes_text_list)
+            if len(field_value) > 1024: # Discord field value limit
+                field_value = field_value[:1021] + "..."
+
+            embed.add_field(name=date_header, value=field_value, inline=False)
+
+        try:
+            await self.send_response(ctx, embed=embed, ephemeral=True)
+        except discord.HTTPException as e:
+            print(f"Error sending schedule embed for user {user_id}: {e}")
+            await self.send_response(ctx, "There was an issue displaying your schedule. The embed might be too large.", ephemeral=True)
+        except Exception as e:
+            print(f"Unexpected error sending schedule for user {user_id}: {e}")
+            await self.send_response(ctx, "An unexpected error occurred while displaying your schedule.", ephemeral=True)
 
     @commands.hybrid_command(name="tv_trending", description="Shows trending TV shows from TMDB.")
     @discord.app_commands.describe(time_window="Time window for trending: 'day' or 'week'. Defaults to 'week'.")
@@ -847,7 +775,7 @@ Usage examples:
             return
 
         try:
-            trending_shows = tmdb_client.get_trending_tv_shows(time_window=time_window.lower())
+            trending_shows = await self.bot.loop.run_in_executor(None, tmdb_client.get_trending_tv_shows, time_window.lower())
         except Exception as e:
             print(f"Error fetching trending TV shows (window: {time_window}): {e}")
             await self.send_response(ctx, f"Sorry, there was an error fetching trending shows. Please try again later.", ephemeral=True)
@@ -899,12 +827,11 @@ Usage examples:
             print(f"Unexpected error sending trending shows: {e}")
             await self.send_response(ctx, "An unexpected error occurred.", ephemeral=True)
 
-
     @tasks.loop(minutes=30) # Check every 30 minutes for testing, change to hours=6 or hours=12 for production
     async def check_new_episodes(self):
         """Background task to check for new episodes of subscribed shows."""
         print(f"[{datetime.now()}] Running check_new_episodes task...")
-        all_subscriptions = self.db_manager.get_all_tv_subscriptions() # {user_id: [subs]}
+        all_subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_all_tv_subscriptions) # {user_id: [subs]}
         
         if not all_subscriptions:
             print("No active TV subscriptions to check.")
@@ -934,7 +861,6 @@ Usage examples:
                 print(f"Unexpected error fetching user {user_id}: {e}. Skipping.")
                 continue
 
-
             for sub in user_subs:
                 show_id = sub['show_tmdb_id']
                 show_name_stored = sub['show_name'] # Name as stored by user
@@ -943,7 +869,7 @@ Usage examples:
                 try:
                     # Fetch full show details, which includes 'next_episode_to_air'
                     # and 'last_episode_to_air'
-                    show_details_tmdb = tmdb_client.get_show_details(show_id)
+                    show_details_tmdb = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id)
 
                     if not show_details_tmdb:
                         print(f"Could not fetch details for show ID {show_id} ({show_name_stored}). Skipping.")
@@ -983,7 +909,6 @@ Usage examples:
                             except ValueError:
                                 print(f"Invalid air_date format for last_episode_to_air for show {show_id}: {last_aired_ep.get('air_date')}")
 
-
                     if episode_to_notify:
                         ep_name = episode_to_notify.get('name', 'Episode Name TBA')
                         ep_season = episode_to_notify.get('season_number', 'S?')
@@ -1007,7 +932,7 @@ Usage examples:
                         
                         # --- Apply tv_show_dm_overview preference ---
                         # ep_overview is already fetched and potentially truncated from lines 908-916
-                        show_overview_preference = self.db_manager.get_user_preference(user_id, "tv_show_dm_overview", default=True)
+                        show_overview_preference = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "tv_show_dm_overview", True)
                         if show_overview_preference:
                             if ep_overview and ep_overview != 'No overview available.' and ep_overview.strip(): # Ensure there's an overview to show
                                 embed.add_field(name="Overview", value=ep_overview, inline=False)
@@ -1028,46 +953,28 @@ Usage examples:
                         
                         embed.add_field(name=f"📺 {actual_show_name_tmdb} on TMDB", value=f"[View Show Page]({show_tmdb_url})", inline=True)
 
-                        if ep_season and ep_num and str(ep_season).isdigit() and str(ep_num).isdigit(): # Ensure season/episode numbers are valid
-                            episode_tmdb_url = f"https://www.themoviedb.org/tv/{show_id}/season/{ep_season}/episode/{ep_num}"
-                            embed.add_field(name="🎬 Episode Details", value=f"[View Episode Page]({episode_tmdb_url})", inline=True)
-                        else:
-                            # Fallback if specific episode link cannot be generated (e.g. specials with non-numeric season/ep)
-                            # The show link is already added above.
-                            pass
-                        embed.set_footer(text=f"Show: {actual_show_name_tmdb} | Episode ID: {episode_to_notify.get('id')}")
-
                         try:
                             await user.send(embed=embed)
-                            print(f"Sent notification to {user.name} ({user_id}) for {actual_show_name_tmdb} S{ep_season}E{ep_num}")
-                            # Update last notified episode in data_manager
-                            # Store the relevant parts of episode_to_notify
-                            new_notified_details = {
-                                'id': episode_to_notify.get('id'),
-                                'name': ep_name,
-                                'season_number': ep_season,
-                                'episode_number': ep_num,
-                                'air_date': ep_air_date_str # Store the string air date
-                            }
-                            self.db_manager.update_last_notified_episode(user_id, show_id, new_notified_details)
-                        except discord.Forbidden:
-                            print(f"Cannot send DM to {user.name} ({user_id}). They might have DMs disabled or blocked the bot.")
-                        except discord.HTTPException as e:
-                            print(f"Failed to send DM to {user.name} ({user_id}) for {actual_show_name_tmdb}: {e}")
-                        except Exception as e_send:
-                            print(f"Unexpected error sending DM to {user.name} ({user_id}): {e_send}")
+                            print(f"Sent new episode notification for '{actual_show_name_tmdb}' S{ep_season:02d}E{ep_num:02d} to user {user_id}.")
                             
-                except Exception as e_show_processing:
-                    print(f"Error processing show ID {show_id} ({show_name_stored}) for user {user_id}: {e_show_processing}")
-                    # Continue to the next subscription for this user
-                    continue 
-        print(f"[{datetime.now()}] Finished check_new_episodes task.")
+                            # Update the last notified episode details in the database
+                            await self.bot.loop.run_in_executor(None, self.db_manager.update_tv_subscription_last_notified_episode, user_id, show_id, episode_to_notify)
+                            print(f"Updated last notified episode for user {user_id}, show {show_id} to episode ID {episode_to_notify.get('id')}.")
+
+                        except discord.Forbidden:
+                            print(f"Could not send DM to user {user_id} (DM disabled or bot blocked).")
+                        except discord.HTTPException as e:
+                            print(f"HTTP error sending episode DM to user {user_id}: {e}")
+                        except Exception as e:
+                            print(f"Error sending episode notification to user {user_id}: {e}")
+
+                except Exception as e:
+                    print(f"Error fetching or processing show {show_id} for user {user_id}: {e}")
 
     @check_new_episodes.before_loop
     async def before_check_new_episodes(self):
-        await self.bot.wait_until_ready() # Wait until the bot is fully ready
-        print("check_new_episodes task is about to start.")
+        await self.bot.wait_until_ready()
+        print("TVShows check_new_episodes task is waiting for bot to be ready...")
 
 async def setup(bot):
     await bot.add_cog(TVShows(bot))
-    print("TVShows Cog has been loaded.")

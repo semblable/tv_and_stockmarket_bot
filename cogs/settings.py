@@ -65,10 +65,10 @@ class SettingsCog(commands.Cog, name="Settings"):
         """Displays your current notification settings."""
         user_id = ctx.author.id
         preferences = {
-            "tv_show_dm_overview": self.db_manager.get_user_preference(user_id, "tv_show_dm_overview", default=True),
-            "dnd_enabled": self.db_manager.get_user_preference(user_id, "dnd_enabled", default=False),
-            "dnd_start_time": self.db_manager.get_user_preference(user_id, "dnd_start_time", default="22:00"),
-            "dnd_end_time": self.db_manager.get_user_preference(user_id, "dnd_end_time", default="07:00"),
+            "tv_show_dm_overview": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "tv_show_dm_overview", True),
+            "dnd_enabled": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_enabled", False),
+            "dnd_start_time": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_start_time", "22:00"),
+            "dnd_end_time": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_end_time", "07:00"),
         }
         embed = create_settings_embed(ctx, preferences)
         await ctx.send(embed=embed)
@@ -87,7 +87,7 @@ class SettingsCog(commands.Cog, name="Settings"):
             return
 
         preference_value = True if new_status_lower == "on" else False
-        self.db_manager.set_user_preference(user_id, "tv_show_dm_overview", preference_value)
+        await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, "tv_show_dm_overview", preference_value)
         
         status_text = "✅ On" if preference_value else "❌ Off"
         await ctx.send(f"📺 TV Show DM Overview preference updated to: **{status_text}**.")
@@ -109,13 +109,13 @@ class SettingsCog(commands.Cog, name="Settings"):
         time_match = time_pattern.match(dnd_setting)
 
         if setting_lower == "on":
-            self.db_manager.set_user_preference(user_id, "dnd_enabled", True)
+            await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, "dnd_enabled", True)
             # Ensure times exist if enabling DND globally
-            _ = self.db_manager.get_user_preference(user_id, "dnd_start_time", "22:00")
-            _ = self.db_manager.get_user_preference(user_id, "dnd_end_time", "07:00")
+            _ = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_start_time", "22:00")
+            _ = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_end_time", "07:00")
             await ctx.send("🌙 Do Not Disturb (DND) is now **Active**.")
         elif setting_lower == "off":
-            self.db_manager.set_user_preference(user_id, "dnd_enabled", False)
+            await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, "dnd_enabled", False)
             await ctx.send("☀️ Do Not Disturb (DND) is now **Inactive**.")
         elif time_match:
             start_time_str = f"{time_match.group(1)}:{time_match.group(2)}"
@@ -125,9 +125,9 @@ class SettingsCog(commands.Cog, name="Settings"):
             # More complex validation (e.g. end time after start time, crossing midnight) can be added
             # For now, we store them as strings.
             
-            self.db_manager.set_user_preference(user_id, "dnd_start_time", start_time_str)
-            self.db_manager.set_user_preference(user_id, "dnd_end_time", end_time_str)
-            self.db_manager.set_user_preference(user_id, "dnd_enabled", True) # Enable DND when times are set
+            await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, "dnd_start_time", start_time_str)
+            await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, "dnd_end_time", end_time_str)
+            await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, "dnd_enabled", True) # Enable DND when times are set
             await ctx.send(f"🌙 DND period set to **{start_time_str} - {end_time_str}** and DND is **Active**.")
         else:
             await ctx.send(

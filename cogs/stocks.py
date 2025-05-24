@@ -54,7 +54,7 @@ class Stocks(commands.Cog):
             return
 
         logger.info("Stock alert check task running...")
-        all_user_alerts_map = self.db_manager.get_all_active_alerts_for_monitoring() # Returns dict {user_id: {symbol: alert_details}}
+        all_user_alerts_map = await self.bot.loop.run_in_executor(None, self.db_manager.get_all_active_alerts_for_monitoring) # Returns dict {user_id: {symbol: alert_details}}
 
         if not all_user_alerts_map:
             logger.info("No active stock alerts to monitor.")
@@ -94,7 +94,7 @@ class Stocks(commands.Cog):
         self.current_queue_index = (self.current_queue_index + 1) % len(self.unique_stocks_queue)
         
         await asyncio.sleep(2) # Small delay
-        price_data = alpha_vantage_client.get_stock_price(symbol_to_check)
+        price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol_to_check)
 
         if not price_data or "error" in price_data or "05. price" not in price_data or "08. previous close" not in price_data:
             error_msg = price_data.get("message", "Unknown API error or invalid/incomplete data") if isinstance(price_data, dict) else "No data received"
@@ -160,7 +160,7 @@ class Stocks(commands.Cog):
                 try:
                     await discord_user_obj.send(triggered_message)
                     logger.info(f"Sent alert DM to user {user_id_int} for {symbol_to_check} ({deactivate_direction} target). Message: {triggered_message}")
-                    self.db_manager.deactivate_stock_alert_target(user_id_int, symbol_to_check, deactivate_direction)
+                    await self.bot.loop.run_in_executor(None, self.db_manager.deactivate_stock_alert_target, user_id_int, symbol_to_check, deactivate_direction)
                     logger.info(f"Deactivated {deactivate_direction} alert for user {user_id_int}, stock {symbol_to_check}.")
                 except discord.Forbidden:
                     logger.warning(f"Could not send DM to user {user_id_int} (DM disabled or bot blocked).")
@@ -186,12 +186,14 @@ class Stocks(commands.Cog):
         `/stock_price symbol:LPP` (Polish stock, auto-converted to LPP.WA)
         `/stock_price symbol:LPP.WA` (Polish stock, explicit format)
         """
+        await ctx.defer(ephemeral=True)
+        
         logger.info(f"[STOCK_PRICE_DEBUG] Command received for symbol: {symbol}")
         upper_symbol = symbol.upper()
         
         # First try Alpha Vantage (for US stocks)
         logger.info(f"[STOCK_PRICE_DEBUG] Attempting Alpha Vantage for {upper_symbol}")
-        price_data = alpha_vantage_client.get_stock_price(upper_symbol)
+        price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, upper_symbol)
         data_source = "Alpha Vantage"
         logger.info(f"[STOCK_PRICE_DEBUG] Alpha Vantage raw response for {upper_symbol}: {price_data}")
 
@@ -204,7 +206,7 @@ class Stocks(commands.Cog):
             
             # Try Yahoo Finance
             logger.info(f"[STOCK_PRICE_DEBUG] Attempting Yahoo Finance for {upper_symbol} (normalized to {yahoo_finance_client.normalize_symbol(upper_symbol)})")
-            price_data = yahoo_finance_client.get_stock_price(upper_symbol)
+            price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, upper_symbol)
             data_source = "Yahoo Finance"
             logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance raw response for {yahoo_finance_client.normalize_symbol(upper_symbol)}: {price_data}")
             
@@ -222,7 +224,7 @@ class Stocks(commands.Cog):
                            f"💡 **Tip**: For Polish stocks, try adding `.WA` suffix (e.g., `{upper_symbol}.WA`)",
                 color=discord.Color.red()
             )
-            await ctx.send(embed=embed)
+            await ctx.followup.send(embed=embed)
             return
 
         if price_data: # This block now processes data from AV or YF
@@ -231,15 +233,15 @@ class Stocks(commands.Cog):
                 error_message = price_data.get("message", "An unspecified error occurred.")
                 logger.error(f"[STOCK_PRICE_DEBUG] Final data source ({data_source}) reported error for {upper_symbol}: Type: {error_type}, Msg: {error_message}")
                 if error_type == "api_limit":
-                    await ctx.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
+                    await ctx.followup.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
                 elif error_type == "config_error":
                     print(f"Stock price configuration error for {upper_symbol}: {error_message}") # Log server-side
-                    await ctx.send(f"Could not retrieve price for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.")
+                    await ctx.followup.send(f"Could not retrieve price for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.")
                 elif error_type == "api_error":
-                    await ctx.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
+                    await ctx.followup.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
                 else: # Unknown error type in dictionary
                     print(f"Stock price: Unknown error type '{error_type}' for {upper_symbol}: {error_message}")
-                    await ctx.send(f"Error fetching data for {upper_symbol}. An unexpected error occurred with the data provider.")
+                    await ctx.followup.send(f"Error fetching data for {upper_symbol}. An unexpected error occurred with the data provider.")
             elif "01. symbol" in price_data and "05. price" in price_data: # Success from either AV or YF
                 logger.info(f"[STOCK_PRICE_DEBUG] Successfully processed data for {upper_symbol} from {data_source}.")
                 stock_symbol_from_api = price_data['01. symbol']
@@ -369,17 +371,19 @@ class Stocks(commands.Cog):
             await ctx.send("`purchase_price` must be a positive number.", ephemeral=True)
             return
 
+        await ctx.defer(ephemeral=True)
+        
         # Attempt to add/update the stock
         # The self.db_manager.add_tracked_stock now handles the logic of adding vs updating
         # and whether portfolio data is new, updated, or absent.
-        success = self.db_manager.add_tracked_stock(user_id, upper_symbol, quantity, purchase_price)
+        success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tracked_stock, user_id, upper_symbol, quantity, purchase_price)
 
         if success:
             if quantity is not None and purchase_price is not None:
                 await ctx.send(f"Successfully tracking {upper_symbol} with {quantity} shares at ${purchase_price:,.2f} each. Portfolio data updated.", ephemeral=True)
             else:
                 # Check if it was already tracked with portfolio data that's being kept, or just simple tracking
-                tracked_stocks_list = self.db_manager.get_user_tracked_stocks(user_id) # Returns list of dicts
+                tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id) # Returns list of dicts
                 existing_stock_info = next((s for s in tracked_stocks_list if s['symbol'] == upper_symbol), None)
                 if existing_stock_info and existing_stock_info.get('quantity') is not None:
                      await ctx.send(f"Successfully tracking {upper_symbol}. Existing portfolio data (Quantity: {existing_stock_info['quantity']}, Price: ${existing_stock_info.get('purchase_price', 0):,.2f}) is maintained.", ephemeral=True)
@@ -400,9 +404,11 @@ class Stocks(commands.Cog):
         `!untrack_stock MSFT`
         `/untrack_stock symbol:NVDA`
         """
+        await ctx.defer(ephemeral=True)
+        
         upper_symbol = symbol.upper()
         user_id = ctx.author.id
-        if self.db_manager.remove_tracked_stock(user_id, upper_symbol): # Returns True on successful commit
+        if await self.bot.loop.run_in_executor(None, self.db_manager.remove_tracked_stock, user_id, upper_symbol): # Returns True on successful commit
             await ctx.send(f"Successfully stopped tracking {upper_symbol}.", ephemeral=True)
         else:
             # This now implies a DB operation failure, as "not found" doesn't make the DB operation fail.
@@ -419,8 +425,10 @@ class Stocks(commands.Cog):
         `!my_tracked_stocks`
         `/my_tracked_stocks`
         """
+        await ctx.defer(ephemeral=True)
+        
         user_id = ctx.author.id
-        tracked_stocks_list = self.db_manager.get_user_tracked_stocks(user_id) # Returns list of dicts
+        tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id) # Returns list of dicts
 
         if not tracked_stocks_list:
             await ctx.send("You are not tracking any stocks. Use `/track_stock <symbol>` to add some!", ephemeral=True)
@@ -450,7 +458,7 @@ class Stocks(commands.Cog):
                 if api_call_count > 0:
                     await asyncio.sleep(13)
                 
-                price_data = alpha_vantage_client.get_stock_price(symbol_upper)
+                price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol_upper)
                 api_call_count += 1
 
                 if price_data:
@@ -476,7 +484,7 @@ class Stocks(commands.Cog):
             elif i == max_calls_for_prices:
                 stock_display += " (Price check skipped)"
 
-            alert_info = self.db_manager.get_stock_alert(user_id, symbol_upper)
+            alert_info = await self.bot.loop.run_in_executor(None, self.db_manager.get_stock_alert, user_id, symbol_upper)
             alert_texts = []
             if alert_info:
                 if alert_info.get('active_above') and alert_info.get('target_above') is not None:
@@ -532,16 +540,18 @@ class Stocks(commands.Cog):
         `/stock_alert symbol:TSLA above:clear dpc_above:clear`
         `!stock_alert AAPL above=150.50 dpc_above=5`
         """
+        await ctx.defer(ephemeral=True)
+        
         user_id = ctx.author.id
         symbol_upper = symbol.upper()
 
-        tracked_stocks_list = self.db_manager.get_user_tracked_stocks(user_id)
+        tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
         if not any(s['symbol'] == symbol_upper for s in tracked_stocks_list):
             await ctx.send(f"You are not tracking {symbol_upper}. Please use `/track_stock {symbol_upper}` first.", ephemeral=True)
             return
 
         if above_target is None and below_target is None and dpc_above_target is None and dpc_below_target is None:
-            current_alert_info = self.db_manager.get_stock_alert(user_id, symbol_upper)
+            current_alert_info = await self.bot.loop.run_in_executor(None, self.db_manager.get_stock_alert, user_id, symbol_upper)
             if current_alert_info:
                 alerts_display = []
                 if current_alert_info.get('active_above') and current_alert_info.get('target_above') is not None:
@@ -623,7 +633,7 @@ class Stocks(commands.Cog):
             await ctx.send("\n".join(parse_errors), ephemeral=True)
             return
 
-        current_alert = self.db_manager.get_stock_alert(user_id, symbol_upper) or {}
+        current_alert = await self.bot.loop.run_in_executor(None, self.db_manager.get_stock_alert, user_id, symbol_upper) or {}
         
         final_above = target_above_val if target_above_val is not None else (None if clear_above_flag else (float(current_alert.get('target_above')) if current_alert.get('target_above') is not None else None))
         final_below = target_below_val if target_below_val is not None else (None if clear_below_flag else (float(current_alert.get('target_below')) if current_alert.get('target_below') is not None else None))
@@ -633,12 +643,12 @@ class Stocks(commands.Cog):
             await ctx.send(f"Error: 'Above' target (${final_above:.2f}) must be greater than 'Below' target (${final_below:.2f}). Alert not set/updated.", ephemeral=True)
             return
         
-        success = self.db_manager.add_stock_alert(
+        success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
             user_id, symbol_upper,
-            target_above=target_above_val, target_below=target_below_val,
-            dpc_above_target=dpc_above_val, dpc_below_target=dpc_below_val,
-            clear_above=clear_above_flag, clear_below=clear_below_flag,
-            clear_dpc_above=clear_dpc_above_flag, clear_dpc_below=clear_dpc_below_flag
+            target_above_val, target_below_val,
+            dpc_above_val, dpc_below_val,
+            clear_above_flag, clear_below_flag,
+            clear_dpc_above_flag, clear_dpc_below_flag
         )
 
         if success:
@@ -696,9 +706,9 @@ class Stocks(commands.Cog):
 
         # Call the appropriate Alpha Vantage function
         if config["is_intraday"]:
-            time_series_data = alpha_vantage_client.get_intraday_time_series(symbol_for_display, interval=api_params['interval'], outputsize=api_params['outputsize'])
+            time_series_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_intraday_time_series, symbol_for_display, api_params['interval'], api_params['outputsize'])
         else: # Daily
-            time_series_data = alpha_vantage_client.get_daily_time_series(symbol_for_display, outputsize=api_params['outputsize'])
+            time_series_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_daily_time_series, symbol_for_display, api_params['outputsize'])
 
         # Check if Alpha Vantage failed (no data, error dict, or empty list), then try Yahoo Finance
         alpha_vantage_failed = False
@@ -729,9 +739,9 @@ class Stocks(commands.Cog):
                 elif av_interval == "30min": yahoo_interval = "30m"
                 elif av_interval == "60min": yahoo_interval = "60m" # or 1h
                 else: yahoo_interval = "60m" # Default
-                time_series_data = yahoo_finance_client.get_intraday_time_series(normalized_symbol, interval=yahoo_interval) # Yahoo outputsize not really used for intraday
+                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_intraday_time_series, normalized_symbol, yahoo_interval) # Yahoo outputsize not really used for intraday
             else: # Daily
-                time_series_data = yahoo_finance_client.get_daily_time_series(normalized_symbol, outputsize=yahoo_outputsize)
+                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, normalized_symbol, yahoo_outputsize)
         
         # Post-fetch processing (common for both AV and YF data)
         if not time_series_data:
@@ -805,7 +815,7 @@ class Stocks(commands.Cog):
         upper_symbol = symbol.upper()
         
         # Limit to 3-5 articles, client default is 5, so we'll use that.
-        news_data = alpha_vantage_client.get_stock_news(upper_symbol, limit=5)
+        news_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_news, upper_symbol, 5)
 
         if news_data is None:
             await ctx.send(f"📰 No news found for {upper_symbol}, or an error occurred while fetching.", ephemeral=True)
@@ -882,8 +892,10 @@ class Stocks(commands.Cog):
         `!my_portfolio`
         `/my_portfolio`
         """
+        await ctx.defer(ephemeral=True)
+        
         user_id = ctx.author.id
-        tracked_stocks_all = self.db_manager.get_user_tracked_stocks(user_id)
+        tracked_stocks_all = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
 
         portfolio_stocks = [
             s for s in tracked_stocks_all
@@ -920,7 +932,7 @@ class Stocks(commands.Cog):
                 await asyncio.sleep(13) # Alpha Vantage: ~5 calls/min, so ~12s interval + buffer
 
             # Try Alpha Vantage first, then fallback to Yahoo Finance (like stock_price command)
-            current_price_data = alpha_vantage_client.get_stock_price(symbol)
+            current_price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol)
             data_source = "Alpha Vantage"
             api_call_count += 1
 
@@ -931,7 +943,7 @@ class Stocks(commands.Cog):
                 else:
                     logger.info(f"Portfolio: Alpha Vantage failed for {symbol}. Falling back to Yahoo.")
                 
-                current_price_data = yahoo_finance_client.get_stock_price(symbol)
+                current_price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol)
                 data_source = "Yahoo Finance"
 
             current_price = None
@@ -1169,7 +1181,7 @@ class Stocks(commands.Cog):
         embed = discord.Embed(title=f"🔧 Stock API Debug for {upper_symbol}", color=discord.Color.blue())
         
         # Test Alpha Vantage
-        av_result = alpha_vantage_client.get_stock_price(upper_symbol)
+        av_result = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, upper_symbol)
         
         if av_result is None:
             av_status = "❌ Failed - No data returned"
@@ -1184,7 +1196,7 @@ class Stocks(commands.Cog):
         
         # Test Yahoo Finance
         normalized_symbol = yahoo_finance_client.normalize_symbol(upper_symbol)
-        yf_result = yahoo_finance_client.get_stock_price(normalized_symbol)
+        yf_result = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, normalized_symbol)
         
         if yf_result is None:
             yf_status = "❌ Failed - No data returned"
@@ -1238,7 +1250,7 @@ class Stocks(commands.Cog):
         direction_lower = direction.lower()
         
         # Check if stock is tracked
-        tracked_stocks_list = self.db_manager.get_user_tracked_stocks(user_id)
+        tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
         if not any(s['symbol'] == symbol_upper for s in tracked_stocks_list):
             await ctx.send(f"❌ You are not tracking {symbol_upper}. Please use `!track_stock {symbol_upper}` first.")
             return
@@ -1256,7 +1268,7 @@ class Stocks(commands.Cog):
         # Set the alert
         try:
             if direction_lower == 'above':
-                success = self.db_manager.add_stock_alert(
+                success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=target, target_below=None,
                     dpc_above_target=None, dpc_below_target=None,
@@ -1268,7 +1280,7 @@ class Stocks(commands.Cog):
                 else:
                     await ctx.send(f"❌ Failed to set alert for {symbol_upper}. It might already be set to this value.")
             else:  # below
-                success = self.db_manager.add_stock_alert(
+                success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=None, target_below=target,
                     dpc_above_target=None, dpc_below_target=None,
@@ -1298,7 +1310,7 @@ class Stocks(commands.Cog):
         direction_lower = direction.lower()
         
         # Check if stock is tracked
-        tracked_stocks_list = self.db_manager.get_user_tracked_stocks(user_id)
+        tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
         if not any(s['symbol'] == symbol_upper for s in tracked_stocks_list):
             await ctx.send(f"❌ You are not tracking {symbol_upper}.")
             return
@@ -1310,7 +1322,7 @@ class Stocks(commands.Cog):
             
         try:
             if direction_lower == 'all':
-                success = self.db_manager.add_stock_alert(
+                success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=None, target_below=None,
                     dpc_above_target=None, dpc_below_target=None,
@@ -1322,7 +1334,7 @@ class Stocks(commands.Cog):
                 else:
                     await ctx.send(f"❌ Failed to clear alerts for {symbol_upper}")
             elif direction_lower == 'above':
-                success = self.db_manager.add_stock_alert(
+                success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=None, target_below=None,
                     dpc_above_target=None, dpc_below_target=None,
@@ -1334,7 +1346,7 @@ class Stocks(commands.Cog):
                 else:
                     await ctx.send(f"❌ Failed to clear 'above' alert for {symbol_upper}")
             else:  # below
-                success = self.db_manager.add_stock_alert(
+                success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=None, target_below=None,
                     dpc_above_target=None, dpc_below_target=None,

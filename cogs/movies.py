@@ -51,7 +51,7 @@ Usage examples:
         await ctx.defer(ephemeral=True)
 
         try:
-            search_results = tmdb_client.search_movie(movie_name)
+            search_results = await self.bot.loop.run_in_executor(None, tmdb_client.search_movie, movie_name)
         except Exception as e:
             print(f"Error searching for movie '{movie_name}' in movie_info: {e}")
             await ctx.followup.send(f"Sorry, there was an error searching for '{movie_name}'. Please try again later.", ephemeral=True)
@@ -139,7 +139,7 @@ Usage examples:
 
         try:
             # Fetch full details including credits and keywords
-            movie_details = tmdb_client.get_movie_details(movie_id, append_to_response='credits,keywords')
+            movie_details = await self.bot.loop.run_in_executor(None, tmdb_client.get_movie_details, movie_id, 'credits,keywords')
         except Exception as e:
             print(f"Error fetching details for movie ID {movie_id} in movie_info: {e}")
             await ctx.followup.send(f"Sorry, there was an error fetching details for '{selected_movie_tmdb_search_data.get('title', 'the selected movie')}'.", ephemeral=True)
@@ -234,7 +234,7 @@ Usage examples:
         await ctx.defer(ephemeral=True)
 
         try:
-            search_results = tmdb_client.search_movie(movie_name)
+            search_results = await self.bot.loop.run_in_executor(None, tmdb_client.search_movie, movie_name)
         except Exception as e:
             print(f"Error searching for movie '{movie_name}' in movie_subscribe: {e}")
             await ctx.followup.send(f"Sorry, there was an error searching for '{movie_name}'. Please try again later.", ephemeral=True)
@@ -331,9 +331,8 @@ Usage examples:
             logger.warning(f"Poster path not found for movie {movie_id} during subscription for user {ctx.author.id}. Using empty string.")
             poster_path = ""
 
-
         try:
-            success = self.db_manager.add_movie_subscription(ctx.author.id, movie_id, actual_movie_title, poster_path)
+            success = await self.bot.loop.run_in_executor(None, self.db_manager.add_movie_subscription, ctx.author.id, movie_id, actual_movie_title, poster_path)
             if success: # This now directly reflects DB operation success (MERGE)
                 await ctx.followup.send(f"Successfully subscribed to **{actual_movie_title}** (Release: {release_date})!", ephemeral=True)
             else:
@@ -358,7 +357,7 @@ Usage examples:
         user_id = ctx.author.id
 
         try:
-            subscriptions = self.db_manager.get_user_movie_subscriptions(user_id)
+            subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_movie_subscriptions, user_id)
         except Exception as e:
             print(f"Error getting movie subscriptions for user {user_id}: {e}")
             await ctx.followup.send("Sorry, there was an error fetching your movie subscriptions.", ephemeral=True)
@@ -388,12 +387,6 @@ Usage examples:
             message_content = "Multiple subscribed movies match. React with the number to unsubscribe:"
 
             for i, sub_data_item in enumerate(display_results):
-                # release_date is not directly in the new subscription structure from DB,
-                # but we can fetch it if needed for display, or omit year.
-                # For now, let's just use title.
-                # year_str = sub_data_item.get('release_date') # Not available directly
-                # year = year_str[:4] if year_str and len(year_str) >= 4 else 'N/A'
-                
                 movie_embed = discord.Embed(
                     description=f"{NUMBER_EMOJIS[i]} **{sub_data_item['title']}**", # Removed year for simplicity
                     color=discord.Color.red() # Red for unsubscribe
@@ -435,7 +428,7 @@ Usage examples:
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                 else:
-                    await ctx.followup.send("Invalid reaction. Unsubscription cancelled.", ephemeral=True)
+                    await ctx.followup.send("Invalid selection. Unsubscription cancelled.", ephemeral=True)
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                     return
@@ -445,28 +438,27 @@ Usage examples:
                 except discord.HTTPException: pass
                 return
             except Exception as e:
-                print(f"Error during reaction-based movie unsubscription for '{movie_name}' by {user_id}: {e}")
+                print(f"Error during reaction-based movie unsubscription selection for '{movie_name}' by {ctx.author.id}: {e}")
                 await ctx.followup.send("An error occurred during selection. Unsubscription cancelled.", ephemeral=True)
                 try: await prompt_msg_obj.delete()
                 except discord.HTTPException: pass
                 return
 
         if not movie_to_unsubscribe:
-            await ctx.followup.send("Failed to make a selection. Unsubscription cancelled.", ephemeral=True)
+            await ctx.followup.send("Could not identify movie to unsubscribe from. Please try again.", ephemeral=True)
             return
-        
-        movie_id_to_remove = movie_to_unsubscribe['tmdb_id'] # Key is 'tmdb_id' now
-        title_of_movie_unsubscribed = movie_to_unsubscribe['title'] # Key is 'title'
+
+        title_of_movie_unsubscribed = movie_to_unsubscribe['title']
+        movie_tmdb_id_to_remove = movie_to_unsubscribe['tmdb_id']
 
         try:
-            success = self.db_manager.remove_movie_subscription(user_id, movie_id_to_remove)
-            if success: # remove_movie_subscription returns True on successful commit
+            success = await self.bot.loop.run_in_executor(None, self.db_manager.remove_movie_subscription, user_id, movie_tmdb_id_to_remove)
+            if success:
                 await ctx.followup.send(f"Successfully unsubscribed from **{title_of_movie_unsubscribed}**.", ephemeral=True)
             else:
-                # This implies a DB operation failure
-                await ctx.followup.send(f"Could not unsubscribe from **{title_of_movie_unsubscribed}** due to a database error.", ephemeral=True)
+                await ctx.followup.send(f"Could not unsubscribe from **{title_of_movie_unsubscribed}** due to a database error. Please try again later.", ephemeral=True)
         except Exception as e:
-            print(f"Error removing movie subscription for user {user_id} from movie {movie_id_to_remove}: {e}")
+            print(f"Error removing movie subscription for user {user_id} from movie {movie_tmdb_id_to_remove} ('{title_of_movie_unsubscribed}'): {e}")
             await ctx.followup.send(f"Sorry, there was an error unsubscribing from '{title_of_movie_unsubscribed}'.", ephemeral=True)
 
     @commands.hybrid_command(name="my_movies", description="Lists your subscribed movies.")
@@ -482,7 +474,7 @@ Usage examples:
         user_id = ctx.author.id
 
         try:
-            subscriptions = self.db_manager.get_user_movie_subscriptions(user_id)
+            subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_movie_subscriptions, user_id)
         except Exception as e:
             print(f"Error getting movie subscriptions for user {user_id} in my_movies: {e}")
             await ctx.followup.send("Sorry, there was an error fetching your movie subscriptions.", ephemeral=True)
@@ -547,7 +539,7 @@ Usage examples:
             return
 
         logger.info("MoviesCog: check_movie_releases task is running.")
-        all_subscriptions_by_user = self.db_manager.get_all_movie_subscriptions() # Uses DB
+        all_subscriptions_by_user = await self.bot.loop.run_in_executor(None, self.db_manager.get_all_movie_subscriptions) # Uses DB
         if not all_subscriptions_by_user: # This is a dict {user_id_str: [subs_list]}
             logger.info("MoviesCog: No movie subscriptions found to check.")
             return
@@ -563,9 +555,9 @@ Usage examples:
                     logger.warning(f"MoviesCog: Could not fetch user {user_id}. Skipping their movie notifications.")
                     continue
 
-                dnd_enabled = self.db_manager.get_user_preference(user_id, 'dnd_enabled', False)
-                dnd_start_str = self.db_manager.get_user_preference(user_id, 'dnd_start_time', "00:00")
-                dnd_end_str = self.db_manager.get_user_preference(user_id, 'dnd_end_time', "00:00")
+                dnd_enabled = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, 'dnd_enabled', False)
+                dnd_start_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, 'dnd_start_time', "00:00")
+                dnd_end_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, 'dnd_end_time', "00:00")
                 
                 try:
                     dnd_start_time_obj = datetime.strptime(dnd_start_str, '%H:%M').time() # Renamed
@@ -590,7 +582,7 @@ Usage examples:
                         
                     # Fetch fresh movie details from TMDB for release date and current title.
                     try:
-                        fresh_movie_details = tmdb_client.get_movie_details(movie_tmdb_id)
+                        fresh_movie_details = await self.bot.loop.run_in_executor(None, tmdb_client.get_movie_details, movie_tmdb_id)
                         if not fresh_movie_details or not fresh_movie_details.get('release_date'):
                             logger.warning(f"MoviesCog: Could not fetch release date for movie '{movie_title_from_sub}' (ID: {movie_tmdb_id}) for user {user_id} from TMDB. Skipping.")
                             continue
@@ -645,7 +637,7 @@ Usage examples:
                             logger.info(f"MoviesCog: Sent release notification for '{actual_movie_title_to_display}' (ID: {movie_tmdb_id}) to user {user_id}.")
                             
                             # Update notified status in DB
-                            update_success = self.db_manager.update_movie_notified_status(user_id, movie_tmdb_id, True)
+                            update_success = await self.bot.loop.run_in_executor(None, self.db_manager.update_movie_notified_status, user_id, movie_tmdb_id, True)
                             if update_success:
                                 logger.info(f"MoviesCog: Updated notified status for '{actual_movie_title_to_display}' (ID: {movie_tmdb_id}) for user {user_id}.")
                             else:
@@ -666,10 +658,6 @@ Usage examples:
         await self.bot.wait_until_ready()
         print("Task: check_movie_releases bot is ready. Loop starting.")
 
-
-async def setup(bot):
-    await bot.add_cog(MoviesCog(bot))
-    print("MoviesCog added to bot.")
 async def setup(bot: commands.Bot):
     await bot.add_cog(MoviesCog(bot))
     logger.info("MoviesCog has been loaded.")

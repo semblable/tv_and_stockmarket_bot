@@ -7,6 +7,7 @@ import os
 import logging # Import logging
 from cogs.help import MyCustomHelpCommand # Import the custom help command
 import asyncio
+import traceback # Added for detailed error logging
 from flask import Flask, request, jsonify
 from threading import Thread
 from functools import wraps
@@ -50,7 +51,37 @@ async def load_extensions():
         except Exception as e:
             logger.error(f"Failed to load extension {extension}:", exc_info=True) # Log with traceback
             # Optionally, re-raise or handle more gracefully
-            # raise e 
+            # raise e
+
+# --- Global Application Command Error Handler ---
+@bot.tree.on_error
+async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    """
+    Global error handler for slash commands.
+    """
+    # Log the full error traceback
+    command_name = interaction.command.name if interaction.command else "unknown_command"
+    logger.error(f"Unhandled error in slash command '/{command_name}': {error}", exc_info=False) # exc_info=False because print_exc will show it
+    traceback.print_exc()
+
+    error_message = "Sorry, an unexpected error occurred while processing your command. The developers have been notified."
+
+    if interaction.is_response_done():
+        try:
+            # If the interaction has been responded to or deferred, try sending a followup message.
+            await interaction.followup.send(error_message, ephemeral=True)
+        except discord.HTTPException as e:
+            logger.error(f"Failed to send followup error message for '/{command_name}': {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while trying to send followup for '/{command_name}': {e}", exc_info=True)
+    else:
+        try:
+            # If the interaction has not been responded to yet, send a new response.
+            await interaction.response.send_message(error_message, ephemeral=True)
+        except discord.HTTPException as e:
+            logger.error(f"Failed to send initial error message for '/{command_name}': {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while trying to send initial response for '/{command_name}': {e}", exc_info=True)
 
 # --- Flask Web Server for Render Uptime ---
 flask_app = Flask(__name__)

@@ -26,7 +26,7 @@ def search_tv_shows(query: str) -> list[dict]:
     search_url = f"{BASE_URL}/search/tv"
 
     try:
-        response = requests.get(search_url, params=params)
+        response = requests.get(search_url, params=params, timeout=15)
         response.raise_for_status() # Raises an HTTPError for bad responses (4XX or 5XX)
         data = response.json()
         
@@ -73,7 +73,7 @@ def get_show_details(show_id, append_to_response='next_episode_to_air,last_episo
     details_url = f"{BASE_URL}/tv/{show_id}"
 
     try:
-        response = requests.get(details_url, params=params)
+        response = requests.get(details_url, params=params, timeout=15)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError as e:
@@ -102,7 +102,7 @@ def search_movie(query):
     search_url = f"{BASE_URL}/search/movie"
 
     try:
-        response = requests.get(search_url, params=params)
+        response = requests.get(search_url, params=params, timeout=15)
         response.raise_for_status()
         data = response.json()
         
@@ -148,7 +148,7 @@ def get_movie_details(movie_id, append_to_response='credits,keywords'):
     details_url = f"{BASE_URL}/movie/{movie_id}"
 
     try:
-        response = requests.get(details_url, params=params)
+        response = requests.get(details_url, params=params, timeout=15)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError as e:
@@ -198,7 +198,7 @@ def get_trending_tv_shows(time_window='week'):
     trending_url = f"{BASE_URL}/trending/tv/{time_window}"
 
     try:
-        response = requests.get(trending_url, params=params)
+        response = requests.get(trending_url, params=params, timeout=15)
         response.raise_for_status()
         data = response.json()
         
@@ -252,7 +252,7 @@ def get_upcoming_movies(region=None, page=1):
     upcoming_url = f"{BASE_URL}/movie/upcoming"
 
     try:
-        response = requests.get(upcoming_url, params=params)
+        response = requests.get(upcoming_url, params=params, timeout=15)
         response.raise_for_status()
         data = response.json()
         
@@ -310,7 +310,7 @@ def get_tv_on_the_air(page=1):
     on_the_air_url = f"{BASE_URL}/tv/on_the_air"
 
     try:
-        response = requests.get(on_the_air_url, params=params)
+        response = requests.get(on_the_air_url, params=params, timeout=15)
         response.raise_for_status()
         data = response.json()
         
