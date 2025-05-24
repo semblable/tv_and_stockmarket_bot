@@ -385,7 +385,7 @@ Usage examples:
 
         try:
             # Use the new method signature which includes poster_path
-            success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tv_show_subscription, ctx.author.id, show_tmdb_id=show_id, show_name=actual_show_name, poster_path=poster_path)
+            success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tv_show_subscription, ctx.author.id, show_id, actual_show_name, poster_path)
             if success: # This now reflects DB operation success (MERGE)
                 await self.send_response(ctx, f"Successfully subscribed to {actual_show_name}!", ephemeral=True)
             else:
