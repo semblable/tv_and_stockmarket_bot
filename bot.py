@@ -54,7 +54,7 @@ async def load_extensions():
             # raise e
 
 # --- Global Application Command Error Handler ---
-@bot.tree.on_error
+@bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
     """
     Global error handler for slash commands.
