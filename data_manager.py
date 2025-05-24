@@ -96,6 +96,53 @@ class DataManager:
                 logger.error(f"Error creating table {table_name}: {e}")
                 raise # Re-raise the exception
 
+        # --- Start of tv_subscriptions schema check ---
+        # Check if tv_subscriptions table exists and if it has the show_tmdb_id column
+        table_info_query = "PRAGMA table_info(tv_subscriptions);"
+        
+        table_exists = False
+        # Need a direct cursor for checking existence before PRAGMA, and to manage its lifecycle.
+        conn = self._get_connection()
+        check_cursor = None # Initialize to None
+        try:
+            check_cursor = conn.cursor()
+            check_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tv_subscriptions';")
+            if check_cursor.fetchone():
+                table_exists = True
+        except sqlite3.Error as e:
+            logger.error(f"Error checking if 'tv_subscriptions' table exists: {e}")
+            # If we can't even check, better to let the CREATE IF NOT EXISTS handle it or fail there.
+        finally:
+            if check_cursor:
+                check_cursor.close()
+
+        if table_exists:
+            logger.info("Table 'tv_subscriptions' exists. Checking schema for 'show_tmdb_id' column.")
+            # _execute_query with fetch_all=True returns a list of dicts
+            columns_info = self._execute_query(table_info_query, fetch_all=True)
+            
+            if columns_info is None or not isinstance(columns_info, list):
+                logger.error(f"Failed to retrieve schema for 'tv_subscriptions' (received: {columns_info}). Skipping schema modification check.")
+            else:
+                column_names = [col_info['name'] for col_info in columns_info if isinstance(col_info, dict) and 'name' in col_info]
+                required_column = "show_tmdb_id"
+
+                if required_column not in column_names:
+                    logger.warning(
+                        f"Column '{required_column}' not found in 'tv_subscriptions' table (columns found: {column_names}). "
+                        "Dropping table to apply new schema. Existing TV subscriptions will be lost."
+                    )
+                    drop_query = "DROP TABLE tv_subscriptions;"
+                    if self._execute_query(drop_query, commit=True):
+                        logger.info("Old 'tv_subscriptions' table dropped successfully due to schema mismatch.")
+                    else:
+                        logger.error("Failed to drop 'tv_subscriptions' table. Manual intervention might be required.")
+                else:
+                    logger.info(f"'tv_subscriptions' schema contains '{required_column}'. No schema modification needed for this check.")
+        else:
+            logger.info("Table 'tv_subscriptions' does not exist. It will be created by 'CREATE TABLE IF NOT EXISTS'.")
+        # --- End of tv_subscriptions schema check ---
+
         # TV Show Subscriptions
         # Storing last_notified_episode_details as TEXT for JSON
         create_tv_subscriptions_sql = """
