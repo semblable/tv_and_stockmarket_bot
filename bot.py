@@ -412,8 +412,16 @@ async def on_ready():
         # If we have guilds, sync to the first one for immediate updates
         if bot.guilds:
             first_guild = bot.guilds[0]
+            logger.info(f"Copying global commands to guild: {first_guild.name} (ID: {first_guild.id}) for immediate availability...")
+            bot.tree.copy_global_to(guild=discord.Object(id=first_guild.id))
+            # No need to clear and then copy, copy_global_to handles adding them.
+            # If you wanted to ensure ONLY global commands and no pre-existing guild-specific ones,
+            # you might clear first: bot.tree.clear_commands(guild=discord.Object(id=first_guild.id))
+            # but copy_global_to should be sufficient for making them appear.
+
             logger.info(f"Attempting to sync application commands to guild: {first_guild.name} (ID: {first_guild.id})...")
             try:
+                # Now sync the commands that were copied (or already existed) for this guild
                 synced_guild = await bot.tree.sync(guild=discord.Object(id=first_guild.id))
                 logger.info(f"✅ Successfully synced {len(synced_guild)} command(s) to guild {first_guild.name}")
                 commands_synced = True

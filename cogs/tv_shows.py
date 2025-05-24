@@ -862,6 +862,12 @@ Usage examples:
                 continue
 
             for sub in user_subs:
+                if 'show_tmdb_id' not in sub or 'show_name' not in sub:
+                    user_id_for_log = sub.get('user_id', 'Unknown User')
+                    malformed_sub_info = {k: v for k, v in sub.items() if k != 'user_id'} # Avoid logging user_id directly if not needed
+                    logger.warning(f"Skipping malformed TV show subscription for user {user_id_for_log}: {malformed_sub_info}. Missing 'show_tmdb_id' or 'show_name'.")
+                    continue
+
                 show_id = sub['show_tmdb_id']
                 show_name_stored = sub['show_name'] # Name as stored by user
                 last_notified_ep_details = sub.get('last_notified_episode_details') # dict or None
