@@ -1093,7 +1093,7 @@ Usage examples:
                             print(f"Sent new episode notification for '{actual_show_name_tmdb}' S{ep_season:02d}E{ep_num:02d} to user {user_id}.")
                             
                             # Update the last notified episode details in the database
-                            await self.bot.loop.run_in_executor(None, self.db_manager.update_tv_subscription_last_notified_episode, user_id, show_id, episode_to_notify)
+                            await self.bot.loop.run_in_executor(None, self.db_manager.update_last_notified_episode_details, user_id, show_id, episode_to_notify)
                             print(f"Updated last notified episode for user {user_id}, show {show_id} to episode ID {episode_to_notify.get('id')}.")
 
                         except discord.Forbidden:
