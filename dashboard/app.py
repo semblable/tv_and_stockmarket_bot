@@ -1,4 +1,4 @@
-from flask import Flask, redirect, url_for, session, request, render_template, flash, jsonify
+from flask import Flask, redirect, url_for, session, request, render_template, flash, jsonify, make_response
 from functools import wraps
 import requests
 from requests_oauthlib import OAuth2Session
@@ -205,7 +205,11 @@ def dashboard():
     print(f"Fetched User Settings for dashboard: {user_settings}")
 
 
-    return render_template('dashboard.html', user=user, data=data, errors=errors, config=app.config)
+    response = make_response(render_template('dashboard.html', user=user, data=data, errors=errors, config=app.config))
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 # The /tv_shows route is removed as data is now fetched and displayed on the main /dashboard.
 # If specific pages are needed later, they can be added.
