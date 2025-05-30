@@ -1045,6 +1045,26 @@ Usage examples:
                                 print(f"Invalid air_date format for last_episode_to_air for show {show_id}: {last_aired_ep.get('air_date')}")
 
                     if episode_to_notify:
+                        ep_id = episode_to_notify.get('id')
+                        if not ep_id:
+                            logger.warning(f"Episode for show {show_id} ({actual_show_name_tmdb}) is missing an 'id'. Skipping notification.")
+                            continue
+
+                        # NEW: Check if notification for this specific episode has already been sent
+                        already_notified_for_this_episode = await self.bot.loop.run_in_executor(
+                            None, 
+                            self.db_manager.has_user_been_notified_for_episode, 
+                            user_id, 
+                            show_id, 
+                            ep_id
+                        )
+
+                        if already_notified_for_this_episode:
+                            logger.info(f"User {user_id} already notified for episode {ep_id} of show {show_id} ({actual_show_name_tmdb}). Skipping.")
+                            # We might still want to update last_notified_episode_details if this episode_to_notify
+                            # is newer than what's stored, even if it was sent. But for now, strict skip.
+                            continue
+
                         ep_name = episode_to_notify.get('name', 'Episode Name TBA')
                         ep_season = episode_to_notify.get('season_number', 'S?')
                         ep_num = episode_to_notify.get('episode_number', 'E?')
@@ -1090,11 +1110,23 @@ Usage examples:
 
                         try:
                             await user.send(embed=embed)
-                            print(f"Sent new episode notification for '{actual_show_name_tmdb}' S{ep_season:02d}E{ep_num:02d} to user {user_id}.")
+                            logger.info(f"Sent new episode notification for '{actual_show_name_tmdb}' S{ep_season:02d}E{ep_num:02d} to user {user_id}.")
                             
+                            # NEW: Add to sent_episode_notifications table
+                            await self.bot.loop.run_in_executor(
+                                None, 
+                                self.db_manager.add_sent_episode_notification,
+                                user_id,
+                                show_id,
+                                ep_id, # episode_tmdb_id
+                                ep_season,
+                                ep_num
+                            )
+                            logger.info(f"Logged sent notification for User {user_id}, Show {show_id}, Episode {ep_id}.")
+
                             # Update the last notified episode details in the database
                             await self.bot.loop.run_in_executor(None, self.db_manager.update_last_notified_episode_details, user_id, show_id, episode_to_notify)
-                            print(f"Updated last notified episode for user {user_id}, show {show_id} to episode ID {episode_to_notify.get('id')}.")
+                            logger.info(f"Updated last notified episode for user {user_id}, show {show_id} to episode ID {episode_to_notify.get('id')}.")
 
                         except discord.Forbidden:
                             print(f"Could not send DM to user {user_id} (DM disabled or bot blocked).")

@@ -210,6 +210,21 @@ class DataManager:
         )
         """
         create_table_if_not_exists("user_preferences", create_user_preferences_sql)
+
+        # Sent Episode Notifications
+        create_sent_episode_notifications_sql = """
+        CREATE TABLE IF NOT EXISTS sent_episode_notifications (
+            user_id TEXT NOT NULL,
+            show_tmdb_id INTEGER NOT NULL,
+            episode_tmdb_id INTEGER NOT NULL,
+            season_number INTEGER,
+            episode_number INTEGER,
+            notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, show_tmdb_id, episode_tmdb_id),
+            FOREIGN KEY (user_id, show_tmdb_id) REFERENCES tv_subscriptions (user_id, show_tmdb_id) ON DELETE CASCADE
+        )
+        """
+        create_table_if_not_exists("sent_episode_notifications", create_sent_episode_notifications_sql)
         logger.info("Database initialization check complete.")
 
     # --- TV Show Subscriptions ---
@@ -279,14 +294,47 @@ class DataManager:
 
     def update_last_notified_episode_details(self, user_id: int, show_tmdb_id: int, episode_details: dict):
         user_id_str = str(user_id)
+        # Serialize the episode_details dict to a JSON string for storage
         details_json = json.dumps(episode_details) if episode_details else None
         query = """
-        UPDATE tv_subscriptions
-        SET last_notified_episode_details = :details_json
+        UPDATE tv_subscriptions 
+        SET last_notified_episode_details = :details
         WHERE user_id = :user_id AND show_tmdb_id = :show_tmdb_id
         """
-        params = {"details_json": details_json, "user_id": user_id_str, "show_tmdb_id": show_tmdb_id}
+        params = {"details": details_json, "user_id": user_id_str, "show_tmdb_id": show_tmdb_id}
         return self._execute_query(query, params, commit=True)
+
+    # --- Sent Episode Notifications ---
+    def add_sent_episode_notification(self, user_id: int, show_tmdb_id: int, episode_tmdb_id: int, season_number: int, episode_number: int) -> bool:
+        user_id_str = str(user_id)
+        query = """
+        INSERT OR IGNORE INTO sent_episode_notifications 
+            (user_id, show_tmdb_id, episode_tmdb_id, season_number, episode_number)
+        VALUES (:user_id, :show_tmdb_id, :episode_tmdb_id, :season_number, :episode_number)
+        """
+        params = {
+            "user_id": user_id_str,
+            "show_tmdb_id": show_tmdb_id,
+            "episode_tmdb_id": episode_tmdb_id,
+            "season_number": season_number,
+            "episode_number": episode_number
+        }
+        return self._execute_query(query, params, commit=True)
+
+    def has_user_been_notified_for_episode(self, user_id: int, show_tmdb_id: int, episode_tmdb_id: int) -> bool:
+        user_id_str = str(user_id)
+        query = """
+        SELECT 1 FROM sent_episode_notifications
+        WHERE user_id = :user_id AND show_tmdb_id = :show_tmdb_id AND episode_tmdb_id = :episode_tmdb_id
+        LIMIT 1
+        """
+        params = {
+            "user_id": user_id_str,
+            "show_tmdb_id": show_tmdb_id,
+            "episode_tmdb_id": episode_tmdb_id
+        }
+        result = self._execute_query(query, params, fetch_one=True)
+        return bool(result) # True if a record is found, False otherwise
 
     # --- Movie Subscriptions ---
     def add_movie_subscription(self, user_id: int, tmdb_id: int, title: str, poster_path: str) -> bool:
