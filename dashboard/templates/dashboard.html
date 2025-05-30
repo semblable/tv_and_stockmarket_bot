@@ -114,8 +114,8 @@
                     {% if data.tv_shows %}
                         <ul>
                         {% for show in data.tv_shows %}
-                            <li>{{ show.get('title', 'N/A') }} (ID: {{ show.get('tmdb_id', 'N/A') }}) - Next Ep: {{ show.get('last_notified_episode_details', {}).get('air_date', 'N/A') if show.get('last_notified_episode_details') else 'N/A' }}
-                                <form method="POST" action="{{ url_for('remove_tv_show', tmdb_id=show.get('tmdb_id')) }}" style="display: inline;">
+                            <li>{{ show.get('show_name', 'N/A') }} (ID: {{ show.get('show_tmdb_id', 'N/A') }}) - Next Ep: {{ show.get('last_notified_episode_details', {}).get('air_date', 'N/A') if show.get('last_notified_episode_details') else 'N/A' }}
+                                <form method="POST" action="{{ url_for('remove_tv_show', tmdb_id=show.get('show_tmdb_id')) }}" style="display: inline;">
                                     <button type="submit" class="remove-button">Remove</button>
                                 </form>
                             </li>
