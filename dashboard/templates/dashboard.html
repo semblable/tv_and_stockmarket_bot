@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Bot Dashboard{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     {% block head_extra %}{% endblock %}
 </head>
 <body>
@@ -146,22 +147,69 @@
                 <section id="stocks">
                     <h2>Tracked Stocks</h2>
                     {% if data.stocks %}
-                        <ul>
+                        <div class="stocks-grid">
                         {% for stock in data.stocks %}
-                            <li>
-                                <strong>{{ stock.get('symbol', 'N/A') }}</strong>
-                                {% if stock.get('quantity') %}
-                                    - Quantity: {{ stock.get('quantity') }}
+                            <div class="stock-card">
+                                <div class="stock-header">
+                                    <h3>{{ stock.get('symbol', 'N/A') }}</h3>
+                                    {% if stock.get('current_price') %}
+                                        <div class="stock-price">
+                                            {% set currency_symbol = '$' if stock.get('currency', 'USD') == 'USD' else 'zł' if stock.get('currency') == 'PLN' else '€' if stock.get('currency') == 'EUR' else '£' if stock.get('currency') == 'GBP' else stock.get('currency', '$') %}
+                                            <span class="price">{{ currency_symbol }}{{ "%.2f"|format(stock.current_price) }}</span>
+                                            {% if stock.get('change') %}
+                                                {% set change_val = stock.change|float %}
+                                                <span class="change {{ 'positive' if change_val > 0 else 'negative' if change_val < 0 else 'neutral' }}">
+                                                    {{ stock.change }} ({{ stock.get('change_percent', '0%') }})
+                                                </span>
+                                            {% endif %}
+                                        </div>
+                                    {% else %}
+                                        <div class="stock-price error">
+                                            <span class="price">{{ stock.get('error', 'Price unavailable') }}</span>
+                                        </div>
+                                    {% endif %}
+                                </div>
+                                
+                                {% if stock.get('quantity') and stock.get('purchase_price') %}
+                                    <div class="portfolio-info">
+                                        <div class="portfolio-row">
+                                            <span>Holdings:</span>
+                                            <span>{{ stock.quantity }} shares @ {{ currency_symbol }}{{ "%.2f"|format(stock.purchase_price) }}</span>
+                                        </div>
+                                        {% if stock.get('current_value') and stock.get('cost_basis') %}
+                                            <div class="portfolio-row">
+                                                <span>Current Value:</span>
+                                                <span>{{ currency_symbol }}{{ "%.2f"|format(stock.current_value) }}</span>
+                                            </div>
+                                            <div class="portfolio-row">
+                                                <span>Cost Basis:</span>
+                                                <span>{{ currency_symbol }}{{ "%.2f"|format(stock.cost_basis) }}</span>
+                                            </div>
+                                            {% if stock.get('total_gain_loss') %}
+                                                {% set gain_loss = stock.total_gain_loss %}
+                                                <div class="portfolio-row gain-loss {{ 'positive' if gain_loss > 0 else 'negative' if gain_loss < 0 else 'neutral' }}">
+                                                    <span>Total Gain/Loss:</span>
+                                                    <span>
+                                                        {{ currency_symbol }}{{ "%.2f"|format(gain_loss) }}
+                                                        ({{ "%.1f"|format(stock.get('total_gain_loss_percent', 0)) }}%)
+                                                    </span>
+                                                </div>
+                                            {% endif %}
+                                        {% endif %}
+                                    </div>
                                 {% endif %}
-                                {% if stock.get('purchase_price') %}
-                                    - Purchase Price: ${{ "%.2f"|format(stock.get('purchase_price')) }}
+                                
+                                <!-- Placeholder for future chart -->
+                                <div class="chart-container">
+                                    <canvas id="chart-{{ stock.symbol }}" width="300" height="150"></canvas>
+                                </div>
+                                
+                                {% if stock.get('data_source') %}
+                                    <div class="data-source">Data: {{ stock.data_source }}</div>
                                 {% endif %}
-                                <!-- You could add current price, gain/loss here if available -->
-                            </li>
-                        {% else %}
-                            <li>No tracked stocks found.</li>
+                            </div>
                         {% endfor %}
-                        </ul>
+                        </div>
                     {% else %}
                         <p>No tracked stocks found or data could not be loaded.</p>
                     {% endif %}
@@ -309,5 +357,105 @@
             }
         });
     </script>
+    
+    <!-- Stock Charts JavaScript -->
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const stocksDataElement = document.getElementById('stocksData');
+            if (stocksDataElement) {
+                try {
+                    const stocksWithChartData = JSON.parse(stocksDataElement.textContent);
+                    
+                    stocksWithChartData.forEach(function(stock, index) {
+                        const canvasId = 'chart-' + stock.symbol;
+                        const ctx = document.getElementById(canvasId);
+                        if (ctx && stock.chart_data && Array.isArray(stock.chart_data)) {
+                            
+                            const labels = stock.chart_data.map(function(_, i) {
+                                const date = new Date();
+                                date.setDate(date.getDate() - (stock.chart_data.length - 1 - i));
+                                return date.toLocaleDateString(); // Simple date labels for placeholder
+                            });
+
+                            const changeValue = parseFloat(stock.change) || 0;
+                            let borderColor = '#3498db'; // Default blue
+                            let backgroundColor = 'rgba(52, 152, 219, 0.1)';
+
+                            if (changeValue > 0) {
+                                borderColor = '#27ae60'; // Green for positive change
+                                backgroundColor = 'rgba(39, 174, 96, 0.1)';
+                            } else if (changeValue < 0) {
+                                borderColor = '#e74c3c'; // Red for negative change
+                                backgroundColor = 'rgba(231, 76, 60, 0.1)';
+                            }
+
+                            new Chart(ctx, {
+                                type: 'line',
+                                data: {
+                                    labels: labels,
+                                    datasets: [{
+                                        label: stock.symbol + ' Price',
+                                        data: stock.chart_data,
+                                        borderColor: borderColor,
+                                        backgroundColor: backgroundColor,
+                                        borderWidth: 2,
+                                        tension: 0.4,
+                                        fill: true,
+                                        pointRadius: 0, // No points on the line
+                                        pointHoverRadius: 5
+                                    }]
+                                },
+                                options: {
+                                    responsive: true,
+                                    maintainAspectRatio: false,
+                                    plugins: {
+                                        legend: {
+                                            display: false // No legend for individual small charts
+                                        }
+                                    },
+                                    scales: {
+                                        x: {
+                                            display: false // No x-axis labels/grid
+                                        },
+                                        y: {
+                                            display: false, // No y-axis labels/grid
+                                            beginAtZero: false
+                                        }
+                                    },
+                                    elements: {
+                                        point:{
+                                            radius: 0 // Ensure points are not drawn on the line
+                                        }
+                                    },
+                                    interaction: {
+                                        intersect: false,
+                                        mode: 'index',
+                                    }
+                                }
+                            });
+                        } else {
+                            console.warn('Canvas not found or chart_data missing for:', stock.symbol, stock.chart_data);
+                            if (ctx) { // If canvas exists but no data, show a message
+                                const chartCtx = ctx.getContext('2d');
+                                chartCtx.font = '12px Arial';
+                                chartCtx.fillStyle = '#6c757d';
+                                chartCtx.textAlign = 'center';
+                                chartCtx.fillText('Chart data not available', ctx.width / 2, ctx.height / 2);
+                            }
+                        }
+                    });
+                } catch (e) {
+                    console.error("Error parsing stock data for charts:", e);
+                }
+            }
+        });
+    </script>
+
+    {# Embed stock data as JSON for JavaScript #}
+    {% if data.stocks %}
+        <script id="stocksData" type="application/json">
+            {{ data.stocks|tojson|safe }}
+        </script>
+    {% endif %}
 </body>
 </html>

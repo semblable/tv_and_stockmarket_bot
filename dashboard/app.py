@@ -181,7 +181,7 @@ def dashboard():
     print(f"Fetched Movie Subscriptions for dashboard: {movie_subs}")
 
     # Fetch Tracked Stocks
-    tracked_stocks, stocks_error = internal_api_client.get_tracked_stocks(user_id)
+    tracked_stocks, stocks_error = internal_api_client.get_tracked_stocks_with_prices(user_id)
     if stocks_error:
         errors['stocks'] = stocks_error
         flash(f"Error fetching stocks: {stocks_error}", "error")

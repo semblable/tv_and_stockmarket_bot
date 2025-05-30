@@ -12,6 +12,7 @@ from flask import Flask, request, jsonify
 from threading import Thread
 from functools import wraps
 from data_manager import DataManager # For API endpoints
+import random # For placeholder chart data
 
 # --- Basic Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s', handlers=[logging.StreamHandler()])
@@ -271,6 +272,82 @@ def get_tracked_stocks(discord_user_id):
         return jsonify({"error": "Invalid user ID format"}), 400
     except Exception as e:
         print(f"Error in /tracked_stocks: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@flask_app.route('/api/internal/user/<discord_user_id>/tracked_stocks_with_prices', methods=['GET'])
+@require_internal_api_key
+def get_tracked_stocks_with_prices(discord_user_id):
+    """Get tracked stocks with current prices and chart data"""
+    if not bot.db_manager:
+        return jsonify({"error": "Database manager not available"}), 503
+    
+    from api_clients import alpha_vantage_client, yahoo_finance_client
+    
+    try:
+        user_id = int(discord_user_id)
+        stocks = bot.db_manager.get_user_tracked_stocks(user_id)
+        
+        enhanced_stocks = []
+        for stock in stocks:
+            symbol = stock['symbol']
+            enhanced_stock = stock.copy()
+            
+            price_data = alpha_vantage_client.get_stock_price(symbol)
+            data_source = "Alpha Vantage"
+            
+            if not price_data or "error" in price_data:
+                price_data = yahoo_finance_client.get_stock_price(symbol)
+                data_source = "Yahoo Finance"
+            
+            current_price_for_chart = 100 # Default for chart if price fetch fails
+            if price_data and "05. price" in price_data:
+                try:
+                    current_price_float = float(price_data['05. price'])
+                    enhanced_stock['current_price'] = current_price_float
+                    current_price_for_chart = current_price_float # Use actual price for chart base
+                    enhanced_stock['change'] = price_data.get('09. change', '0')
+                    enhanced_stock['change_percent'] = price_data.get('10. change percent', '0%')
+                    enhanced_stock['currency'] = price_data.get('currency', 'USD')
+                    enhanced_stock['data_source'] = data_source
+                    
+                    if enhanced_stock.get('quantity') and enhanced_stock.get('purchase_price'):
+                        current_value = current_price_float * enhanced_stock['quantity']
+                        cost_basis = enhanced_stock['purchase_price'] * enhanced_stock['quantity']
+                        enhanced_stock['current_value'] = current_value
+                        enhanced_stock['cost_basis'] = cost_basis
+                        enhanced_stock['total_gain_loss'] = current_value - cost_basis
+                        if cost_basis != 0: # Avoid division by zero
+                           enhanced_stock['total_gain_loss_percent'] = ((current_value - cost_basis) / cost_basis) * 100
+                        else:
+                            enhanced_stock['total_gain_loss_percent'] = 0 
+
+                except (ValueError, TypeError):
+                    enhanced_stock['current_price'] = None
+                    enhanced_stock['error'] = 'Invalid price format from API'
+                    # current_price_for_chart remains default 100
+            else:
+                enhanced_stock['current_price'] = None
+                enhanced_stock['error'] = price_data.get('message', 'Unable to fetch price') if isinstance(price_data, dict) else 'Unable to fetch price'
+                # current_price_for_chart remains default 100
+
+            # Generate placeholder chart data (e.g., 30 data points)
+            # In a real scenario, you'd fetch actual historical data here.
+            placeholder_prices = []
+            base_val = current_price_for_chart
+            for i in range(30):
+                # Simulate some variation around the base_val or a slight trend
+                variation = (random.random() - 0.5) * (base_val * 0.05) # up to 5% variation
+                trend_factor = (i - 15) * (base_val * 0.001) # slight trend
+                placeholder_prices.append(max(0, round(base_val + variation + trend_factor, 2))) # ensure price is not negative
+            enhanced_stock['chart_data'] = placeholder_prices
+            
+            enhanced_stocks.append(enhanced_stock)
+        
+        return jsonify(enhanced_stocks), 200
+    except ValueError:
+        return jsonify({"error": "Invalid user ID format"}), 400
+    except Exception as e:
+        flask_app.logger.error(f"Error in /tracked_stocks_with_prices: {e}", exc_info=True) # Added exc_info
         return jsonify({"error": "Internal server error"}), 500
 
 @flask_app.route('/api/internal/user/<discord_user_id>/tracked_stock', methods=['POST'])

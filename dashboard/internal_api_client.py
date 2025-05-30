@@ -107,6 +107,11 @@ def get_tracked_stocks(user_id: str):
     endpoint = "/api/internal/user/{user_id}/tracked_stocks"
     return _make_request(endpoint, user_id)
 
+def get_tracked_stocks_with_prices(user_id: str):
+    """Fetches tracked stocks with current prices and portfolio data for a user."""
+    endpoint = "/api/internal/user/{user_id}/tracked_stocks_with_prices"
+    return _make_request(endpoint, user_id)
+
 def add_tracked_stock(user_id: str, symbol: str, quantity: float = None, purchase_price: float = None) -> tuple[dict | None, str | None]:
     """Adds a tracked stock for a user."""
     endpoint = "/api/internal/user/{user_id}/tracked_stock"
