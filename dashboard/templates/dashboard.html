@@ -172,7 +172,16 @@
                     {% if data.stock_alerts %}
                         <ul>
                         {% for alert in data.stock_alerts %}
-                            <li>{{ alert.get('symbol', 'N/A') }} - Target: {{ alert.get('target_price', 'N/A') }} (Type: {{ alert.get('alert_type', 'N/A') }})</li>
+                            <li>
+                                <strong>{{ alert.get('symbol', 'N/A') }}</strong> - 
+                                {% if alert.get('active_above') and alert.get('target_above') %}
+                                    Above ${{ "%.2f"|format(alert.get('target_above')) }}
+                                {% elif alert.get('active_below') and alert.get('target_below') %}
+                                    Below ${{ "%.2f"|format(alert.get('target_below')) }}
+                                {% else %}
+                                    No active alerts
+                                {% endif %}
+                            </li>
                         {% else %}
                             <li>No stock alerts found.</li>
                         {% endfor %}
