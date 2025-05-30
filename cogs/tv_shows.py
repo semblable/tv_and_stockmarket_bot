@@ -1012,121 +1012,99 @@ Usage examples:
                     
                     actual_show_name_tmdb = show_details_tmdb.get('name', show_name_stored) # Prefer TMDB name
 
+                    # NEW: Collect all episodes to notify about (can be multiple)
+                    episodes_to_notify = []
+
                     # Check 'next_episode_to_air' first
                     next_ep = show_details_tmdb.get('next_episode_to_air')
-                    episode_to_notify = None
-
-                    if next_ep and next_ep.get('air_date'):
+                    if next_ep and next_ep.get('air_date') and next_ep.get('id'):
                         try:
                             next_air_date_obj = datetime.strptime(next_ep['air_date'], '%Y-%m-%d').date()
                             # Notify if episode airs today or in the past (and hasn't been notified)
                             if next_air_date_obj <= today:
-                                if not last_notified_ep_details or \
-                                   last_notified_ep_details.get('id') != next_ep.get('id'):
-                                    episode_to_notify = next_ep
+                                # Check if not already notified
+                                already_notified = await self.bot.loop.run_in_executor(
+                                    None, 
+                                    self.db_manager.has_user_been_notified_for_episode, 
+                                    user_id, 
+                                    show_id, 
+                                    next_ep.get('id')
+                                )
+                                if not already_notified:
+                                    episodes_to_notify.append(next_ep)
                         except ValueError:
                             print(f"Invalid air_date format for next_episode_to_air for show {show_id}: {next_ep.get('air_date')}")
                     
-                    # If no 'next_episode_to_air' or it's in the future, check 'last_episode_to_air'
-                    # This handles cases where 'next_episode_to_air' might be null if the show just aired its finale
-                    # or if TMDB data for future episodes isn't populated yet.
-                    if not episode_to_notify:
-                        last_aired_ep = show_details_tmdb.get('last_episode_to_air')
-                        if last_aired_ep and last_aired_ep.get('air_date'):
-                            try:
-                                last_aired_date_obj = datetime.strptime(last_aired_ep['air_date'], '%Y-%m-%d').date()
-                                # Notify if it aired recently (e.g., within last 7 days) and hasn't been notified
-                                # This helps catch episodes if the bot was down or if TMDB data was delayed.
-                                if (today - timedelta(days=7)) <= last_aired_date_obj <= today:
-                                    if not last_notified_ep_details or \
-                                       last_notified_ep_details.get('id') != last_aired_ep.get('id'):
-                                        episode_to_notify = last_aired_ep
-                            except ValueError:
-                                print(f"Invalid air_date format for last_episode_to_air for show {show_id}: {last_aired_ep.get('air_date')}")
+                    # Check 'last_episode_to_air' separately (might be different from next_episode_to_air)
+                    last_aired_ep = show_details_tmdb.get('last_episode_to_air')
+                    if last_aired_ep and last_aired_ep.get('air_date') and last_aired_ep.get('id'):
+                        try:
+                            last_aired_date_obj = datetime.strptime(last_aired_ep['air_date'], '%Y-%m-%d').date()
+                            # Notify if it aired recently (within last 7 days) and hasn't been notified
+                            if (today - timedelta(days=7)) <= last_aired_date_obj <= today:
+                                # Check if not already notified and not already in episodes_to_notify
+                                already_notified = await self.bot.loop.run_in_executor(
+                                    None, 
+                                    self.db_manager.has_user_been_notified_for_episode, 
+                                    user_id, 
+                                    show_id, 
+                                    last_aired_ep.get('id')
+                                )
+                                if not already_notified:
+                                    # Avoid duplicate if next_ep and last_aired_ep are the same episode
+                                    if not any(ep.get('id') == last_aired_ep.get('id') for ep in episodes_to_notify):
+                                        episodes_to_notify.append(last_aired_ep)
+                        except ValueError:
+                            print(f"Invalid air_date format for last_episode_to_air for show {show_id}: {last_aired_ep.get('air_date')}")
 
-                    if episode_to_notify:
+                    # Send notifications for all qualifying episodes
+                    for episode_to_notify in episodes_to_notify:
                         ep_id = episode_to_notify.get('id')
-                        if not ep_id:
-                            logger.warning(f"Episode for show {show_id} ({actual_show_name_tmdb}) is missing an 'id'. Skipping notification.")
-                            continue
-
-                        # NEW: Check if notification for this specific episode has already been sent
-                        already_notified_for_this_episode = await self.bot.loop.run_in_executor(
-                            None, 
-                            self.db_manager.has_user_been_notified_for_episode, 
-                            user_id, 
-                            show_id, 
-                            ep_id
-                        )
-
-                        if already_notified_for_this_episode:
-                            logger.info(f"User {user_id} already notified for episode {ep_id} of show {show_id} ({actual_show_name_tmdb}). Skipping.")
-                            # We might still want to update last_notified_episode_details if this episode_to_notify
-                            # is newer than what's stored, even if it was sent. But for now, strict skip.
-                            continue
-
                         ep_name = episode_to_notify.get('name', 'Episode Name TBA')
                         ep_season = episode_to_notify.get('season_number', 'S?')
                         ep_num = episode_to_notify.get('episode_number', 'E?')
-                        ep_overview = episode_to_notify.get('overview', 'No overview available.')
                         ep_air_date_str = episode_to_notify.get('air_date', 'Unknown Air Date')
                         
-                        # Truncate overview if too long
-                        max_overview_length = 500 # Increased length for a more detailed overview
-                        if len(ep_overview) > max_overview_length:
-                            ep_overview = ep_overview[:max_overview_length-3] + "..."
+                        # Format air date nicely
+                        try:
+                            date_obj = datetime.strptime(ep_air_date_str, '%Y-%m-%d').date()
+                            ep_air_date_str = date_obj.strftime('%Y-%m-%d')  # Keep YYYY-MM-DD format as requested
+                        except ValueError:
+                            pass  # Keep original format if parsing fails
 
+                        # Create simplified embed
                         embed = discord.Embed(
                             title=f"📺 New Episode Alert: {actual_show_name_tmdb}",
                             description=f"**S{ep_season:02d}E{ep_num:02d} - \"{ep_name}\"** has aired!",
                             color=discord.Color.green()
                         )
                         embed.add_field(name="Air Date", value=ep_air_date_str, inline=True)
+                        
+                        # Add episode rating if available
                         if episode_to_notify.get('vote_average') and episode_to_notify.get('vote_average') > 0:
-                             embed.add_field(name="Episode Rating", value=f"{episode_to_notify['vote_average']:.1f}/10", inline=True)
+                            embed.add_field(name="Episode Rating", value=f"{episode_to_notify['vote_average']:.1f}/10", inline=True)
                         
-                        # --- Apply tv_show_dm_overview preference ---
-                        # ep_overview is already fetched and potentially truncated from lines 908-916
-                        show_overview_preference = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "tv_show_dm_overview", True)
-                        if show_overview_preference:
-                            if ep_overview and ep_overview != 'No overview available.' and ep_overview.strip(): # Ensure there's an overview to show
-                                embed.add_field(name="Overview", value=ep_overview, inline=False)
-                            # If preference is on but overview is 'No overview available.' or empty, we don't add the field.
-                        
-                        still_path = episode_to_notify.get('still_path')
-                        if still_path:
-                            still_url = tmdb_client.get_poster_url(still_path, size="w300") # or "original"
-                            if still_url:
-                                embed.set_image(url=still_url)
-                        elif show_details_tmdb.get('poster_path'): # Fallback to show poster
-                            poster_url = tmdb_client.get_poster_url(show_details_tmdb['poster_path'], size="w154")
+                        # Use show poster as thumbnail (cleaner than episode stills)
+                        if show_details_tmdb.get('poster_path'):
+                            poster_url = tmdb_client.get_poster_url(show_details_tmdb['poster_path'], size="w185")
                             if poster_url:
                                 embed.set_thumbnail(url=poster_url)
-
-                        # Create specific TMDB links
-                        show_tmdb_url = f"https://www.themoviedb.org/tv/{show_id}"
-                        
-                        embed.add_field(name=f"📺 {actual_show_name_tmdb} on TMDB", value=f"[View Show Page]({show_tmdb_url})", inline=True)
 
                         try:
                             await user.send(embed=embed)
                             logger.info(f"Sent new episode notification for '{actual_show_name_tmdb}' S{ep_season:02d}E{ep_num:02d} to user {user_id}.")
                             
-                            # NEW: Add to sent_episode_notifications table
+                            # Add to sent_episode_notifications table
                             await self.bot.loop.run_in_executor(
                                 None, 
                                 self.db_manager.add_sent_episode_notification,
                                 user_id,
                                 show_id,
-                                ep_id, # episode_tmdb_id
+                                ep_id,
                                 ep_season,
                                 ep_num
                             )
                             logger.info(f"Logged sent notification for User {user_id}, Show {show_id}, Episode {ep_id}.")
-
-                            # Update the last notified episode details in the database
-                            await self.bot.loop.run_in_executor(None, self.db_manager.update_last_notified_episode_details, user_id, show_id, episode_to_notify)
-                            logger.info(f"Updated last notified episode for user {user_id}, show {show_id} to episode ID {episode_to_notify.get('id')}.")
 
                         except discord.Forbidden:
                             print(f"Could not send DM to user {user_id} (DM disabled or bot blocked).")
@@ -1134,6 +1112,13 @@ Usage examples:
                             print(f"HTTP error sending episode DM to user {user_id}: {e}")
                         except Exception as e:
                             print(f"Error sending episode notification to user {user_id}: {e}")
+
+                    # Update last_notified_episode_details to the most recent episode we notified about
+                    if episodes_to_notify:
+                        # Find the most recent episode by air date
+                        most_recent_episode = max(episodes_to_notify, key=lambda ep: ep.get('air_date', '1900-01-01'))
+                        await self.bot.loop.run_in_executor(None, self.db_manager.update_last_notified_episode_details, user_id, show_id, most_recent_episode)
+                        logger.info(f"Updated last notified episode for user {user_id}, show {show_id} to episode ID {most_recent_episode.get('id')}.")
 
                 except Exception as e:
                     print(f"Error fetching or processing show {show_id} for user {user_id}: {e}")
