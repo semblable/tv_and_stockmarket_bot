@@ -27,6 +27,7 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")
 INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # SQLite Database Configuration
 SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "data/app.db")
@@ -42,6 +43,8 @@ if OPENWEATHERMAP_API_KEY is None:
     logger.warning("config.py: OPENWEATHERMAP_API_KEY not found in environment variables.")
 if INTERNAL_API_KEY is None:
     logger.warning("config.py: INTERNAL_API_KEY not found in environment variables.")
+if GEMINI_API_KEY is None:
+    logger.warning("config.py: GEMINI_API_KEY not found in environment variables.")
 if SQLITE_DB_PATH == "data/app.db":
     logger.info(f"config.py: SQLITE_DB_PATH not set, using default: {SQLITE_DB_PATH}")
 elif SQLITE_DB_PATH is None: # Should not happen with default, but good practice
