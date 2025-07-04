@@ -45,16 +45,27 @@ class GeminiAI(commands.Cog):
     @app_commands.describe(prompt="Your question or prompt for Gemini AI.")
     async def gemini(self, ctx: commands.Context, *, prompt: str):
         """Handles the /gemini or !gemini command."""
-        if ctx.interaction:
+        is_slash = ctx.interaction is not None
+        if is_slash:
             await ctx.interaction.response.defer(thinking=True)
         else:
-            await ctx.defer()
+            # For prefix commands, show typing indicator
+            await ctx.channel.typing().__aenter__()
+
+        async def send_message(content: str, **kwargs):
+            """Unified send helper for both slash and prefix invocations."""
+            if is_slash:
+                await ctx.followup.send(content, **kwargs)
+            else:
+                # ctx.send doesn't support ephemeral; ignore such kwarg
+                kwargs.pop("ephemeral", None)
+                await ctx.send(content, **kwargs)
 
         # Check configuration
         if not self._configured:
-            await ctx.followup.send(
+            await send_message(
                 "❌ Gemini AI is not configured by the bot owner. Please try again later.",
-                ephemeral=True if ctx.interaction else False,
+                ephemeral=True if is_slash else False,
             )
             return
 
@@ -75,7 +86,7 @@ class GeminiAI(commands.Cog):
             if len(answer) > 2000:
                 answer = answer[:1990] + "…"
 
-            await ctx.followup.send(answer)
+            await send_message(answer)
             return
         except Exception as primary_error:
             # Log and prepare fallback attempt
@@ -89,9 +100,9 @@ class GeminiAI(commands.Cog):
                 self._model_fallback = genai.GenerativeModel(self.fallback_model_name)
             except Exception as inst_err:
                 logger.error(f"Failed to instantiate fallback model '{self.fallback_model_name}': {inst_err}")
-                await ctx.followup.send(
+                await send_message(
                     "⚠️ Gemini AI is currently unavailable (both primary and fallback models failed to initialize). Please try again later.",
-                    ephemeral=True if ctx.interaction else False,
+                    ephemeral=True if is_slash else False,
                 )
                 return
 
@@ -106,14 +117,14 @@ class GeminiAI(commands.Cog):
                 answer = answer[:1990] + "…"
 
             notice = f"⚠️ Primary model '{self.primary_model_name}' encountered an issue, switched to '{self.fallback_model_name}'.\n\n"
-            await ctx.followup.send(notice + answer)
+            await send_message(notice + answer)
         except Exception as fallback_error:
             logger.error(
                 f"Both Gemini models failed (primary '{self.primary_model_name}', fallback '{self.fallback_model_name}'). Error: {fallback_error}"
             )
-            await ctx.followup.send(
+            await send_message(
                 "⚠️ Gemini AI is currently unavailable (both models failed). Please try again later.",
-                ephemeral=True if ctx.interaction else False,
+                ephemeral=True if is_slash else False,
             )
 
 async def setup(bot: commands.Bot):
