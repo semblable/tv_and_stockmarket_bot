@@ -43,100 +43,38 @@ class GeminiAI(commands.Cog):
 
 ## 4. Command Surface
 
-We have two design options:
+### Final Design (Implemented)
 
-1. **Command Group**
-
-```text
-/gemini ask      <prompt>   # continue or start automatically
-/gemini new      <prompt>   # force new session
-/gemini reset               # drop session
-```
-
-2. **Flags on single command**
+Single hybrid command with optional flags — works for both slash (`/`) and prefix (`!`) invocations.
 
 ```text
-/gemini <prompt>                 # continue if exists
-/gemini --new <prompt>           # start new
-/gemini --reset                  # just reset
+/gemini <prompt>                 # continue existing session (creates one if needed)
+/gemini new:true <prompt>        # force start a new conversation
+/gemini reset:true               # reset/forget conversation without sending a prompt
+
+!gemini <prompt>                 # same via prefix
+!gemini new <prompt>
+!gemini reset
 ```
 
-Option 1 is clearer for users & Discord's slash-command UX; recommended.
+Flags are simple booleans for slash usage (`new:true`, `reset:true`). Prefix aliases accept the first word `new|reset|n|r` as shorthand.
+
+This keeps the command surface minimal while still covering all flows.
 
 ---
 
-## 5. Implementation Steps
+## 5. Implementation Notes (Implemented)
 
-1. **Refactor Cog to Command Group**
+Key points of the final implementation (`cogs/gemini.py`):
 
-```python
-@commands.hybrid_group(name="gemini", invoke_without_command=True)
-async def gemini(ctx, *, prompt: str):
-    return await self.ask(ctx, prompt=prompt)
-```
+1. **Single Hybrid Command** – `@commands.hybrid_command("gemini")` with parameters `prompt`, `new`, `reset`.
+2. **Flag Parsing** – slash users set `new:true` or `reset:true`; prefix users may begin with `new` or `reset` tokens.
+3. **Session Dict** – `sessions: dict[SessionKey, SessionEntry]` keyed by `(guild_id, channel_id, user_id)`.
+4. **History Trimming** – keep last 20 exchanges to control token cost.
+5. **Fallback Model** – automatically switches to *flash* if *pro* fails.
+6. **Typing / Defer Safety** – context manager ensures Discord doesn't stay in endless "thinking".
 
-2. **Add Sub-Commands**
-
-```python
-@gemini.command(name="ask")
-async def ask(self, ctx, *, prompt: str):
-    chat = self._get_session(ctx)            # create if missing
-    response = await loop.run_in_executor(None, chat.send_message, prompt)
-    await ctx.send(response.text)
-
-@gemini.command(name="new")
-async def new(self, ctx, *, prompt: str):
-    chat = self._get_session(ctx, reset=True) # force new
-    ...
-
-@gemini.command(name="reset")
-async def reset(self, ctx):
-    self._delete_session(ctx)
-    await ctx.send("✅ Conversation reset.")
-```
-
-3. **Session Helpers**
-
-```python
-def _make_key(self, ctx):
-    return (ctx.guild.id if ctx.guild else 0, ctx.channel.id, ctx.author.id)
-
-def _get_session(self, ctx, reset: bool = False):
-    key = self._make_key(ctx)
-    if reset or key not in self.sessions:
-        self.sessions[key] = self.model_primary.start_chat(history=[])
-    return self.sessions[key]
-
-def _delete_session(self, ctx):
-    self.sessions.pop(self._make_key(ctx), None)
-```
-
-4. **History Management**
-
-* Gemini's API cost grows with history length. After each `send_message`, prune:
-
-```python
-history = chat.history
-max_tokens = 32_000              # model dependent
-while chat.count_tokens() > 0.75 * max_tokens:
-    history.pop(0)               # drop oldest turn
-```
-
-* Or cap to **N = 20** exchanges.
-
-5. **Fallback Model**
-
-Keep the primary / fallback logic as-is; both support `start_chat`.
-
-6. **Error Handling & TTL**
-
-* On SDK exceptions, try fallback or inform user.
-* Optionally invalidate sessions after **30 min** idle:
-
-```python
-if time.time() - session.last_activity > 1800:
-    del self.sessions[key]
-```
+All tasks in section 9 are now ✅ complete.
 
 ---
 

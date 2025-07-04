@@ -93,7 +93,7 @@ BOT_INTERNAL_API_URL=http://bot-container:5000
 ### 3. Run with Persistent Data
 ```bash
 # Build containers
-docker build -f bot.Dockerfile -t discord-tv-stock-bot .
+docker build -f bot.Dockerfile -t discord-bot .
 docker build -f dashboard/Dockerfile -t project-dashboard .
 
 # Start with persistent data (recommended)
@@ -184,6 +184,16 @@ docker build -f dashboard/Dockerfile -t project-dashboard .
 /add_movie Dune           # Add to watchlist
 /movie_info Dune          # Get movie details
 /my_movies               # View watchlist
+```
+
+### Gemini AI Commands
+```
+/gemini <prompt>                 # Chat with Google Gemini AI
+/gemini new:true <prompt>        # Start a brand-new conversation
+/gemini reset:true               # Reset/forget the current conversation
+!gemini <prompt>                 # Prefix equivalent
+!gemini new <prompt>             # Prefix: start new conversation
+!gemini reset                    # Prefix: reset conversation
 ```
 
 ## 🔧 Development

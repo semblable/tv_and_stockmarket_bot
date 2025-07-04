@@ -118,57 +118,69 @@ class GeminiAI(commands.Cog):
             self.logger.debug(f"Pruning history failed: {e}")
 
     # ------------------------------------------------------------------
-    # Single command interface
+    # Command Group interface – better UX for slash commands
     # ------------------------------------------------------------------
 
-    @commands.hybrid_command(name="gemini", description="Chat with Google Gemini AI.")
-    @app_commands.describe(
-        prompt="Your prompt for Gemini AI (omit when just resetting).",
-        new="Start a brand-new conversation (ignores previous context).",
-        reset="Reset the current conversation without sending a prompt.",
-    )
-    async def gemini(
-        self,
-        ctx: commands.Context,
-        *,
-        prompt: Optional[str] = None,
-        new: Optional[bool] = False,
-        reset: Optional[bool] = False,
-    ):
-        """Unified command:
+    @commands.hybrid_group(name="gemini", invoke_without_command=True, description="Chat with Google Gemini AI (multi-turn)")
+    async def gemini(self, ctx: commands.Context):
+        """Prefix: !gemini <prompt> (alias for ask). Slash: suggest using subcommands."""
 
-        • /gemini <prompt> – continue conversation
-        • /gemini new:true <prompt> – start fresh conversation
-        • /gemini reset:true – drop conversation history
-
-        Prefix aliases:
-        !gemini reset | !gemini new <prompt> | !gemini <prompt>
-        """
-
-        # Prefix commands may supply flags like "reset" or "new" as first token
-        if not ctx.interaction and prompt is not None:
-            tokens = prompt.split()
-            if tokens and tokens[0].lower() in {"reset", "r"}:
-                reset = True
-                prompt = " ".join(tokens[1:]) or None
-            elif tokens and tokens[0].lower() in {"new", "n"}:
-                new = True
-                prompt = " ".join(tokens[1:]) or None
-
-        # Handle reset-only request
-        if reset and (prompt is None):
-            self._delete_session(ctx)
-            await self._send_simple(ctx, "✅ Conversation reset.")
+        # If called as slash without subcommand, show usage hint
+        if ctx.interaction is not None:
+            await ctx.interaction.response.send_message(
+                "❌ Please use `/gemini ask <prompt>`, `/gemini new <prompt>`, or `/gemini reset`.",
+                ephemeral=True,
+            )
             return
 
-        # Decide whether to reset before asking
-        reset_before_ask = new or reset
+        # Prefix invocation – extract prompt after command name
+        raw = ctx.message.content[len(ctx.prefix) + len(ctx.invoked_with):].lstrip()
 
-        if prompt is None or prompt.strip() == "":
-            await self._send_simple(ctx, "❌ Please provide a prompt for Gemini AI.")
+        if not raw:
+            await ctx.send("❌ Please provide a prompt for Gemini AI (e.g., `!gemini What is quantum entanglement?`).")
             return
 
-        await self._handle_prompt(ctx, prompt.strip(), reset=reset_before_ask)
+        tokens = raw.split()
+        if tokens[0].lower() in {"reset", "r"}:
+            await self.reset(ctx)
+            return
+        if tokens[0].lower() in {"new", "n"}:
+            new_prompt = " ".join(tokens[1:])
+            if not new_prompt:
+                await ctx.send("❌ Please provide a prompt after `new` (e.g., `!gemini new What is Rust?`).")
+                return
+            await self.new(ctx, prompt=new_prompt)
+            return
+
+        # Default → ask
+        await self.ask(ctx, prompt=raw)
+
+    # ---------------------------
+    # /gemini ask
+    # ---------------------------
+
+    @gemini.command(name="ask", description="Ask Gemini AI – continue current conversation or start if none.")
+    @app_commands.describe(prompt="Your prompt for Gemini AI.")
+    async def ask(self, ctx: commands.Context, *, prompt: str):
+        await self._handle_prompt(ctx, prompt, reset=False)
+
+    # ---------------------------
+    # /gemini new
+    # ---------------------------
+
+    @gemini.command(name="new", description="Start a brand-new conversation with Gemini AI.")
+    @app_commands.describe(prompt="Your prompt for Gemini AI.")
+    async def new(self, ctx: commands.Context, *, prompt: str):
+        await self._handle_prompt(ctx, prompt, reset=True)
+
+    # ---------------------------
+    # /gemini reset
+    # ---------------------------
+
+    @gemini.command(name="reset", description="Reset / forget the current conversation with Gemini AI.")
+    async def reset(self, ctx: commands.Context):
+        self._delete_session(ctx)
+        await self._send_simple(ctx, "✅ Conversation reset.")
 
     # ------------------------------------------------------------------
     # Core prompt handler

@@ -294,3 +294,9 @@ flask_session/
 # Temporary charts and images
 charts/
 temp_charts/
+
+# Ruff cache
+.ruff_cache/
+
+# VSCode launch configuration
+.vscode/launch.json
