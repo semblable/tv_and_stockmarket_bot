@@ -200,9 +200,16 @@ class GeminiAI(commands.Cog):
             await typing_ctx.__aenter__()
 
         async def send(content: str, **kwargs):
+            """Unified send helper that works for both slash and prefix invocations."""
             if is_slash:
-                await ctx.followup.send(content, **kwargs)
+                interaction: discord.Interaction = ctx.interaction  # type: ignore
+                # Prefer original response if not yet sent; otherwise use follow-up
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(content, **kwargs)
+                else:
+                    await interaction.followup.send(content, **kwargs)
             else:
+                # 'ephemeral' kwarg is meaningless for normal channel messages
                 kwargs.pop("ephemeral", None)
                 await ctx.send(content, **kwargs)
 
@@ -288,7 +295,7 @@ class GeminiAI(commands.Cog):
             if not ctx.interaction.response.is_done():
                 await ctx.interaction.response.send_message(content, ephemeral=True)
             else:
-                await ctx.followup.send(content, ephemeral=True)
+                await ctx.interaction.followup.send(content, ephemeral=True)
         else:
             await ctx.send(content)
 
