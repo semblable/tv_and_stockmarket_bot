@@ -224,23 +224,48 @@ class GeminiAI(commands.Cog):
         loop = asyncio.get_running_loop()
 
         try:
-            response = await loop.run_in_executor(None, chat_session.send_message, prompt)
+            # Run the blocking Gemini call in a thread pool but give it a hard timeout so the bot does not get stuck
+            send_future = loop.run_in_executor(None, chat_session.send_message, prompt)
+            # If the request takes longer than 30 seconds we abort and inform the user
+            try:
+                response = await asyncio.wait_for(send_future, timeout=30)
+            except asyncio.TimeoutError:
+                # Best-effort cancellation; thread may keep running but we still respond.
+                self.logger.warning("Gemini chat request timed out (>30s).")
+                raise RuntimeError("Gemini AI took too long to respond. Please try again later.")
             answer: Optional[str] = getattr(response, "text", str(response))
 
             if not answer:
                 raise ValueError("Empty response from Gemini API")
 
-            # 2k char limit for Discord
-            if len(answer) > 2000:
-                answer = answer[:1990] + "…"
-
             notice = ""
             if model_name != self.primary_model_name:
                 notice = f"⚠️ Primary model '{self.primary_model_name}' unavailable, using '{model_name}'.\n\n"
 
-            await send(notice + answer)
+            full_message = notice + answer
+            # 2k char limit for Discord content field (safety margin)
+            if len(full_message) > 2000:
+                full_message = full_message[:1990] + "…"
 
-            # Update bookkeeping
+            # Logging before attempting to send
+            self.logger.info(
+                "Gemini answer length=%d (notice=%s) preview=%r", len(full_message), bool(notice), full_message[:120]
+            )
+
+            try:
+                await send(full_message)
+                self.logger.debug("Gemini follow-up delivered successfully")
+            except (discord.HTTPException, discord.Forbidden, discord.NotFound) as send_err:
+                # Log the full stack trace for diagnosis and try a graceful fallback
+                self.logger.exception("Failed to deliver Gemini response: %s", send_err)
+                fallback_msg = "⚠️ Unable to send Gemini response due to Discord error. Please check bot permissions or try again later."
+                try:
+                    await send(fallback_msg, ephemeral=is_slash)
+                except Exception:
+                    # Give up; re-raise so the outer except handles it too.
+                    raise
+
+            # Update bookkeeping only if we didn't raise
             entry["last"] = time.time()
             self._prune_history(chat_session)
 
