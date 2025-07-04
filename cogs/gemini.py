@@ -231,14 +231,14 @@ class GeminiAI(commands.Cog):
         loop = asyncio.get_running_loop()
 
         try:
-            # Run the blocking Gemini call in a thread pool but give it a hard timeout so the bot does not get stuck
+            # Run the blocking Gemini call in a thread pool but give it a generous timeout (up to 5 minutes)
             send_future = loop.run_in_executor(None, chat_session.send_message, prompt)
-            # If the request takes longer than 30 seconds we abort and inform the user
+            # If the request takes longer than 300 seconds we abort and inform the user
             try:
-                response = await asyncio.wait_for(send_future, timeout=30)
+                response = await asyncio.wait_for(send_future, timeout=300)
             except asyncio.TimeoutError:
                 # Best-effort cancellation; thread may keep running but we still respond.
-                self.logger.warning("Gemini chat request timed out (>30s).")
+                self.logger.warning("Gemini chat request timed out (>300s).")
                 raise RuntimeError("Gemini AI took too long to respond. Please try again later.")
             answer: Optional[str] = getattr(response, "text", str(response))
 
