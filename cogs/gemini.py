@@ -117,6 +117,12 @@ class GeminiAI(commands.Cog):
             # Be resilient – pruning is best-effort
             self.logger.debug(f"Pruning history failed: {e}")
 
+    # Utility: split long text into Discord-compatible chunks (≤ 2000 chars each)
+    def _split_content(self, content: str, limit: int = 2000) -> list[str]:
+        """Return a list of strings each ≤ `limit` characters preserving order."""
+        # Simple greedy slicing – break exactly at the limit. Could be improved to split on newlines.
+        return [content[i : i + limit] for i in range(0, len(content), limit)]
+
     # ------------------------------------------------------------------
     # Command Group interface – better UX for slash commands
     # ------------------------------------------------------------------
@@ -250,18 +256,21 @@ class GeminiAI(commands.Cog):
                 notice = f"⚠️ Primary model '{self.primary_model_name}' unavailable, using '{model_name}'.\n\n"
 
             full_message = notice + answer
-            # 2k char limit for Discord content field (safety margin)
+            # Send in chunks if necessary (Discord 2k char hard limit)
             if len(full_message) > 2000:
-                full_message = full_message[:1990] + "…"
+                chunks = self._split_content(full_message, limit=2000)
+            else:
+                chunks = [full_message]
 
-            # Logging before attempting to send
+            # Logging before attempting to send first chunk
             self.logger.info(
                 "Gemini answer length=%d (notice=%s) preview=%r", len(full_message), bool(notice), full_message[:120]
             )
 
             try:
-                await send(full_message)
-                self.logger.debug("Gemini follow-up delivered successfully")
+                for chunk in chunks:
+                    await send(chunk)
+                self.logger.debug("Gemini response delivered successfully in %d chunk(s)", len(chunks))
             except (discord.HTTPException, discord.Forbidden, discord.NotFound) as send_err:
                 # Log the full stack trace for diagnosis and try a graceful fallback
                 self.logger.exception("Failed to deliver Gemini response: %s", send_err)
