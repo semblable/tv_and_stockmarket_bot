@@ -1,0 +1,57 @@
+name: Trigger auto deployment for py-discord-bot (manual build --no-cache)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+    - '**' 
+    - '.github/workflows/py-discord-bot-AutoDeployTrigger-b65f0283-cb74-4d06-baea-01bdc733ca7f.yml'
+  workflow_dispatch:      
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read 
+
+    env:
+      ACR_REGISTRY_NAME: pybotdashboardregistry.azurecr.io
+      IMAGE_NAME: py-discord-bot
+      DOCKERFILE_PATH: ./bot.Dockerfile
+      RESOURCE_GROUP: PythonBotAppRG # Your resource group
+      CONTAINER_APP_NAME: py-discord-bot # Your container app name
+
+    steps:
+      - name: Confirm Bot Workflow Version
+        run: echo "RUNNING BOT WORKFLOW V3 - MANUAL BUILD --NO-CACHE"
+
+      - name: Checkout to the branch
+        uses: actions/checkout@v3 # Updated to v3
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS }} 
+
+      - name: Docker Login to ACR
+        run: |
+          echo "${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientSecret }}" | docker login ${{ env.ACR_REGISTRY_NAME }} -u "${{ fromJson(secrets.PYDASHBOARDAPP_AZURE_CREDENTIALS).clientId }}" --password-stdin
+
+      - name: Build Docker image with --no-cache
+        run: |
+          docker build --no-cache \
+            -t ${{ env.ACR_REGISTRY_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            -f ${{ env.DOCKERFILE_PATH }} .
+
+      - name: Push Docker image to ACR
+        run: |
+          docker push ${{ env.ACR_REGISTRY_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Deploy to Azure Container App
+        uses: azure/container-apps-deploy-action@v2
+        with:
+          imageToDeploy: ${{ env.ACR_REGISTRY_NAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          containerAppName: ${{ env.CONTAINER_APP_NAME }}
+          resourceGroup: ${{ env.RESOURCE_GROUP }}
+          # Removed appSourcePath, dockerfilePath, registryUrl, registryUsername, registryPassword, imageToBuild
+          # The action will use the existing Azure login session to deploy the specified image.

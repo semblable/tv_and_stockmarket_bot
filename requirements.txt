@@ -1,0 +1,9 @@
+discord.py
+python-dotenv
+requests>=2.28.0
+Flask
+azure-storage-blob
+yfinance>=0.2.18
+urllib3>=1.26.0
+curl_cffi
+google-generativeai==0.8.5
