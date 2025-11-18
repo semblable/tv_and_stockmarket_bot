@@ -164,14 +164,15 @@ class TVShows(commands.Cog):
     async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False, view=None):
         """Helper method to send responses that work with both slash commands and prefix commands"""
         if ctx.interaction:
+            view_arg = view if view is not None else discord.utils.MISSING
             if embeds:
-                return await ctx.interaction.followup.send(content=content, embeds=embeds, ephemeral=ephemeral, wait=wait, view=view)
+                return await ctx.interaction.followup.send(content=content, embeds=embeds, ephemeral=ephemeral, wait=wait, view=view_arg)
             elif content and embed:
-                return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, wait=wait, view=view)
+                return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, wait=wait, view=view_arg)
             elif embed:
-                return await ctx.interaction.followup.send(embed=embed, ephemeral=ephemeral, wait=wait, view=view)
+                return await ctx.interaction.followup.send(embed=embed, ephemeral=ephemeral, wait=wait, view=view_arg)
             else:
-                return await ctx.interaction.followup.send(content, ephemeral=ephemeral, wait=wait, view=view)
+                return await ctx.interaction.followup.send(content, ephemeral=ephemeral, wait=wait, view=view_arg)
         else:
             if embeds:
                 return await ctx.send(content=content, embeds=embeds, view=view)
