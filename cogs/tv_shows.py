@@ -12,13 +12,48 @@ import asyncio
 import logging
 import json
 import typing
-from utils.paginator import BasePaginatorView # Import BasePaginatorView
+from utils.paginator import BasePaginatorView, SelectionView # Import BasePaginatorView
 
 logger = logging.getLogger(__name__)
 
 NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
 ITEMS_PER_PAGE_DEFAULT = 5
+
+class SelectionView(discord.ui.View):
+    def __init__(self, ctx, results, timeout=60):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.results = results
+        self.selected_result = None
+        
+        for i, _ in enumerate(results):
+            if i >= 5: break
+            self.add_item(SelectionButton(i, NUMBER_EMOJIS[i]))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This isn't for you!", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        # We can't easily edit the message if we don't have the message object saved or if it's ephemeral
+        # But since the view stops listening, it's fine.
+        pass
+
+class SelectionButton(discord.ui.Button):
+    def __init__(self, index, emoji):
+        super().__init__(style=discord.ButtonStyle.secondary, label=str(index+1), emoji=emoji, custom_id=f"select_{index}")
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction):
+        view: SelectionView = self.view
+        view.selected_result = view.results[self.index]
+        await interaction.response.defer() 
+        view.stop()
 
 class MyTVShowsPaginatorView(BasePaginatorView):
     def __init__(self, *, timeout=300, user_id: int, all_subs: list, bot_instance, items_per_page: int = ITEMS_PER_PAGE_DEFAULT):
@@ -126,26 +161,26 @@ class TVShows(commands.Cog):
         logger.info("TVShows Cog: Initializing and starting check_new_episodes task.")
         self.check_new_episodes.start()
 
-    async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False):
+    async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False, view=None):
         """Helper method to send responses that work with both slash commands and prefix commands"""
         if ctx.interaction:
             if embeds:
-                return await ctx.interaction.followup.send(content=content, embeds=embeds, ephemeral=ephemeral, wait=wait)
+                return await ctx.interaction.followup.send(content=content, embeds=embeds, ephemeral=ephemeral, wait=wait, view=view)
             elif content and embed:
-                return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, wait=wait)
+                return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, wait=wait, view=view)
             elif embed:
-                return await ctx.interaction.followup.send(embed=embed, ephemeral=ephemeral, wait=wait)
+                return await ctx.interaction.followup.send(embed=embed, ephemeral=ephemeral, wait=wait, view=view)
             else:
-                return await ctx.interaction.followup.send(content, ephemeral=ephemeral, wait=wait)
+                return await ctx.interaction.followup.send(content, ephemeral=ephemeral, wait=wait, view=view)
         else:
             if embeds:
-                return await ctx.send(content=content, embeds=embeds)
+                return await ctx.send(content=content, embeds=embeds, view=view)
             elif content and embed:
-                return await ctx.send(content=content, embed=embed)
+                return await ctx.send(content=content, embed=embed, view=view)
             elif embed:
-                return await ctx.send(embed=embed)
+                return await ctx.send(embed=embed, view=view)
             else:
-                return await ctx.send(content)
+                return await ctx.send(content, view=view)
 
     def cog_unload(self):
         logger.info("TVShows Cog: Unloading and cancelling check_new_episodes task.")
@@ -239,7 +274,7 @@ class TVShows(commands.Cog):
                 display_results = search_results[:5]
 
                 embeds_list = []
-                message_content = "Multiple shows found. Please react with the number of the show you want to subscribe to:"
+                message_content = "Multiple shows found. Please click the button for the show you want to subscribe to:"
 
                 for i, show_data_item in enumerate(display_results):
                     year_str = show_data_item.get('first_air_date')
@@ -258,49 +293,16 @@ class TVShows(commands.Cog):
                     
                     embeds_list.append(show_embed)
 
-                prompt_msg_obj = await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
-
-                for i in range(len(display_results)):
-                    if i < len(NUMBER_EMOJIS):
-                        await prompt_msg_obj.add_reaction(NUMBER_EMOJIS[i])
+                view = SelectionView(ctx, display_results)
+                await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=True, wait=True, view=view)
                 
-                def check(reaction, user):
-                    return user == ctx.author and \
-                           reaction.message.id == prompt_msg_obj.id and \
-                           str(reaction.emoji) in NUMBER_EMOJIS[:len(display_results)]
-
-                try:
-                    reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
-                    
-                    choice_idx = -1
-                    for i, emoji_str in enumerate(NUMBER_EMOJIS[:len(display_results)]):
-                        if str(reaction.emoji) == emoji_str:
-                            choice_idx = i
-                            break
-                    
-                    if 0 <= choice_idx < len(display_results):
-                        selected_show = display_results[choice_idx]
-                    else:
-                        await self.send_response(ctx, "Invalid reaction. Subscription cancelled.", ephemeral=True)
-                        try: await prompt_msg_obj.delete()
-                        except discord.HTTPException: pass
-                        return
-                except asyncio.TimeoutError:
-                    await self.send_response(ctx, "Selection timed out. Subscription cancelled.", ephemeral=True)
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
+                await view.wait()
+                
+                if view.selected_result:
+                    selected_show = view.selected_result
+                else:
+                    await self.send_response(ctx, "Selection timed out or cancelled.", ephemeral=True)
                     return
-                except Exception as e:
-                    logger.error(f"Error during reaction-based show selection for '{show_name}' by {ctx.author.id}: {e}")
-                    await self.send_response(ctx, "An error occurred during selection. Subscription cancelled.", ephemeral=True)
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
-                    return
-                finally:
-                    try:
-                        if 'prompt_msg_obj' in locals() and prompt_msg_obj and selected_show:
-                             await prompt_msg_obj.clear_reactions()
-                    except: pass
 
             if selected_show is None:
                 await self.send_response(ctx, "Failed to make a selection. Subscription cancelled.", ephemeral=True)
@@ -382,7 +384,7 @@ class TVShows(commands.Cog):
             display_results = matching_subscriptions[:5]
 
             embeds_list = []
-            message_content = "Multiple subscribed shows match. React with the number to unsubscribe:"
+            message_content = "Multiple subscribed shows match. Please select the show to unsubscribe from:"
 
             for i, sub_data_item in enumerate(display_results):
                 show_embed = discord.Embed(
@@ -398,44 +400,15 @@ class TVShows(commands.Cog):
                 
                 embeds_list.append(show_embed)
 
-            prompt_msg_obj = await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
-
-            for i in range(len(display_results)):
-                if i < len(NUMBER_EMOJIS):
-                    await prompt_msg_obj.add_reaction(NUMBER_EMOJIS[i])
+            view = SelectionView(ctx, display_results)
+            await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=True, wait=True, view=view)
             
-            def check(reaction, user):
-                return user == ctx.author and \
-                       reaction.message.id == prompt_msg_obj.id and \
-                       str(reaction.emoji) in NUMBER_EMOJIS[:len(display_results)]
+            await view.wait()
 
-            try:
-                reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
-                choice_idx = -1
-                for i, emoji_str in enumerate(NUMBER_EMOJIS[:len(display_results)]):
-                    if str(reaction.emoji) == emoji_str:
-                        choice_idx = i
-                        break
-                
-                if 0 <= choice_idx < len(display_results):
-                    selected_show_to_unsubscribe = display_results[choice_idx]
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
-                else:
-                    await self.send_response(ctx, "Invalid selection. Unsubscription cancelled.", ephemeral=True)
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
-                    return
-            except asyncio.TimeoutError:
-                await self.send_response(ctx, "Selection timed out. Unsubscription cancelled.", ephemeral=True)
-                try: await prompt_msg_obj.delete()
-                except discord.HTTPException: pass
-                return
-            except Exception as e:
-                logger.error(f"Error during reaction-based show unsubscription selection for '{show_name}' by {ctx.author.id}: {e}")
-                await self.send_response(ctx, "An error occurred during selection. Unsubscription cancelled.", ephemeral=True)
-                try: await prompt_msg_obj.delete()
-                except discord.HTTPException: pass
+            if view.selected_result:
+                selected_show_to_unsubscribe = view.selected_result
+            else:
+                await self.send_response(ctx, "Selection timed out or cancelled.", ephemeral=True)
                 return
 
         if not selected_show_to_unsubscribe:
@@ -532,7 +505,7 @@ class TVShows(commands.Cog):
             else:
                 display_results = search_results[:5]
                 embeds_list = []
-                message_content = "Multiple shows found. Please react with the number of the show you want info for:"
+                message_content = "Multiple shows found. Please select the show you want info for:"
 
                 for i, show_data_item in enumerate(display_results):
                     year_str = show_data_item.get('first_air_date')
@@ -551,45 +524,15 @@ class TVShows(commands.Cog):
                     
                     embeds_list.append(show_embed)
 
-                prompt_msg_obj = await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
-
-                for i in range(len(display_results)):
-                    if i < len(NUMBER_EMOJIS):
-                        await prompt_msg_obj.add_reaction(NUMBER_EMOJIS[i])
+                view = SelectionView(ctx, display_results)
+                await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=True, wait=True, view=view)
                 
-                def check(reaction, user):
-                    return user == ctx.author and \
-                           reaction.message.id == prompt_msg_obj.id and \
-                           str(reaction.emoji) in NUMBER_EMOJIS[:len(display_results)]
+                await view.wait()
 
-                try:
-                    reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
-                    
-                    choice_idx = -1
-                    for i, emoji_str in enumerate(NUMBER_EMOJIS[:len(display_results)]):
-                        if str(reaction.emoji) == emoji_str:
-                            choice_idx = i
-                            break
-                    
-                    if 0 <= choice_idx < len(display_results):
-                        selected_show_tmdb_search_data = display_results[choice_idx]
-                        try: await prompt_msg_obj.delete()
-                        except discord.HTTPException: pass
-                    else:
-                        await self.send_response(ctx, "Invalid reaction. TV info cancelled.", ephemeral=True)
-                        try: await prompt_msg_obj.delete()
-                        except discord.HTTPException: pass
-                        return
-                except asyncio.TimeoutError:
-                    await self.send_response(ctx, "Selection timed out. TV info cancelled.", ephemeral=True)
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
-                    return
-                except Exception as e:
-                    logger.error(f"Error during reaction-based show selection for TV info '{show_name}' by {ctx.author.id}: {e}")
-                    await self.send_response(ctx, "An error occurred during selection. TV info cancelled.", ephemeral=True)
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
+                if view.selected_result:
+                    selected_show_tmdb_search_data = view.selected_result
+                else:
+                    await self.send_response(ctx, "Selection timed out or cancelled.", ephemeral=True)
                     return
         
         if not selected_show_tmdb_search_data or 'id' not in selected_show_tmdb_search_data:

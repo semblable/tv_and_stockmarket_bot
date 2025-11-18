@@ -10,7 +10,7 @@ import asyncio
 import re
 import logging
 import typing
-from utils.paginator import BasePaginatorView
+from utils.paginator import BasePaginatorView, SelectionView
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,39 @@ def format_runtime(minutes):
     if hours > 0:
         return f"{hours}h {mins}m"
     return f"{mins}m"
+
+class SelectionView(discord.ui.View):
+    def __init__(self, ctx, results, timeout=60):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.results = results
+        self.selected_result = None
+        
+        for i, _ in enumerate(results):
+            if i >= 5: break
+            self.add_item(SelectionButton(i, NUMBER_EMOJIS[i]))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This isn't for you!", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        pass
+
+class SelectionButton(discord.ui.Button):
+    def __init__(self, index, emoji):
+        super().__init__(style=discord.ButtonStyle.secondary, label=str(index+1), emoji=emoji, custom_id=f"select_{index}")
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction):
+        view: SelectionView = self.view
+        view.selected_result = view.results[self.index]
+        await interaction.response.defer() 
+        view.stop()
 
 class MyMoviesPaginatorView(BasePaginatorView):
     def __init__(self, *, timeout=300, user_id: int, items: list, items_per_page: int = 10):
@@ -75,11 +108,12 @@ class MoviesCog(commands.Cog, name="Movies"):
         logger.info("MoviesCog: Initializing and starting check_movie_releases task.")
         self.check_movie_releases.start()
 
-    async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False):
+    async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False, view=None):
         kwargs = {}
         if content is not None: kwargs['content'] = content
         if embed is not None: kwargs['embed'] = embed
         if embeds is not None: kwargs['embeds'] = embeds
+        if view is not None: kwargs['view'] = view
         
         if ctx.interaction:
             kwargs['ephemeral'] = ephemeral
@@ -187,7 +221,7 @@ class MoviesCog(commands.Cog, name="Movies"):
             else:
                 display_results = search_results[:5]
                 embeds_list = []
-                message_content = "Multiple movies found. Please react with the number of the movie you want info for:"
+                message_content = "Multiple movies found. Please click the button for the movie you want info for:"
 
                 for i, movie_data_item in enumerate(display_results):
                     year_str = movie_data_item.get('release_date')
@@ -206,47 +240,15 @@ class MoviesCog(commands.Cog, name="Movies"):
                     
                     embeds_list.append(movie_embed)
 
-                prompt_msg_obj = await self.send_response(ctx,content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
-
-                for i in range(len(display_results)):
-                    if i < len(NUMBER_EMOJIS):
-                        await prompt_msg_obj.add_reaction(NUMBER_EMOJIS[i])
+                view = SelectionView(ctx, display_results)
+                await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=True, wait=True, view=view)
                 
-                def check(reaction, user):
-                    return user == ctx.author and \
-                           reaction.message.id == prompt_msg_obj.id and \
-                           str(reaction.emoji) in NUMBER_EMOJIS[:len(display_results)]
+                await view.wait()
 
-                try:
-                    reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
-                    
-                    choice_idx = -1
-                    for i, emoji_str in enumerate(NUMBER_EMOJIS[:len(display_results)]):
-                        if str(reaction.emoji) == emoji_str:
-                            choice_idx = i
-                            break
-                    
-                    if 0 <= choice_idx < len(display_results):
-                        selected_movie_tmdb_search_data = display_results[choice_idx]
-                        try:
-                            await prompt_msg_obj.delete()
-                        except discord.HTTPException:
-                            pass
-                    else:
-                        await self.send_response(ctx,"Invalid reaction. Movie info cancelled.", ephemeral=True)
-                        try: await prompt_msg_obj.delete()
-                        except discord.HTTPException: pass
-                        return
-                except asyncio.TimeoutError:
-                    await self.send_response(ctx,"Selection timed out. Movie info cancelled.", ephemeral=True)
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
-                    return
-                except Exception as e:
-                    logger.error(f"Error during reaction-based movie selection for '{movie_name}' by {ctx.author.id}: {e}")
-                    await self.send_response(ctx,"An error occurred during selection. Movie info cancelled.", ephemeral=True)
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
+                if view.selected_result:
+                    selected_movie_tmdb_search_data = view.selected_result
+                else:
+                    await self.send_response(ctx, "Selection timed out or cancelled.", ephemeral=True)
                     return
         
         if not selected_movie_tmdb_search_data or 'id' not in selected_movie_tmdb_search_data:
@@ -374,7 +376,7 @@ class MoviesCog(commands.Cog, name="Movies"):
             else:
                 display_results = search_results[:5]
                 embeds_list = []
-                message_content = "Multiple movies found. Please react with the number of the movie you want to subscribe to:"
+                message_content = "Multiple movies found. Please click the button for the movie you want to subscribe to:"
 
                 for i, movie_data_item in enumerate(display_results):
                     year_str = movie_data_item.get('release_date')
@@ -393,45 +395,15 @@ class MoviesCog(commands.Cog, name="Movies"):
                     
                     embeds_list.append(movie_embed)
 
-                prompt_msg_obj = await self.send_response(ctx,content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
-
-                for i in range(len(display_results)):
-                    if i < len(NUMBER_EMOJIS):
-                        await prompt_msg_obj.add_reaction(NUMBER_EMOJIS[i])
+                view = SelectionView(ctx, display_results)
+                await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=True, wait=True, view=view)
                 
-                def check(reaction, user):
-                    return user == ctx.author and \
-                           reaction.message.id == prompt_msg_obj.id and \
-                           str(reaction.emoji) in NUMBER_EMOJIS[:len(display_results)]
+                await view.wait()
 
-                try:
-                    reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
-                    
-                    choice_idx = -1
-                    for i, emoji_str in enumerate(NUMBER_EMOJIS[:len(display_results)]):
-                        if str(reaction.emoji) == emoji_str:
-                            choice_idx = i
-                            break
-                    
-                    if 0 <= choice_idx < len(display_results):
-                        selected_movie_data = display_results[choice_idx]
-                        try: await prompt_msg_obj.delete()
-                        except discord.HTTPException: pass
-                    else:
-                        await self.send_response(ctx,"Invalid reaction. Subscription cancelled.", ephemeral=True)
-                        try: await prompt_msg_obj.delete()
-                        except discord.HTTPException: pass
-                        return
-                except asyncio.TimeoutError:
-                    await self.send_response(ctx,"Selection timed out. Subscription cancelled.", ephemeral=True)
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
-                    return
-                except Exception as e:
-                    logger.error(f"Error during reaction-based movie subscription selection for '{movie_name}' by {ctx.author.id}: {e}")
-                    await self.send_response(ctx,"An error occurred during selection. Subscription cancelled.", ephemeral=True)
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
+                if view.selected_result:
+                    selected_movie_data = view.selected_result
+                else:
+                    await self.send_response(ctx, "Selection timed out or cancelled.", ephemeral=True)
                     return
         
         if not selected_movie_data or 'id' not in selected_movie_data or 'title' not in selected_movie_data or 'release_date' not in selected_movie_data:
@@ -494,69 +466,40 @@ class MoviesCog(commands.Cog, name="Movies"):
 
         if len(matching_subscriptions) == 1:
             movie_to_unsubscribe = matching_subscriptions[0]
-        else:
-            display_results = matching_subscriptions[:5]
+            else:
+                display_results = matching_subscriptions[:5]
 
-            embeds_list = []
-            message_content = "Multiple subscribed movies match. React with the number to unsubscribe:"
+                embeds_list = []
+                message_content = "Multiple subscribed movies match. Please click the button to unsubscribe:"
 
-            for i, sub_data_item in enumerate(display_results):
-                movie_embed = discord.Embed(
-                    description=f"{NUMBER_EMOJIS[i]} **{sub_data_item['title']}**",
-                    color=discord.Color.red()
-                )
+                for i, sub_data_item in enumerate(display_results):
+                    movie_embed = discord.Embed(
+                        description=f"{NUMBER_EMOJIS[i]} **{sub_data_item['title']}**",
+                        color=discord.Color.red()
+                    )
+                    
+                    poster_path = sub_data_item.get('poster_path')
+                    if poster_path:
+                        poster_url = tmdb_client.get_poster_url(poster_path, size="w154")
+                        if poster_url:
+                            movie_embed.set_thumbnail(url=poster_url)
+
+                    embeds_list.append(movie_embed)
                 
-                poster_path = sub_data_item.get('poster_path')
-                if poster_path:
-                    poster_url = tmdb_client.get_poster_url(poster_path, size="w154")
-                    if poster_url:
-                        movie_embed.set_thumbnail(url=poster_url)
+                if not embeds_list:
+                     await self.send_response(ctx,"Could not prepare selection list. Please try again.", ephemeral=True)
+                     return
 
-                embeds_list.append(movie_embed)
-            
-            if not embeds_list:
-                 await self.send_response(ctx,"Could not prepare selection list. Please try again.", ephemeral=True)
-                 return
-
-            prompt_msg_obj = await self.send_response(ctx,content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
-
-            for i in range(len(display_results)):
-                if i < len(NUMBER_EMOJIS):
-                    await prompt_msg_obj.add_reaction(NUMBER_EMOJIS[i])
-            
-            def check(reaction, user):
-                return user == ctx.author and \
-                       reaction.message.id == prompt_msg_obj.id and \
-                       str(reaction.emoji) in NUMBER_EMOJIS[:len(display_results)]
-
-            try:
-                reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
-                choice_idx = -1
-                for i, emoji_str in enumerate(NUMBER_EMOJIS[:len(display_results)]):
-                    if str(reaction.emoji) == emoji_str:
-                        choice_idx = i
-                        break
+                view = SelectionView(ctx, display_results)
+                await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=True, wait=True, view=view)
                 
-                if 0 <= choice_idx < len(display_results):
-                    movie_to_unsubscribe = display_results[choice_idx]
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
+                await view.wait()
+
+                if view.selected_result:
+                    movie_to_unsubscribe = view.selected_result
                 else:
-                    await self.send_response(ctx,"Invalid selection. Unsubscription cancelled.", ephemeral=True)
-                    try: await prompt_msg_obj.delete()
-                    except discord.HTTPException: pass
+                    await self.send_response(ctx, "Selection timed out or cancelled.", ephemeral=True)
                     return
-            except asyncio.TimeoutError:
-                await self.send_response(ctx,"Selection timed out. Unsubscription cancelled.", ephemeral=True)
-                try: await prompt_msg_obj.delete()
-                except discord.HTTPException: pass
-                return
-            except Exception as e:
-                logger.error(f"Error during reaction-based movie unsubscription selection for '{movie_name}' by {ctx.author.id}: {e}")
-                await self.send_response(ctx,"An error occurred during selection. Unsubscription cancelled.", ephemeral=True)
-                try: await prompt_msg_obj.delete()
-                except discord.HTTPException: pass
-                return
 
         if not movie_to_unsubscribe:
             await self.send_response(ctx,"Could not identify movie to unsubscribe from. Please try again.", ephemeral=True)

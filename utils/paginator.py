@@ -1,4 +1,3 @@
-# utils/paginator.py
 
 import discord
 import math
@@ -108,3 +107,32 @@ class BasePaginatorView(discord.ui.View):
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
 
+class SelectionView(discord.ui.View):
+    def __init__(self, user_id: int, num_options: int, timeout: int = 60):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.value = None
+        
+        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+        
+        for i in range(min(num_options, 5)):
+            button = discord.ui.Button(
+                style=discord.ButtonStyle.blurple, 
+                emoji=emojis[i],
+                custom_id=f"select_{i}"
+            )
+            button.callback = self.create_callback(i)
+            self.add_item(button)
+            
+    def create_callback(self, idx):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message("This isn't for you!", ephemeral=True)
+                return
+            self.value = idx
+            await interaction.response.defer()
+            self.stop()
+        return callback
+
+    async def on_timeout(self):
+        self.stop()

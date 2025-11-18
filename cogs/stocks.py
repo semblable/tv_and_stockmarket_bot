@@ -144,11 +144,12 @@ class Stocks(commands.Cog):
         self.current_queue_index = 0
         self.check_stock_alerts.start()
 
-    async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False):
+    async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False, view=None):
         kwargs = {}
         if content is not None: kwargs['content'] = content
         if embed is not None: kwargs['embed'] = embed
         if embeds is not None: kwargs['embeds'] = embeds
+        if view is not None: kwargs['view'] = view
         
         if ctx.interaction:
             kwargs['ephemeral'] = ephemeral
