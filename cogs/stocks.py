@@ -144,6 +144,19 @@ class Stocks(commands.Cog):
         self.current_queue_index = 0
         self.check_stock_alerts.start()
 
+    async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False):
+        kwargs = {}
+        if content is not None: kwargs['content'] = content
+        if embed is not None: kwargs['embed'] = embed
+        if embeds is not None: kwargs['embeds'] = embeds
+        
+        if ctx.interaction:
+            kwargs['ephemeral'] = ephemeral
+            kwargs['wait'] = wait
+            return await ctx.interaction.followup.send(**kwargs)
+        else:
+            return await ctx.send(**kwargs)
+
     def cog_unload(self) -> None:
         self.check_stock_alerts.cancel()
 
@@ -349,7 +362,7 @@ class Stocks(commands.Cog):
                            f"💡 **Tip**: For Polish stocks, try adding `.WA` suffix (e.g., `{upper_symbol}.WA`)",
                 color=discord.Color.red()
             )
-            await ctx.followup.send(embed=embed)
+            await self.send_response(ctx,embed=embed)
             return
 
         if price_data:
@@ -358,15 +371,15 @@ class Stocks(commands.Cog):
                 error_message = price_data.get("message", "An unspecified error occurred.")
                 logger.error(f"[STOCK_PRICE_DEBUG] Final data source ({data_source}) reported error for {upper_symbol}: Type: {error_type}, Msg: {error_message}")
                 if error_type == "api_limit":
-                    await ctx.followup.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
+                    await self.send_response(ctx,f"Could not retrieve price for {upper_symbol}: {error_message}")
                 elif error_type == "config_error":
                     print(f"Stock price configuration error for {upper_symbol}: {error_message}")
-                    await ctx.followup.send(f"Could not retrieve price for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.")
+                    await self.send_response(ctx,f"Could not retrieve price for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.")
                 elif error_type == "api_error":
-                    await ctx.followup.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
+                    await self.send_response(ctx,f"Could not retrieve price for {upper_symbol}: {error_message}")
                 else:
                     print(f"Stock price: Unknown error type '{error_type}' for {upper_symbol}: {error_message}")
-                    await ctx.followup.send(f"Error fetching data for {upper_symbol}. An unexpected error occurred with the data provider.")
+                    await self.send_response(ctx,f"Error fetching data for {upper_symbol}. An unexpected error occurred with the data provider.")
             elif "01. symbol" in price_data and "05. price" in price_data:
                 logger.info(f"[STOCK_PRICE_DEBUG] Successfully processed data for {upper_symbol} from {data_source}.")
                 stock_symbol_from_api = price_data['01. symbol']

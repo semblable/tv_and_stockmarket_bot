@@ -55,7 +55,7 @@ class BasePaginatorView(discord.ui.View):
             # Use followup if already deferred, otherwise response.send_message
             # Assuming defer was called, use followup.
             try:
-                self.message = await ctx.followup.send(embed=initial_embed, view=self, ephemeral=ephemeral)
+                self.message = await ctx.interaction.followup.send(embed=initial_embed, view=self, ephemeral=ephemeral)
             except (discord.InteractionResponded, AttributeError): # Fallback if not deferred or context is different
                  self.message = await ctx.send(embed=initial_embed, view=self)
         else:

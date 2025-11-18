@@ -1,7 +1,7 @@
 # Use an official Python runtime as a parent image
-FROM python:3.10-slim
+FROM python:3.12-slim
 
-# Install curl for debugging network issues and for yfinance dependency (curl_cffi)
+# Install curl for debugging network issues
 # Also install ca-certificates for HTTPS connections and dnsutils for DNS debugging
 RUN apt-get update && apt-get install -y \
     curl \
@@ -25,6 +25,7 @@ COPY .env .
 # Copy the rest of the application code into the container at /app
 COPY bot.py .
 COPY config.py .
+COPY logger.py .
 COPY data_manager.py .
 COPY cogs/ ./cogs/
 COPY api_clients/ ./api_clients/

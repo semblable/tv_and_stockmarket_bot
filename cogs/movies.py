@@ -75,6 +75,19 @@ class MoviesCog(commands.Cog, name="Movies"):
         logger.info("MoviesCog: Initializing and starting check_movie_releases task.")
         self.check_movie_releases.start()
 
+    async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False):
+        kwargs = {}
+        if content is not None: kwargs['content'] = content
+        if embed is not None: kwargs['embed'] = embed
+        if embeds is not None: kwargs['embeds'] = embeds
+        
+        if ctx.interaction:
+            kwargs['ephemeral'] = ephemeral
+            kwargs['wait'] = wait
+            return await ctx.interaction.followup.send(**kwargs)
+        else:
+            return await ctx.send(**kwargs)
+
     def cog_unload(self):
         logger.info("MoviesCog: Unloading and cancelling check_movie_releases task.")
         self.check_movie_releases.cancel()
@@ -148,18 +161,18 @@ class MoviesCog(commands.Cog, name="Movies"):
         try:
             search_results = await self.bot.loop.run_in_executor(None, tmdb_client.search_movie, movie_name)
         except TMDBConnectionError:
-            await ctx.followup.send("Could not connect to TMDB service. Please try again later.", ephemeral=True)
+            await self.send_response(ctx,"Could not connect to TMDB service. Please try again later.", ephemeral=True)
             return
         except TMDBAPIError:
-            await ctx.followup.send("TMDB service is currently experiencing issues. Please try again later.", ephemeral=True)
+            await self.send_response(ctx,"TMDB service is currently experiencing issues. Please try again later.", ephemeral=True)
             return
         except Exception as e:
             logger.error(f"Error searching for movie '{movie_name}' in movie_info: {e}")
-            await ctx.followup.send(f"Sorry, there was an unexpected error searching for '{movie_name}'.", ephemeral=True)
+            await self.send_response(ctx,f"Sorry, there was an unexpected error searching for '{movie_name}'.", ephemeral=True)
             return
 
         if not search_results:
-            await ctx.followup.send(f"No movies found for '{movie_name}'.", ephemeral=True)
+            await self.send_response(ctx,f"No movies found for '{movie_name}'.", ephemeral=True)
             return
 
         selected_movie_tmdb_search_data = None
@@ -193,7 +206,7 @@ class MoviesCog(commands.Cog, name="Movies"):
                     
                     embeds_list.append(movie_embed)
 
-                prompt_msg_obj = await ctx.followup.send(content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
+                prompt_msg_obj = await self.send_response(ctx,content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
 
                 for i in range(len(display_results)):
                     if i < len(NUMBER_EMOJIS):
@@ -220,24 +233,24 @@ class MoviesCog(commands.Cog, name="Movies"):
                         except discord.HTTPException:
                             pass
                     else:
-                        await ctx.followup.send("Invalid reaction. Movie info cancelled.", ephemeral=True)
+                        await self.send_response(ctx,"Invalid reaction. Movie info cancelled.", ephemeral=True)
                         try: await prompt_msg_obj.delete()
                         except discord.HTTPException: pass
                         return
                 except asyncio.TimeoutError:
-                    await ctx.followup.send("Selection timed out. Movie info cancelled.", ephemeral=True)
+                    await self.send_response(ctx,"Selection timed out. Movie info cancelled.", ephemeral=True)
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                     return
                 except Exception as e:
                     logger.error(f"Error during reaction-based movie selection for '{movie_name}' by {ctx.author.id}: {e}")
-                    await ctx.followup.send("An error occurred during selection. Movie info cancelled.", ephemeral=True)
+                    await self.send_response(ctx,"An error occurred during selection. Movie info cancelled.", ephemeral=True)
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                     return
         
         if not selected_movie_tmdb_search_data or 'id' not in selected_movie_tmdb_search_data:
-            await ctx.followup.send("Could not determine the movie to fetch details for. Please try again.", ephemeral=True)
+            await self.send_response(ctx,"Could not determine the movie to fetch details for. Please try again.", ephemeral=True)
             return
 
         movie_id = selected_movie_tmdb_search_data['id']
@@ -245,18 +258,18 @@ class MoviesCog(commands.Cog, name="Movies"):
         try:
             movie_details = await self.bot.loop.run_in_executor(None, tmdb_client.get_movie_details, movie_id, 'credits,keywords')
         except TMDBConnectionError:
-            await ctx.followup.send("Could not connect to TMDB to fetch details. Please try again later.", ephemeral=True)
+            await self.send_response(ctx,"Could not connect to TMDB to fetch details. Please try again later.", ephemeral=True)
             return
         except TMDBAPIError:
-            await ctx.followup.send("TMDB service error while fetching details. Please try again later.", ephemeral=True)
+            await self.send_response(ctx,"TMDB service error while fetching details. Please try again later.", ephemeral=True)
             return
         except Exception as e:
             logger.error(f"Error fetching details for movie ID {movie_id} in movie_info: {e}")
-            await ctx.followup.send(f"Sorry, there was an error fetching details for '{selected_movie_tmdb_search_data.get('title', 'the selected movie')}'.", ephemeral=True)
+            await self.send_response(ctx,f"Sorry, there was an error fetching details for '{selected_movie_tmdb_search_data.get('title', 'the selected movie')}'.", ephemeral=True)
             return
 
         if not movie_details:
-            await ctx.followup.send(f"Could not retrieve details for '{selected_movie_tmdb_search_data.get('title', 'the selected movie')}' (ID: {movie_id}).", ephemeral=True)
+            await self.send_response(ctx,f"Could not retrieve details for '{selected_movie_tmdb_search_data.get('title', 'the selected movie')}' (ID: {movie_id}).", ephemeral=True)
             return
 
         embed_title = movie_details.get('title', 'N/A')
@@ -318,10 +331,10 @@ class MoviesCog(commands.Cog, name="Movies"):
         embed.set_footer(text=f"Movie ID: {movie_id} | Data from TMDB")
 
         try:
-            await ctx.followup.send(embed=embed, ephemeral=True)
+            await self.send_response(ctx,embed=embed, ephemeral=True)
         except discord.HTTPException as e:
             logger.error(f"Error sending movie_info embed for {movie_id}: {e}")
-            await ctx.followup.send("There was an issue displaying the movie information. The embed might be too large.", ephemeral=True)
+            await self.send_response(ctx,"There was an issue displaying the movie information. The embed might be too large.", ephemeral=True)
 
     @commands.hybrid_command(name="movie_subscribe", description="Subscribe to movie release notifications.")
     @discord.app_commands.describe(movie_name="The name of the movie to subscribe to")
@@ -336,18 +349,18 @@ class MoviesCog(commands.Cog, name="Movies"):
         try:
             search_results = await self.bot.loop.run_in_executor(None, tmdb_client.search_movie, movie_name)
         except TMDBConnectionError:
-            await ctx.followup.send("Could not connect to TMDB. Please check your internet connection.", ephemeral=True)
+            await self.send_response(ctx,"Could not connect to TMDB. Please check your internet connection.", ephemeral=True)
             return
         except TMDBAPIError:
-            await ctx.followup.send("TMDB service error. Please try again later.", ephemeral=True)
+            await self.send_response(ctx,"TMDB service error. Please try again later.", ephemeral=True)
             return
         except Exception as e:
             logger.error(f"Error searching for movie '{movie_name}' in movie_subscribe: {e}")
-            await ctx.followup.send(f"Sorry, there was an error searching for '{movie_name}'. Please try again later.", ephemeral=True)
+            await self.send_response(ctx,f"Sorry, there was an error searching for '{movie_name}'. Please try again later.", ephemeral=True)
             return
 
         if not search_results:
-            await ctx.followup.send(f"No movies found for '{movie_name}'.", ephemeral=True)
+            await self.send_response(ctx,f"No movies found for '{movie_name}'.", ephemeral=True)
             return
 
         selected_movie_data = None
@@ -380,7 +393,7 @@ class MoviesCog(commands.Cog, name="Movies"):
                     
                     embeds_list.append(movie_embed)
 
-                prompt_msg_obj = await ctx.followup.send(content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
+                prompt_msg_obj = await self.send_response(ctx,content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
 
                 for i in range(len(display_results)):
                     if i < len(NUMBER_EMOJIS):
@@ -405,24 +418,24 @@ class MoviesCog(commands.Cog, name="Movies"):
                         try: await prompt_msg_obj.delete()
                         except discord.HTTPException: pass
                     else:
-                        await ctx.followup.send("Invalid reaction. Subscription cancelled.", ephemeral=True)
+                        await self.send_response(ctx,"Invalid reaction. Subscription cancelled.", ephemeral=True)
                         try: await prompt_msg_obj.delete()
                         except discord.HTTPException: pass
                         return
                 except asyncio.TimeoutError:
-                    await ctx.followup.send("Selection timed out. Subscription cancelled.", ephemeral=True)
+                    await self.send_response(ctx,"Selection timed out. Subscription cancelled.", ephemeral=True)
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                     return
                 except Exception as e:
                     logger.error(f"Error during reaction-based movie subscription selection for '{movie_name}' by {ctx.author.id}: {e}")
-                    await ctx.followup.send("An error occurred during selection. Subscription cancelled.", ephemeral=True)
+                    await self.send_response(ctx,"An error occurred during selection. Subscription cancelled.", ephemeral=True)
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                     return
         
         if not selected_movie_data or 'id' not in selected_movie_data or 'title' not in selected_movie_data or 'release_date' not in selected_movie_data:
-            await ctx.followup.send("Could not get necessary movie details (ID, title, release date) for subscription. Please try again.", ephemeral=True)
+            await self.send_response(ctx,"Could not get necessary movie details (ID, title, release date) for subscription. Please try again.", ephemeral=True)
             return
 
         movie_id = selected_movie_data['id']
@@ -430,7 +443,7 @@ class MoviesCog(commands.Cog, name="Movies"):
         release_date = selected_movie_data['release_date']
 
         if not release_date:
-            await ctx.followup.send(f"Cannot subscribe to '{actual_movie_title}' as its release date is not available.", ephemeral=True)
+            await self.send_response(ctx,f"Cannot subscribe to '{actual_movie_title}' as its release date is not available.", ephemeral=True)
             return
 
         poster_path = selected_movie_data.get('poster_path')
@@ -441,12 +454,12 @@ class MoviesCog(commands.Cog, name="Movies"):
         try:
             success = await self.bot.loop.run_in_executor(None, self.db_manager.add_movie_subscription, ctx.author.id, movie_id, actual_movie_title, poster_path)
             if success:
-                await ctx.followup.send(f"Successfully subscribed to **{actual_movie_title}** (Release: {release_date})!", ephemeral=True)
+                await self.send_response(ctx,f"Successfully subscribed to **{actual_movie_title}** (Release: {release_date})!", ephemeral=True)
             else:
-                await ctx.followup.send(f"Could not subscribe to **{actual_movie_title}** due to a database error. Please try again later.", ephemeral=True)
+                await self.send_response(ctx,f"Could not subscribe to **{actual_movie_title}** due to a database error. Please try again later.", ephemeral=True)
         except Exception as e:
             logger.error(f"Error adding movie subscription for user {ctx.author.id} to movie {movie_id} ('{actual_movie_title}'): {e}")
-            await ctx.followup.send(f"Sorry, there was an error subscribing to '{actual_movie_title}'. Please try again later.", ephemeral=True)
+            await self.send_response(ctx,f"Sorry, there was an error subscribing to '{actual_movie_title}'. Please try again later.", ephemeral=True)
 
     @commands.hybrid_command(name="movie_unsubscribe", description="Unsubscribe from movie release notifications.")
     @discord.app_commands.describe(movie_name="The name of the movie to unsubscribe from")
@@ -462,11 +475,11 @@ class MoviesCog(commands.Cog, name="Movies"):
             subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_movie_subscriptions, user_id)
         except Exception as e:
             logger.error(f"Error getting movie subscriptions for user {user_id}: {e}")
-            await ctx.followup.send("Sorry, there was an error fetching your movie subscriptions.", ephemeral=True)
+            await self.send_response(ctx,"Sorry, there was an error fetching your movie subscriptions.", ephemeral=True)
             return
 
         if not subscriptions:
-            await ctx.followup.send("You are not subscribed to any movies.", ephemeral=True)
+            await self.send_response(ctx,"You are not subscribed to any movies.", ephemeral=True)
             return
 
         movie_to_unsubscribe = None
@@ -476,7 +489,7 @@ class MoviesCog(commands.Cog, name="Movies"):
         ]
 
         if not matching_subscriptions:
-            await ctx.followup.send(f"No movie matching '{movie_name}' found in your subscriptions. Use `/my_movies` to see them.", ephemeral=True)
+            await self.send_response(ctx,f"No movie matching '{movie_name}' found in your subscriptions. Use `/my_movies` to see them.", ephemeral=True)
             return
 
         if len(matching_subscriptions) == 1:
@@ -502,10 +515,10 @@ class MoviesCog(commands.Cog, name="Movies"):
                 embeds_list.append(movie_embed)
             
             if not embeds_list:
-                 await ctx.followup.send("Could not prepare selection list. Please try again.", ephemeral=True)
+                 await self.send_response(ctx,"Could not prepare selection list. Please try again.", ephemeral=True)
                  return
 
-            prompt_msg_obj = await ctx.followup.send(content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
+            prompt_msg_obj = await self.send_response(ctx,content=message_content, embeds=embeds_list, ephemeral=False, wait=True)
 
             for i in range(len(display_results)):
                 if i < len(NUMBER_EMOJIS):
@@ -529,24 +542,24 @@ class MoviesCog(commands.Cog, name="Movies"):
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                 else:
-                    await ctx.followup.send("Invalid selection. Unsubscription cancelled.", ephemeral=True)
+                    await self.send_response(ctx,"Invalid selection. Unsubscription cancelled.", ephemeral=True)
                     try: await prompt_msg_obj.delete()
                     except discord.HTTPException: pass
                     return
             except asyncio.TimeoutError:
-                await ctx.followup.send("Selection timed out. Unsubscription cancelled.", ephemeral=True)
+                await self.send_response(ctx,"Selection timed out. Unsubscription cancelled.", ephemeral=True)
                 try: await prompt_msg_obj.delete()
                 except discord.HTTPException: pass
                 return
             except Exception as e:
                 logger.error(f"Error during reaction-based movie unsubscription selection for '{movie_name}' by {ctx.author.id}: {e}")
-                await ctx.followup.send("An error occurred during selection. Unsubscription cancelled.", ephemeral=True)
+                await self.send_response(ctx,"An error occurred during selection. Unsubscription cancelled.", ephemeral=True)
                 try: await prompt_msg_obj.delete()
                 except discord.HTTPException: pass
                 return
 
         if not movie_to_unsubscribe:
-            await ctx.followup.send("Could not identify movie to unsubscribe from. Please try again.", ephemeral=True)
+            await self.send_response(ctx,"Could not identify movie to unsubscribe from. Please try again.", ephemeral=True)
             return
 
         title_of_movie_unsubscribed = movie_to_unsubscribe['title']
@@ -555,12 +568,12 @@ class MoviesCog(commands.Cog, name="Movies"):
         try:
             success = await self.bot.loop.run_in_executor(None, self.db_manager.remove_movie_subscription, user_id, movie_tmdb_id_to_remove)
             if success:
-                await ctx.followup.send(f"Successfully unsubscribed from **{title_of_movie_unsubscribed}**.", ephemeral=True)
+                await self.send_response(ctx,f"Successfully unsubscribed from **{title_of_movie_unsubscribed}**.", ephemeral=True)
             else:
-                await ctx.followup.send(f"Could not unsubscribe from **{title_of_movie_unsubscribed}** due to a database error. Please try again later.", ephemeral=True)
+                await self.send_response(ctx,f"Could not unsubscribe from **{title_of_movie_unsubscribed}** due to a database error. Please try again later.", ephemeral=True)
         except Exception as e:
             logger.error(f"Error removing movie subscription for user {user_id} from movie {movie_tmdb_id_to_remove} ('{title_of_movie_unsubscribed}'): {e}")
-            await ctx.followup.send(f"Sorry, there was an error unsubscribing from '{title_of_movie_unsubscribed}'.", ephemeral=True)
+            await self.send_response(ctx,f"Sorry, there was an error unsubscribing from '{title_of_movie_unsubscribed}'.", ephemeral=True)
 
     @commands.hybrid_command(name="my_movies", description="Lists your subscribed movies.")
     async def my_movies(self, ctx: commands.Context):
@@ -574,11 +587,11 @@ class MoviesCog(commands.Cog, name="Movies"):
             subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_movie_subscriptions, user_id)
         except Exception as e:
             logger.error(f"Error getting movie subscriptions for user {user_id} in my_movies: {e}")
-            await ctx.followup.send("Sorry, there was an error fetching your movie subscriptions.", ephemeral=True)
+            await self.send_response(ctx,"Sorry, there was an error fetching your movie subscriptions.", ephemeral=True)
             return
 
         if not subscriptions:
-            await ctx.followup.send("You are not subscribed to any movies. Use `/movie_subscribe` to add some!", ephemeral=True)
+            await self.send_response(ctx,"You are not subscribed to any movies. Use `/movie_subscribe` to add some!", ephemeral=True)
             return
 
         view = MyMoviesPaginatorView(user_id=user_id, items=subscriptions)

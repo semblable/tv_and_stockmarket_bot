@@ -140,6 +140,16 @@ class DataManager:
                         logger.error("Failed to drop 'tv_subscriptions' table. Manual intervention might be required.")
                 else:
                     logger.info(f"'tv_subscriptions' schema contains '{required_column}'. No schema modification needed for this check.")
+
+                # Check for show_tvmaze_id column (Added for TVMaze migration)
+                if "show_tvmaze_id" not in column_names:
+                    logger.info("Column 'show_tvmaze_id' not found in 'tv_subscriptions'. Adding it.")
+                    alter_query = "ALTER TABLE tv_subscriptions ADD COLUMN show_tvmaze_id INTEGER;"
+                    try:
+                        self._execute_query(alter_query, commit=True)
+                        logger.info("Column 'show_tvmaze_id' added successfully.")
+                    except sqlite3.Error as e:
+                        logger.error(f"Failed to add column 'show_tvmaze_id': {e}")
         else:
             logger.info("Table 'tv_subscriptions' does not exist. It will be created by 'CREATE TABLE IF NOT EXISTS'.")
         # --- End of tv_subscriptions schema check ---
@@ -153,6 +163,7 @@ class DataManager:
             show_name TEXT,
             poster_path TEXT,
             last_notified_episode_details TEXT,
+            show_tvmaze_id INTEGER,
             PRIMARY KEY (user_id, show_tmdb_id)
         )
         """
@@ -229,15 +240,30 @@ class DataManager:
         logger.info("Database initialization check complete.")
 
     # --- TV Show Subscriptions ---
-    def add_tv_show_subscription(self, user_id: int, show_tmdb_id: int, show_name: str, poster_path: str) -> bool:
+    def add_tv_show_subscription(self, user_id: int, show_tmdb_id: int, show_name: str, poster_path: str, show_tvmaze_id: Optional[int] = None) -> bool:
         user_id_str = str(user_id)
         query = """
-        INSERT OR IGNORE INTO tv_subscriptions (user_id, show_tmdb_id, show_name, poster_path, last_notified_episode_details)
-        VALUES (:user_id, :show_tmdb_id, :show_name, :poster_path, NULL)
+        INSERT OR IGNORE INTO tv_subscriptions (user_id, show_tmdb_id, show_name, poster_path, last_notified_episode_details, show_tvmaze_id)
+        VALUES (:user_id, :show_tmdb_id, :show_name, :poster_path, NULL, :show_tvmaze_id)
         """
         params = {
             "user_id": user_id_str, "show_tmdb_id": show_tmdb_id,
-            "show_name": show_name, "poster_path": poster_path
+            "show_name": show_name, "poster_path": poster_path,
+            "show_tvmaze_id": show_tvmaze_id
+        }
+        return self._execute_query(query, params, commit=True)
+
+    def update_tv_subscription_tvmaze_id(self, user_id: int, show_tmdb_id: int, show_tvmaze_id: int) -> bool:
+        user_id_str = str(user_id)
+        query = """
+        UPDATE tv_subscriptions
+        SET show_tvmaze_id = :show_tvmaze_id
+        WHERE user_id = :user_id AND show_tmdb_id = :show_tmdb_id
+        """
+        params = {
+            "user_id": user_id_str,
+            "show_tmdb_id": show_tmdb_id,
+            "show_tvmaze_id": show_tvmaze_id
         }
         return self._execute_query(query, params, commit=True)
 
@@ -255,7 +281,7 @@ class DataManager:
 
     def get_user_tv_subscriptions(self, user_id: int) -> List[Dict[str, Any]]:
         user_id_str = str(user_id)
-        query = "SELECT user_id, show_tmdb_id, show_name, poster_path, last_notified_episode_details FROM tv_subscriptions WHERE user_id = :user_id"
+        query = "SELECT user_id, show_tmdb_id, show_name, poster_path, last_notified_episode_details, show_tvmaze_id FROM tv_subscriptions WHERE user_id = :user_id"
         params = {"user_id": user_id_str}
         subscriptions = self._execute_query(query, params, fetch_all=True)
         for sub in subscriptions:
@@ -270,7 +296,7 @@ class DataManager:
         return subscriptions
 
     def get_all_tv_subscriptions(self) -> Dict[str, List[Dict[str, Any]]]:
-        query = "SELECT user_id, show_tmdb_id, show_name, poster_path, last_notified_episode_details FROM tv_subscriptions"
+        query = "SELECT user_id, show_tmdb_id, show_name, poster_path, last_notified_episode_details, show_tvmaze_id FROM tv_subscriptions"
         subscriptions = self._execute_query(query, fetch_all=True)
         for sub in subscriptions:
             if sub.get('last_notified_episode_details'):

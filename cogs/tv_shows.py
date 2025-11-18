@@ -2,8 +2,9 @@
 
 import discord
 from discord.ext import commands, tasks
-from api_clients import tmdb_client
+from api_clients import tmdb_client, tvmaze_client
 from api_clients.tmdb_client import TMDBError, TMDBConnectionError, TMDBAPIError
+from api_clients.tvmaze_client import TVMazeError, TVMazeConnectionError, TVMazeAPIError
 from data_manager import DataManager
 from datetime import datetime, date, timedelta, time
 import requests
@@ -129,13 +130,13 @@ class TVShows(commands.Cog):
         """Helper method to send responses that work with both slash commands and prefix commands"""
         if ctx.interaction:
             if embeds:
-                return await ctx.followup.send(content=content, embeds=embeds, ephemeral=ephemeral, wait=wait)
+                return await ctx.interaction.followup.send(content=content, embeds=embeds, ephemeral=ephemeral, wait=wait)
             elif content and embed:
-                return await ctx.followup.send(content=content, embed=embed, ephemeral=ephemeral, wait=wait)
+                return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, wait=wait)
             elif embed:
-                return await ctx.followup.send(embed=embed, ephemeral=ephemeral, wait=wait)
+                return await ctx.interaction.followup.send(embed=embed, ephemeral=ephemeral, wait=wait)
             else:
-                return await ctx.followup.send(content, ephemeral=ephemeral, wait=wait)
+                return await ctx.interaction.followup.send(content, ephemeral=ephemeral, wait=wait)
         else:
             if embeds:
                 return await ctx.send(content=content, embeds=embeds)
@@ -309,8 +310,33 @@ class TVShows(commands.Cog):
         actual_show_name = selected_show['name']
         poster_path = selected_show.get('poster_path', "")
 
+        # Resolve TVMaze ID
+        tvmaze_id = None
         try:
-            success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tv_show_subscription, ctx.author.id, show_id, actual_show_name, poster_path)
+            # Fetch external IDs from TMDB
+            details = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id, "external_ids")
+            if details and 'external_ids' in details:
+                ext_ids = details['external_ids']
+                imdb_id = ext_ids.get('imdb_id')
+                thetvdb_id = ext_ids.get('tvdb_id')
+                
+                tvmaze_show = None
+                if imdb_id:
+                    tvmaze_show = await self.bot.loop.run_in_executor(None, tvmaze_client.lookup_show_by_imdb, imdb_id)
+                
+                if not tvmaze_show and thetvdb_id:
+                    tvmaze_show = await self.bot.loop.run_in_executor(None, tvmaze_client.lookup_show_by_thetvdb, thetvdb_id)
+                
+                if tvmaze_show:
+                    tvmaze_id = tvmaze_show.get('id')
+                    logger.info(f"Resolved TVMaze ID {tvmaze_id} for show '{actual_show_name}' (TMDB ID: {show_id})")
+                else:
+                    logger.warning(f"Could not resolve TVMaze ID for show '{actual_show_name}' (TMDB ID: {show_id})")
+        except Exception as e:
+             logger.error(f"Error resolving TVMaze ID during subscription for {actual_show_name}: {e}")
+
+        try:
+            success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tv_show_subscription, ctx.author.id, show_id, actual_show_name, poster_path, tvmaze_id)
             if success:
                 await self.send_response(ctx, f"Successfully subscribed to {actual_show_name}!", ephemeral=True)
             else:
@@ -442,7 +468,7 @@ class TVShows(commands.Cog):
         except Exception as e:
             logger.error(f"Error getting subscriptions for user {user_id} in my_tv_shows: {e}")
             if ctx.interaction:
-                await ctx.followup.send("Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
+                await ctx.interaction.followup.send("Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
             else:
                 await ctx.send("Sorry, there was an error fetching your subscriptions. Please try again later.")
             return
@@ -450,7 +476,7 @@ class TVShows(commands.Cog):
         if not subscriptions:
             no_subs_message = "You are not subscribed to any TV shows. Use `/tv_subscribe` to add some!"
             if ctx.interaction:
-                await ctx.followup.send(no_subs_message, ephemeral=True)
+                await ctx.interaction.followup.send(no_subs_message, ephemeral=True)
             else:
                 await ctx.send(no_subs_message)
             return
@@ -463,7 +489,7 @@ class TVShows(commands.Cog):
             fallback_msg = "Sorry, an unexpected error occurred while displaying your shows."
             if ctx.interaction:
                 try:
-                    await ctx.followup.send(fallback_msg, ephemeral=True)
+                    await ctx.interaction.followup.send(fallback_msg, ephemeral=True)
                 except discord.InteractionResponded:
                     await ctx.edit_original_response(content=fallback_msg, view=None, embed=None)
             else:
@@ -695,8 +721,50 @@ class TVShows(commands.Cog):
         for sub_idx, sub in enumerate(subscriptions):
             show_id = sub['show_tmdb_id']
             show_name_stored = sub['show_name']
-            logger.debug(f"tv_schedule: Processing subscription user {user_id}, show_id: {show_id}, name: {show_name_stored}")
+            tvmaze_id = sub.get('show_tvmaze_id')
+            logger.debug(f"tv_schedule: Processing subscription user {user_id}, show_id: {show_id}, tvmaze_id: {tvmaze_id}, name: {show_name_stored}")
 
+            episode_found = False
+
+            # 1. Try TVMaze
+            if tvmaze_id:
+                try:
+                    tvmaze_details = await self.bot.loop.run_in_executor(None, tvmaze_client.get_show_details, tvmaze_id, "nextepisode")
+                    if tvmaze_details:
+                        embedded = tvmaze_details.get('_embedded', {})
+                        next_ep = embedded.get('nextepisode')
+                        
+                        if next_ep:
+                             air_date_str = next_ep.get('airdate')
+                             if air_date_str:
+                                 try:
+                                    ep_air_date = datetime.strptime(air_date_str, '%Y-%m-%d').date()
+                                    if today <= ep_air_date < seven_days_later:
+                                        ep_name = next_ep.get('name', 'TBA')
+                                        ep_season = next_ep.get('season', 0)
+                                        ep_num = next_ep.get('number', 0)
+                                        current_show_name = tvmaze_details.get('name', show_name_stored)
+
+                                        episode_info = {
+                                            'show_name': current_show_name,
+                                            'season_number': ep_season,
+                                            'episode_number': ep_num,
+                                            'episode_name': ep_name,
+                                            'air_date_obj': ep_air_date
+                                        }
+                                        
+                                        if ep_air_date not in upcoming_episodes_by_date:
+                                            upcoming_episodes_by_date[ep_air_date] = []
+                                        upcoming_episodes_by_date[ep_air_date].append(episode_info)
+                                        episode_found = True
+                                 except ValueError: pass
+                except Exception as e:
+                    logger.error(f"TVMaze schedule fetch failed for {show_id}: {e}")
+
+            if episode_found:
+                continue
+
+            # 2. Fallback to TMDB
             try:
                 show_details_tmdb = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id)
                 logger.debug(f"tv_schedule: TMDB details for show_id {show_id} (user {user_id}): {show_details_tmdb}")
@@ -752,7 +820,7 @@ class TVShows(commands.Cog):
             title="🗓️ Your TV Schedule - Next 7 Days",
             color=discord.Color.teal()
         )
-        embed.set_footer(text="All times are based on original air dates from TMDB.")
+        embed.set_footer(text="All times are based on original air dates from TMDB/TVMaze.")
 
         sorted_dates = sorted(upcoming_episodes_by_date.keys())
 
@@ -898,113 +966,211 @@ class TVShows(commands.Cog):
 
                 show_id = sub['show_tmdb_id']
                 show_name_stored = sub['show_name']
-                last_notified_ep_details = sub.get('last_notified_episode_details')
+                tvmaze_id = sub.get('show_tvmaze_id')
+                poster_path = sub.get('poster_path')
 
-                try:
-                    show_details_tmdb = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id)
+                # 1. Attempt to resolve TVMaze ID if missing
+                if not tvmaze_id:
+                    try:
+                         tmdb_details = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id, "external_ids")
+                         if tmdb_details and 'external_ids' in tmdb_details:
+                             ext_ids = tmdb_details['external_ids']
+                             imdb_id = ext_ids.get('imdb_id')
+                             tvdb_id = ext_ids.get('tvdb_id')
+                             
+                             tvmaze_show = None
+                             if imdb_id:
+                                 tvmaze_show = await self.bot.loop.run_in_executor(None, tvmaze_client.lookup_show_by_imdb, imdb_id)
+                             if not tvmaze_show and tvdb_id:
+                                 tvmaze_show = await self.bot.loop.run_in_executor(None, tvmaze_client.lookup_show_by_thetvdb, tvdb_id)
+                             
+                             if tvmaze_show:
+                                 tvmaze_id = tvmaze_show.get('id')
+                                 # Update DB
+                                 await self.bot.loop.run_in_executor(None, self.db_manager.update_tv_subscription_tvmaze_id, user_id, show_id, tvmaze_id)
+                                 logger.info(f"Resolved TVMaze ID {tvmaze_id} for subscription user {user_id}, show {show_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to resolve TVMaze ID for show {show_id} during check: {e}")
 
-                    if not show_details_tmdb:
-                        print(f"Could not fetch details for show ID {show_id} ({show_name_stored}). Skipping.")
-                        continue
-                    
-                    actual_show_name_tmdb = show_details_tmdb.get('name', show_name_stored)
+                episodes_to_notify = []
+                used_source = "TMDB"
+                actual_show_name_display = show_name_stored
+                tmdb_show_details = None # Cache for poster if needed
 
-                    episodes_to_notify = []
-
-                    next_ep = show_details_tmdb.get('next_episode_to_air')
-                    if next_ep and next_ep.get('air_date') and next_ep.get('id'):
-                        try:
-                            next_air_date_obj = datetime.strptime(next_ep['air_date'], '%Y-%m-%d').date()
-                            if next_air_date_obj <= today:
-                                already_notified = await self.bot.loop.run_in_executor(
-                                    None, 
-                                    self.db_manager.has_user_been_notified_for_episode, 
-                                    user_id, 
-                                    show_id, 
-                                    next_ep.get('id')
-                                )
-                                if not already_notified:
-                                    episodes_to_notify.append(next_ep)
-                        except ValueError:
-                            print(f"Invalid air_date format for next_episode_to_air for show {show_id}: {next_ep.get('air_date')}")
-                    
-                    last_aired_ep = show_details_tmdb.get('last_episode_to_air')
-                    if last_aired_ep and last_aired_ep.get('air_date') and last_aired_ep.get('id'):
-                        try:
-                            last_aired_date_obj = datetime.strptime(last_aired_ep['air_date'], '%Y-%m-%d').date()
-                            if (today - timedelta(days=7)) <= last_aired_date_obj <= today:
-                                already_notified = await self.bot.loop.run_in_executor(
-                                    None, 
-                                    self.db_manager.has_user_been_notified_for_episode, 
-                                    user_id, 
-                                    show_id, 
-                                    last_aired_ep.get('id')
-                                )
-                                if not already_notified:
-                                    if not any(ep.get('id') == last_aired_ep.get('id') for ep in episodes_to_notify):
-                                        episodes_to_notify.append(last_aired_ep)
-                        except ValueError:
-                            print(f"Invalid air_date format for last_episode_to_air for show {show_id}: {last_aired_ep.get('air_date')}")
-
-                    for episode_to_notify in episodes_to_notify:
-                        ep_id = episode_to_notify.get('id')
-                        ep_name = episode_to_notify.get('name', 'Episode Name TBA')
-                        ep_season = episode_to_notify.get('season_number', 'S?')
-                        ep_num = episode_to_notify.get('episode_number', 'E?')
-                        ep_air_date_str = episode_to_notify.get('air_date', 'Unknown Air Date')
-                        
-                        try:
-                            date_obj = datetime.strptime(ep_air_date_str, '%Y-%m-%d').date()
-                            ep_air_date_str = date_obj.strftime('%Y-%m-%d')
-                        except ValueError:
-                            pass
-
-                        embed = discord.Embed(
-                            title=f"📺 New Episode Alert: {actual_show_name_tmdb}",
-                            description=f"**S{ep_season:02d}E{ep_num:02d} - \"{ep_name}\"** has aired!",
-                            color=discord.Color.green()
-                        )
-                        embed.add_field(name="Air Date", value=ep_air_date_str, inline=True)
-                        
-                        if episode_to_notify.get('vote_average') and episode_to_notify.get('vote_average') > 0:
-                            embed.add_field(name="Episode Rating", value=f"{episode_to_notify['vote_average']:.1f}/10", inline=True)
-                        
-                        if show_details_tmdb.get('poster_path'):
-                            poster_url = tmdb_client.get_poster_url(show_details_tmdb['poster_path'], size="w185")
-                            if poster_url:
-                                embed.set_thumbnail(url=poster_url)
-
-                        try:
-                            await user.send(embed=embed)
-                            logger.info(f"Sent new episode notification for '{actual_show_name_tmdb}' S{ep_season:02d}E{ep_num:02d} to user {user_id}.")
+                # 2. Try TVMaze if ID available
+                if tvmaze_id:
+                    try:
+                        tvmaze_details = await self.bot.loop.run_in_executor(None, tvmaze_client.get_show_details, tvmaze_id, ['nextepisode', 'previousepisode'])
+                        if tvmaze_details:
+                            used_source = "TVMaze"
+                            actual_show_name_display = tvmaze_details.get('name', show_name_stored)
                             
-                            await self.bot.loop.run_in_executor(
-                                None, 
-                                self.db_manager.add_sent_episode_notification,
-                                user_id,
-                                show_id,
-                                ep_id,
-                                ep_season,
-                                ep_num
-                            )
-                            logger.info(f"Logged sent notification for User {user_id}, Show {show_id}, Episode {ep_id}.")
+                            embedded = tvmaze_details.get('_embedded', {})
+                            potential_episodes = []
+                            if 'nextepisode' in embedded: potential_episodes.append(embedded['nextepisode'])
+                            if 'previousepisode' in embedded: potential_episodes.append(embedded['previousepisode'])
+                            
+                            for ep in potential_episodes:
+                                if not ep: continue
+                                ep_id = ep.get('id')
+                                air_date_str = ep.get('airdate')
+                                
+                                if not air_date_str: continue
+                                try:
+                                    air_date_obj = datetime.strptime(air_date_str, '%Y-%m-%d').date()
+                                    
+                                    # Logic: Notify if aired today or in the past 7 days (if missed)
+                                    # AND check if it's "today" specifically for timely notification
+                                    
+                                    should_check = False
+                                    if air_date_obj == today:
+                                        should_check = True
+                                    elif (today - timedelta(days=7)) <= air_date_obj <= today:
+                                        should_check = True
+                                    
+                                    if should_check:
+                                        already_notified = await self.bot.loop.run_in_executor(
+                                            None, self.db_manager.has_user_been_notified_for_episode, user_id, show_id, ep_id
+                                        )
+                                        if not already_notified:
+                                             if not any(e['id'] == ep_id for e in episodes_to_notify):
+                                                 normalized_ep = {
+                                                     'id': ep_id,
+                                                     'name': ep.get('name', 'TBA'),
+                                                     'season_number': ep.get('season', 0),
+                                                     'episode_number': ep.get('number', 0),
+                                                     'air_date': air_date_str,
+                                                     'vote_average': ep.get('rating', {}).get('average'),
+                                                     'source': 'TVMaze'
+                                                 }
+                                                 episodes_to_notify.append(normalized_ep)
+                                except ValueError: pass
 
-                        except discord.Forbidden:
-                            print(f"Could not send DM to user {user_id} (DM disabled or bot blocked).")
-                        except discord.HTTPException as e:
-                            print(f"HTTP error sending episode DM to user {user_id}: {e}")
-                        except Exception as e:
-                            print(f"Error sending episode notification to user {user_id}: {e}")
+                    except Exception as e:
+                        logger.error(f"TVMaze check failed for show {show_id} (TVMaze {tvmaze_id}): {e}")
+                        used_source = "TMDB" # Fallback
 
-                    if episodes_to_notify:
-                        most_recent_episode = max(episodes_to_notify, key=lambda ep: ep.get('air_date', '1900-01-01'))
-                        await self.bot.loop.run_in_executor(None, self.db_manager.update_last_notified_episode_details, user_id, show_id, most_recent_episode)
-                        logger.info(f"Updated last notified episode for user {user_id}, show {show_id} to episode ID {most_recent_episode.get('id')}.")
+                # 3. Fallback to TMDB (or if TVMaze ID not found)
+                if used_source == "TMDB":
+                    try:
+                        show_details_tmdb = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id)
+                        tmdb_show_details = show_details_tmdb
 
-                except TMDBError as e:
-                    print(f"TMDB Error fetching details for show {show_id} for user {user_id}: {e}")
-                except Exception as e:
-                    print(f"Error fetching or processing show {show_id} for user {user_id}: {e}")
+                        if not show_details_tmdb:
+                            logger.warning(f"Could not fetch details for show ID {show_id} ({show_name_stored}). Skipping.")
+                            continue
+                        
+                        actual_show_name_display = show_details_tmdb.get('name', show_name_stored)
+
+                        next_ep = show_details_tmdb.get('next_episode_to_air')
+                        if next_ep and next_ep.get('air_date') and next_ep.get('id'):
+                            try:
+                                next_air_date_obj = datetime.strptime(next_ep['air_date'], '%Y-%m-%d').date()
+                                if next_air_date_obj <= today:
+                                    already_notified = await self.bot.loop.run_in_executor(
+                                        None, 
+                                        self.db_manager.has_user_been_notified_for_episode, 
+                                        user_id, 
+                                        show_id, 
+                                        next_ep.get('id')
+                                    )
+                                    if not already_notified:
+                                        next_ep['source'] = 'TMDB'
+                                        episodes_to_notify.append(next_ep)
+                            except ValueError: pass
+                        
+                        last_aired_ep = show_details_tmdb.get('last_episode_to_air')
+                        if last_aired_ep and last_aired_ep.get('air_date') and last_aired_ep.get('id'):
+                            try:
+                                last_aired_date_obj = datetime.strptime(last_aired_ep['air_date'], '%Y-%m-%d').date()
+                                if (today - timedelta(days=7)) <= last_aired_date_obj <= today:
+                                    already_notified = await self.bot.loop.run_in_executor(
+                                        None, 
+                                        self.db_manager.has_user_been_notified_for_episode, 
+                                        user_id, 
+                                        show_id, 
+                                        last_aired_ep.get('id')
+                                    )
+                                    if not already_notified:
+                                        if not any(ep.get('id') == last_aired_ep.get('id') for ep in episodes_to_notify):
+                                            last_aired_ep['source'] = 'TMDB'
+                                            episodes_to_notify.append(last_aired_ep)
+                            except ValueError: pass
+                    except Exception as e:
+                        logger.error(f"TMDB fallback check failed for show {show_id}: {e}")
+
+                for episode_to_notify in episodes_to_notify:
+                    ep_id = episode_to_notify.get('id')
+                    ep_name = episode_to_notify.get('name', 'Episode Name TBA')
+                    ep_season = episode_to_notify.get('season_number', 'S?')
+                    ep_num = episode_to_notify.get('episode_number', 'E?')
+                    ep_air_date_str = episode_to_notify.get('air_date', 'Unknown Air Date')
+                    source = episode_to_notify.get('source', 'Unknown')
+                    
+                    try:
+                        date_obj = datetime.strptime(ep_air_date_str, '%Y-%m-%d').date()
+                        ep_air_date_str = date_obj.strftime('%Y-%m-%d')
+                    except ValueError:
+                        pass
+
+                    embed = discord.Embed(
+                        title=f"📺 New Episode Alert: {actual_show_name_display}",
+                        description=f"**S{ep_season:02d}E{ep_num:02d} - \"{ep_name}\"** has aired!",
+                        color=discord.Color.green()
+                    )
+                    embed.add_field(name="Air Date", value=ep_air_date_str, inline=True)
+                    
+                    vote_avg = episode_to_notify.get('vote_average')
+                    if vote_avg and isinstance(vote_avg, (int, float)) and vote_avg > 0:
+                        embed.add_field(name="Episode Rating", value=f"{vote_avg:.1f}/10", inline=True)
+                    
+                    # Try to get poster from sub, or TMDB details if available
+                    poster_url = None
+                    if tmdb_show_details and tmdb_show_details.get('poster_path'):
+                        poster_url = tmdb_client.get_poster_url(tmdb_show_details['poster_path'], size="w185")
+                    elif poster_path:
+                        poster_url = tmdb_client.get_poster_url(poster_path, size="w185")
+                    
+                    if poster_url:
+                        embed.set_thumbnail(url=poster_url)
+                    
+                    embed.set_footer(text=f"Data provided by {source}")
+
+                    try:
+                        await user.send(embed=embed)
+                        logger.info(f"Sent new episode notification for '{actual_show_name_display}' S{ep_season}E{ep_num} to user {user_id} using {source}.")
+                        
+                        # Log the notification using the ID we used (TVMaze or TMDB)
+                        # This ID is unique within the context of the source, but we only store one ID in DB column.
+                        # Ideally we should track source, but schema is fixed for now.
+                        # Collisions are unlikely between TMDB and TVMaze episode IDs, but possible.
+                        # Given the request "replace tmdb", using TVMaze ID is the way to go.
+                        
+                        await self.bot.loop.run_in_executor(
+                            None, 
+                            self.db_manager.add_sent_episode_notification,
+                            user_id,
+                            show_id, # Still using TMDB show ID as key
+                            ep_id,
+                            ep_season if isinstance(ep_season, int) else 0,
+                            ep_num if isinstance(ep_num, int) else 0
+                        )
+                        logger.info(f"Logged sent notification for User {user_id}, Show {show_id}, Episode {ep_id}.")
+
+                    except discord.Forbidden:
+                        print(f"Could not send DM to user {user_id} (DM disabled or bot blocked).")
+                    except discord.HTTPException as e:
+                        print(f"HTTP error sending episode DM to user {user_id}: {e}")
+                    except Exception as e:
+                        print(f"Error sending episode notification to user {user_id}: {e}")
+
+                if episodes_to_notify:
+                    # Update last notified episode detail (mostly for display in pagination)
+                    # We should prefer to store TMDB-compatible structure if possible, or just generic.
+                    # The paginator uses this to display "Last Notified: ...".
+                    most_recent_episode = max(episodes_to_notify, key=lambda ep: ep.get('air_date', '1900-01-01'))
+                    await self.bot.loop.run_in_executor(None, self.db_manager.update_last_notified_episode_details, user_id, show_id, most_recent_episode)
+                    logger.info(f"Updated last notified episode for user {user_id}, show {show_id}.")
 
     @check_new_episodes.before_loop
     async def before_check_new_episodes(self):
