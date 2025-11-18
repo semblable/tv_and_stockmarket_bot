@@ -316,6 +316,45 @@ def get_intraday_time_series(symbol: str, interval: str = '60min', outputsize: s
         print(f"Error decoding JSON response for intraday time series from Alpha Vantage for '{symbol}' (interval: {interval}). Response: {response.text if 'response' in locals() else 'N/A'}")
         return None
 
+def search_symbol(keywords: str):
+    """
+    Searches for stock symbols matching the keywords.
+
+    Args:
+        keywords: The search keywords (e.g., "Microsoft", "BA").
+
+    Returns:
+        A list of dictionaries representing the search results (symbol, name, type, region, etc.).
+        Returns None on error or no results.
+    """
+    if not ALPHA_VANTAGE_API_KEY:
+        print("CRITICAL: ALPHA_VANTAGE_API_KEY not configured.")
+        return []
+
+    params = {
+        "function": "SYMBOL_SEARCH",
+        "keywords": keywords,
+        "apikey": ALPHA_VANTAGE_API_KEY
+    }
+
+    try:
+        response = requests.get(BASE_URL, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        if "bestMatches" in data:
+            return data["bestMatches"]
+        elif "Note" in data or "Information" in data:
+            # Limit reached
+            print(f"Alpha Vantage API Note/Info for symbol search '{keywords}': {data.get('Note', data.get('Information'))}")
+            return []
+        else:
+            return []
+
+    except Exception as e:
+        print(f"Error searching for symbol '{keywords}': {e}")
+        return []
+
 
 if __name__ == '__main__':
     print("\n--- Alpha Vantage Client Test ---")
@@ -395,10 +434,18 @@ if __name__ == '__main__':
             print(f"API error for news on {no_news_symbol}: {news_data_none.get('message')} (This might be expected for truly invalid symbols)")
         else:
             print(f"Unexpected response for '{no_news_symbol}' (expected None or API error dict): {news_data_none}")
-
-        # Test Case 2.3: Invalid Symbol Format for News (e.g. empty string, though API might handle it)
-        # Alpha Vantage might return an error for this, or it might be caught by requests if URL becomes invalid.
-        # For now, we assume the API handles malformed symbols and returns an error message.
+            
+        # --- search_symbol Tests ---
+        print("\n\n--- Testing search_symbol ---")
+        search_kw = "Microsoft"
+        print(f"\n--- Test Case 3.1: Search for '{search_kw}' ---")
+        search_results = search_symbol(search_kw)
+        if search_results:
+            print(f"Found {len(search_results)} matches for '{search_kw}':")
+            for match in search_results[:3]:
+                 print(f"  {match.get('1. symbol')} - {match.get('2. name')} ({match.get('4. region')})")
+        else:
+            print(f"No results found for '{search_kw}' or API limit.")
 
         # Test Case (Shared): API Limit (Conceptual)
         print("\n--- Test Case (Shared): API Limit Handling (Conceptual) ---")

@@ -3,12 +3,13 @@ import sqlite3
 import os
 import json
 import logging
+from typing import List, Dict, Any, Optional, Union
 from config import SQLITE_DB_PATH
 
 logger = logging.getLogger(__name__)
 
 class DataManager:
-    def __init__(self):
+    def __init__(self) -> None:
         if not SQLITE_DB_PATH:
             logger.error("SQLite database path (SQLITE_DB_PATH) not set in environment variables.")
             raise ValueError("SQLite database path not set.")
@@ -19,7 +20,7 @@ class DataManager:
 
             # Ensure the directory for the SQLite database file exists
             db_dir = os.path.dirname(SQLITE_DB_PATH)
-            logger.info(f"Database directory derived as: {db_dir}") # Add this log
+            logger.info(f"Database directory derived as: {db_dir}")
             if db_dir: # Check if db_dir is not empty (i.e., not just a filename in the current dir)
                 os.makedirs(db_dir, exist_ok=True)
                 logger.info(f"Ensured directory exists: {db_dir}")
@@ -37,16 +38,16 @@ class DataManager:
             logger.error(f"Failed to create directory for SQLite database: {e}")
             raise ConnectionError(f"Failed to create directory for SQLite database: {e}")
 
-    def _get_connection(self):
+    def _get_connection(self) -> sqlite3.Connection:
         """Returns the active connection."""
         return self.conn
 
-    def _close_connection(self, connection):
+    def _close_connection(self, connection: sqlite3.Connection) -> None:
         """SQLite connections don't need explicit release like connection pools."""
         pass # No-op for SQLite single connection
 
 
-    def _execute_query(self, query, params=None, fetch_one=False, fetch_all=False, commit=False):
+    def _execute_query(self, query: str, params: Optional[Dict[str, Any]] = None, fetch_one: bool = False, fetch_all: bool = False, commit: bool = False) -> Any:
         """Executes a given SQL query."""
         conn = self._get_connection()
         cursor = None
@@ -81,12 +82,12 @@ class DataManager:
             if cursor:
                 cursor.close()
 
-    def _initialize_db(self):
+    def _initialize_db(self) -> None:
         """Creates tables if they don't exist."""
         # SQLite CREATE TABLE IF NOT EXISTS is the standard way
         
         # Helper to create table if not exists
-        def create_table_if_not_exists(table_name, create_sql):
+        def create_table_if_not_exists(table_name: str, create_sql: str) -> None:
             # SQLite doesn't need the complex Oracle PL/SQL block
             # The CREATE TABLE IF NOT EXISTS syntax is sufficient
             try:
@@ -252,7 +253,7 @@ class DataManager:
         return result if isinstance(result, bool) else False
 
 
-    def get_user_tv_subscriptions(self, user_id: int):
+    def get_user_tv_subscriptions(self, user_id: int) -> List[Dict[str, Any]]:
         user_id_str = str(user_id)
         query = "SELECT user_id, show_tmdb_id, show_name, poster_path, last_notified_episode_details FROM tv_subscriptions WHERE user_id = :user_id"
         params = {"user_id": user_id_str}
@@ -268,7 +269,7 @@ class DataManager:
                     sub['last_notified_episode_details'] = None
         return subscriptions
 
-    def get_all_tv_subscriptions(self):
+    def get_all_tv_subscriptions(self) -> Dict[str, List[Dict[str, Any]]]:
         query = "SELECT user_id, show_tmdb_id, show_name, poster_path, last_notified_episode_details FROM tv_subscriptions"
         subscriptions = self._execute_query(query, fetch_all=True)
         for sub in subscriptions:
@@ -281,7 +282,7 @@ class DataManager:
                     logger.error(f"Error decoding last_notified_episode_details for show_tmdb_id {sub.get('show_tmdb_id')} in get_all: {e}")
                     sub['last_notified_episode_details'] = None
         # The old method returned a dict keyed by user_id. Let's try to match that.
-        result_dict = {}
+        result_dict: Dict[str, List[Dict[str, Any]]] = {}
         for sub in subscriptions:
             uid = sub['user_id']
             if uid not in result_dict:
@@ -292,7 +293,7 @@ class DataManager:
         return result_dict
 
 
-    def update_last_notified_episode_details(self, user_id: int, show_tmdb_id: int, episode_details: dict):
+    def update_last_notified_episode_details(self, user_id: int, show_tmdb_id: int, episode_details: Optional[Dict[str, Any]]) -> bool:
         user_id_str = str(user_id)
         # Serialize the episode_details dict to a JSON string for storage
         details_json = json.dumps(episode_details) if episode_details else None
@@ -352,7 +353,7 @@ class DataManager:
         params = {"user_id": user_id_str, "tmdb_id": tmdb_id}
         return self._execute_query(query, params, commit=True)
 
-    def get_user_movie_subscriptions(self, user_id: int):
+    def get_user_movie_subscriptions(self, user_id: int) -> List[Dict[str, Any]]:
         user_id_str = str(user_id)
         query = "SELECT user_id, tmdb_id, title, poster_path, notified_status FROM movie_subscriptions WHERE user_id = :user_id"
         params = {"user_id": user_id_str}
@@ -361,10 +362,10 @@ class DataManager:
             sub['notified_status'] = bool(sub.get('notified_status', 0))
         return subscriptions
 
-    def get_all_movie_subscriptions(self):
+    def get_all_movie_subscriptions(self) -> Dict[str, List[Dict[str, Any]]]:
         query = "SELECT user_id, tmdb_id, title, poster_path, notified_status FROM movie_subscriptions"
         subscriptions = self._execute_query(query, fetch_all=True)
-        result_dict = {}
+        result_dict: Dict[str, List[Dict[str, Any]]] = {}
         for sub in subscriptions:
             sub['notified_status'] = bool(sub.get('notified_status', 0))
             uid = sub['user_id']
@@ -382,7 +383,7 @@ class DataManager:
         return self._execute_query(query, params, commit=True)
 
     # --- Tracked Stocks ---
-    def add_tracked_stock(self, user_id: int, stock_symbol: str, quantity=None, purchase_price=None) -> bool:
+    def add_tracked_stock(self, user_id: int, stock_symbol: str, quantity: Optional[float] = None, purchase_price: Optional[float] = None) -> bool:
         user_id_str = str(user_id)
         symbol_upper = stock_symbol.upper()
         
@@ -413,7 +414,7 @@ class DataManager:
         return self._execute_query(query, params, commit=True)
 
 
-    def get_user_tracked_stocks_for_symbol(self, user_id_str, symbol_upper):
+    def get_user_tracked_stocks_for_symbol(self, user_id_str: str, symbol_upper: str) -> Optional[Dict[str, Any]]:
         # Helper for add_tracked_stock
         query = "SELECT symbol, quantity, purchase_price FROM tracked_stocks WHERE user_id = :user_id AND symbol = :symbol"
         return self._execute_query(query, {"user_id": user_id_str, "symbol": symbol_upper}, fetch_one=True)
@@ -426,7 +427,7 @@ class DataManager:
         params = {"user_id": user_id_str, "symbol": symbol_upper}
         return self._execute_query(query, params, commit=True)
 
-    def get_user_tracked_stocks(self, user_id: int):
+    def get_user_tracked_stocks(self, user_id: int) -> List[Dict[str, Any]]:
         user_id_str = str(user_id)
         query = "SELECT symbol, quantity, purchase_price FROM tracked_stocks WHERE user_id = :user_id"
         params = {"user_id": user_id_str}
@@ -441,10 +442,10 @@ class DataManager:
 
     # --- Stock Alerts ---
     def add_stock_alert(self, user_id: int, stock_symbol: str,
-                        target_above=None, target_below=None,
-                        dpc_above_target=None, dpc_below_target=None,
-                        clear_above=False, clear_below=False,
-                        clear_dpc_above=False, clear_dpc_below=False) -> bool:
+                        target_above: Optional[Union[float, str]] = None, target_below: Optional[Union[float, str]] = None,
+                        dpc_above_target: Optional[Union[float, str]] = None, dpc_below_target: Optional[Union[float, str]] = None,
+                        clear_above: bool = False, clear_below: bool = False,
+                        clear_dpc_above: bool = False, clear_dpc_below: bool = False) -> bool:
         user_id_str = str(user_id)
         symbol_upper = stock_symbol.upper()
 
@@ -528,7 +529,7 @@ class DataManager:
             return self._execute_query(query_upsert, params_upsert, commit=True)
 
 
-    def get_stock_alert(self, user_id: int, stock_symbol: str):
+    def get_stock_alert(self, user_id: int, stock_symbol: str) -> Optional[Dict[str, Any]]:
         user_id_str = str(user_id)
         symbol_upper = stock_symbol.upper()
         query = """
@@ -564,7 +565,7 @@ class DataManager:
         # For now, assume if it ran, it's fine.
         return self._execute_query(query, params, commit=True)
 
-    def get_user_all_stock_alerts(self, user_id: int):
+    def get_user_all_stock_alerts(self, user_id: int) -> List[Dict[str, Any]]:
         user_id_str = str(user_id)
         query = """
         SELECT symbol, target_above, active_above, target_below, active_below,
@@ -578,7 +579,7 @@ class DataManager:
                 if key in alert: alert[key] = bool(alert[key])
         return alerts
 
-    def get_all_active_alerts_for_monitoring(self):
+    def get_all_active_alerts_for_monitoring(self) -> Dict[str, Dict[str, Any]]:
         query = """
         SELECT user_id, symbol, target_above, active_above, target_below, active_below,
                dpc_above_target, dpc_above_active, dpc_below_target, dpc_below_active
@@ -587,7 +588,7 @@ class DataManager:
         """
         alerts_list = self._execute_query(query, fetch_all=True)
         
-        active_alerts_to_monitor = {}
+        active_alerts_to_monitor: Dict[str, Dict[str, Any]] = {}
         for alert_row in alerts_list:
             uid = alert_row['user_id']
             symbol = alert_row['symbol']
@@ -602,7 +603,7 @@ class DataManager:
         return active_alerts_to_monitor
 
     # --- User Preferences ---
-    def get_user_preference(self, user_id: int, key: str, default=None):
+    def get_user_preference(self, user_id: int, key: str, default: Any = None) -> Any:
         user_id_str = str(user_id)
         query = "SELECT pref_value FROM user_preferences WHERE user_id = :user_id AND pref_key = :key"
         params = {"user_id": user_id_str, "key": key}
@@ -617,7 +618,7 @@ class DataManager:
                 return default
         return default
 
-    def set_user_preference(self, user_id: int, key: str, value) -> bool:
+    def set_user_preference(self, user_id: int, key: str, value: Any) -> bool:
         user_id_str = str(user_id)
         value_json = json.dumps(value)
         query = """
@@ -635,7 +636,7 @@ class DataManager:
         params = {"user_id": user_id_str, "key": key}
         return self._execute_query(query, params, commit=True)
 
-    def get_user_all_preferences(self, user_id: int) -> dict:
+    def get_user_all_preferences(self, user_id: int) -> Dict[str, Any]:
         user_id_str = str(user_id)
         query = "SELECT pref_key, pref_value FROM user_preferences WHERE user_id = :user_id"
         params = {"user_id": user_id_str}
@@ -653,7 +654,7 @@ class DataManager:
                 user_prefs[key] = None # Or some default error indicator
         return user_prefs
 
-    def close(self):
+    def close(self) -> None:
         """Closes the database connection."""
         if hasattr(self, 'conn') and self.conn:
             try:
@@ -667,7 +668,6 @@ if __name__ == "__main__":
     # Configure basic logging for standalone run
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
-    # Set dummy environment variables for testing
     # Set dummy environment variables for testing
     os.environ['SQLITE_DB_PATH'] = 'test_bot.db' # Set SQLite env var
 
@@ -686,30 +686,7 @@ if __name__ == "__main__":
             logger.info(f"Added TV show subscription for user {user_id}, TMDB ID {tmdb_id}")
         else:
             logger.error(f"Failed to add TV show subscription for user {user_id}, TMDB ID {tmdb_id}")
-#
-#         # Example: Get user's TV subscriptions
-#         subscriptions = db_manager.get_user_tv_subscriptions(user_id)
-#         logger.info(f"Subscriptions for user {user_id}: {subscriptions}")
-#
-#         # Example: Update last notified episode details
-#         episode_details = {"season": 8, "episode": 6, "title": "The Iron Throne"}
-#         success = db_manager.update_last_notified_episode_details(user_id, tmdb_id, episode_details)
-#         if success:
-#             logger.info(f"Updated episode details for user {user_id}, TMDB ID {tmdb_id}")
-#         else:
-#             logger.error(f"Failed to update episode details for user {user_id}, TMDB ID {tmdb_id}")
-#
-#         # Example: Get updated subscriptions
-#         subscriptions = db_manager.get_user_tv_subscriptions(user_id)
-#         logger.info(f"Updated subscriptions for user {user_id}: {subscriptions}")
-#
-#         # Example: Remove TV show subscription
-#         success = db_manager.remove_tv_show_subscription(user_id, tmdb_id)
-#         if success:
-#             logger.info(f"Removed TV show subscription for user {user_id}, TMDB ID {tmdb_id}")
-#         else:
-#             logger.error(f"Failed to remove TV show subscription for user {user_id}, TMDB ID {tmdb_id}")
-#
+
     except (ValueError, ConnectionError) as e:
         logger.error(f"Application startup failed: {e}")
     finally:

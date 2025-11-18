@@ -1,76 +1,104 @@
-# TV Show & Stock Bot + Mini Dashboard
+# TV Show, Stock & AI Bot
 
-A friendly Discord bot (Python) with a lightweight Flask dashboard.  
-It reminds you about new TV-show episodes & movie releases **and** keeps an eye on stock prices – all in one place.
+A comprehensive Discord bot that combines entertainment tracking (TV shows, Movies) with financial monitoring (Stocks) and an AI assistant powered by Google Gemini.
 
----
+## Features
 
-## Main features
+### 🎬 TV & Movies
+- **Show Subscriptions:** Receive DM notifications when new episodes air.
+- **Movie Watchlist:** Track upcoming releases.
+- **Rich Information:** Detailed embeds with ratings, air dates, networks, and posters (via TMDB).
+- **Trending:** View popular shows and movies.
 
-### TV & Movies
-- Subscribe to any show and get a DM when a new episode airs.
-- Trending list, detailed info (ratings, network, air date).
-- Movie watch-list with release notifications.
+### 📈 Stocks
+- **Real-time Quotes:** Track US and international stock prices (AlphaVantage / Yahoo Finance).
+- **Smart Alerts:** Set price targets (above/below) and percentage change alerts.
+- **Visual Charts:** View price history charts directly in Discord.
 
-### Stocks
-- Track real-time prices (US + international via AlphaVantage / YahooFinance).
-- Price alerts (above / below target, % change).  
-- Simple charts (QuickChart.io) included in embeds.
-
-### Alerts & Embeds
-- Rich Discord embeds with posters, thumbnails, links.  
-- Background scheduler that checks episodes & prices every 30 min.
-
-### Web dashboard
-- Discord OAuth2 login.  
-- One page to add / remove shows, movies and stocks.
+### 🤖 AI Assistant
+- **Gemini Integration:** Chat naturally with the bot for summaries, questions, and assistance.
+- **Context Aware:** Powered by Google's Gemini model.
 
 ---
 
-## Tiny architecture
-```
-┌──────────────────┐    REST    ┌────────────────┐
-│  Discord Bot     │◄──────────►│  Flask API      │
-│  (bot.py)        │            │  (dashboard)    │
-└──────────────────┘            └────────────────┘
-        ▲   ▲                        ▲   ▲
-        │   │                        │   │
-        ▼   ▼                        ▼   ▼
-  TMDB ▪ AlphaVantage ▪ YahooFinance ▪ SQLite (data/app.db)
-```
+## Setup & Configuration
 
----
+### Prerequisites
+- Python 3.10+ (for local dev) or Docker
+- Discord Bot Token
+- TMDB API Key
+- AlphaVantage API Key (optional, for stocks)
+- Google Gemini API Key (for AI features)
 
-## Quick start (Docker)
-```bash
-# clone & enter repo
-git clone <repo_url>
-cd "tvshow and stock bot"
+### Environment Variables
+Create a `.env` file in the root directory:
 
-# create .env and add at least
-DISCORD_BOT_TOKEN=...
-TMDB_API_KEY=...
-ALPHA_VANTAGE_API_KEY=...
-
-# build + run (persistent volume)
-docker compose up -d      # or ./docker-run-persistent.ps1 on Windows
-```
-Bot will come online in Discord; dashboard runs on http://localhost:8050.
-
----
-
-## Tech snapshot
-Python 3 · discord.py · Flask · SQLite · Docker · GitHub Actions CI
-
-## Project map (trimmed)
-```
-├─ bot.py            # Discord bot entry-point
-├─ dashboard/        # Flask web app (OAuth + HTML)
-├─ cogs/             # Command modules
-├─ data_manager.py   # DB layer / queries
-└─ api_clients/      # TMDB / Stock API wrappers
+```env
+DISCORD_BOT_TOKEN=your_discord_token
+TMDB_API_KEY=your_tmdb_key
+ALPHA_VANTAGE_API_KEY=your_av_key
+GEMINI_API_KEY=your_gemini_key
 ```
 
 ---
 
-MIT license 
+## 🚀 Local Development
+
+### Option 1: Using Docker (Recommended)
+1. **Build the image:**
+   ```bash
+   docker build -f bot.Dockerfile -t discord-bot:latest .
+   ```
+
+2. **Run with persistence (PowerShell):**
+   ```powershell
+   .\docker-run-persistent.ps1
+   ```
+   
+   *Or manually:*
+   ```bash
+   docker run -d --name bot-container \
+     -v $(pwd)/data:/app/data \
+     --env-file .env \
+     discord-bot:latest
+   ```
+
+### Option 2: Direct Python
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Run the bot:**
+   ```bash
+   python bot.py
+   ```
+
+---
+
+## ☁️ Deployment (Docker)
+
+1. **Transfer files** to your server.
+2. **Build the image:**
+   ```bash
+   docker build -f bot.Dockerfile -t discord-bot:latest .
+   ```
+3. **Run the container:**
+   ```bash
+   docker run -d --name bot-container \
+     --restart unless-stopped \
+     -p 5000:5000 \
+     -v $(pwd)/data:/app/data \
+     --env-file .env \
+     discord-bot:latest
+   ```
+
+## 📂 Data Persistence
+The bot uses an SQLite database located at `data/app.db`.
+- **Docker:** Map a host volume to `/app/data`.
+- **Local:** The `data/` folder will be created automatically in your project root.
+
+---
+
+## License
+MIT

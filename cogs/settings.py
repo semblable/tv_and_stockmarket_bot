@@ -50,9 +50,9 @@ def create_settings_embed(ctx, user_preferences):
     return embed
 
 class SettingsCog(commands.Cog, name="Settings"):
-    def __init__(self, bot):
+    def __init__(self, bot, db_manager):
         self.bot = bot
-        self.db_manager = bot.db_manager # Get the DataManager instance from the bot
+        self.db_manager = db_manager # Injected dependency
 
     @commands.group(name="settings", aliases=["prefs"], invoke_without_command=True)
     async def settings_group(self, ctx: commands.Context):
@@ -141,5 +141,5 @@ class SettingsCog(commands.Cog, name="Settings"):
         # await self.view_settings(ctx)
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(SettingsCog(bot))
+    await bot.add_cog(SettingsCog(bot, db_manager=bot.db_manager))
     logger.info("SettingsCog has been loaded.")

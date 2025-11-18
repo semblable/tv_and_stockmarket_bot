@@ -1,55 +1,50 @@
-# Import necessary modules
+import logging
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import ValidationError
 import os
-import logging # Import logging
-from dotenv import load_dotenv
+import sys
 
-# Get a logger instance (it might be configured by bot.py if this is imported after basicConfig)
-# If this module is imported first, these logs might not show if basicConfig isn't called yet.
-# However, bot.py now configures logging very early.
+# Initialize logger. 
+# Note: If this module is imported before logging is configured in the entry point,
+# these logs might rely on basicConfig or be lost/unformatted until then.
+# ideally bot.py sets up logging before importing config.
 logger = logging.getLogger(__name__)
-logger.info("config.py: Script execution started.")
 
-# Load environment variables from .env file
-logger.info("config.py: Attempting to load .env file...")
-dotenv_path = os.path.join(os.path.dirname(__file__), '.env') # Explicitly define path to .env
-if os.path.exists(dotenv_path):
-    logger.info(f"config.py: .env file found at {dotenv_path}")
-    # Handle potential BOM in .env file by explicitly specifying encoding
-    load_dotenv(dotenv_path=dotenv_path, encoding='utf-8-sig')
-    logger.info("config.py: load_dotenv() called with utf-8-sig encoding.")
-else:
-    logger.warning(f"config.py: .env file NOT found at {dotenv_path}. Environment variables should be set directly.")
+class Settings(BaseSettings):
+    DISCORD_BOT_TOKEN: str
+    TMDB_API_KEY: str
+    ALPHA_VANTAGE_API_KEY: str
+    OPENWEATHERMAP_API_KEY: str
+    GEMINI_API_KEY: str
+    SQLITE_DB_PATH: str = "data/app.db"
 
+    # Config for pydantic settings
+    model_config = SettingsConfigDict(
+        env_file=".env", 
+        env_file_encoding="utf-8",  # Try utf-8 first. If BOM issues persist, we might need handling.
+        extra="ignore"
+    )
 
-# Get the Discord bot token from environment variables
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-TMDB_API_KEY = os.getenv("TMDB_API_KEY")
-ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
-OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")
-INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+try:
+    # Attempt to load settings
+    settings = Settings()
+    
+    # Export variables for backward compatibility
+    DISCORD_BOT_TOKEN = settings.DISCORD_BOT_TOKEN
+    TMDB_API_KEY = settings.TMDB_API_KEY
+    ALPHA_VANTAGE_API_KEY = settings.ALPHA_VANTAGE_API_KEY
+    OPENWEATHERMAP_API_KEY = settings.OPENWEATHERMAP_API_KEY
+    GEMINI_API_KEY = settings.GEMINI_API_KEY
+    SQLITE_DB_PATH = settings.SQLITE_DB_PATH
+    
+    logger.info("Configuration loaded successfully via Pydantic.")
 
-# SQLite Database Configuration
-SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "data/app.db")
-logger.info("config.py: os.getenv() called for all API keys and SQLite DB config.")
-
-if DISCORD_BOT_TOKEN is None:
-    logger.warning("config.py: DISCORD_BOT_TOKEN not found in environment variables.")
-if TMDB_API_KEY is None:
-    logger.warning("config.py: TMDB_API_KEY not found in environment variables.")
-if ALPHA_VANTAGE_API_KEY is None:
-    logger.warning("config.py: ALPHA_VANTAGE_API_KEY not found in environment variables.")
-if OPENWEATHERMAP_API_KEY is None:
-    logger.warning("config.py: OPENWEATHERMAP_API_KEY not found in environment variables.")
-if INTERNAL_API_KEY is None:
-    logger.warning("config.py: INTERNAL_API_KEY not found in environment variables.")
-if GEMINI_API_KEY is None:
-    logger.warning("config.py: GEMINI_API_KEY not found in environment variables.")
-if SQLITE_DB_PATH == "data/app.db":
-    logger.info(f"config.py: SQLITE_DB_PATH not set, using default: {SQLITE_DB_PATH}")
-elif SQLITE_DB_PATH is None: # Should not happen with default, but good practice
-    logger.warning("config.py: SQLITE_DB_PATH not found and no default was set (this is unexpected).")
-else:
-    logger.info(f"config.py: SQLITE_DB_PATH found in environment variables: {SQLITE_DB_PATH}")
-
-logger.info("config.py: Finished loading configuration.")
+except ValidationError as e:
+    logger.critical("Configuration validation failed. Missing or invalid environment variables.")
+    for error in e.errors():
+        logger.critical(f"Field: {error['loc'][0]} - Error: {error['msg']}")
+    # Re-raise to stop execution if config is invalid
+    raise SystemExit("Critical: Invalid configuration. Check logs for details.")
+except Exception as e:
+    logger.critical(f"Unexpected error loading configuration: {e}")
+    raise SystemExit(f"Critical: Unexpected error loading configuration: {e}")
