@@ -54,7 +54,7 @@ class SettingsCog(commands.Cog, name="Settings"):
         self.bot = bot
         self.db_manager = db_manager # Injected dependency
 
-    @commands.group(name="settings", aliases=["prefs"], invoke_without_command=True)
+    @commands.hybrid_group(name="settings", aliases=["prefs"], fallback="view")
     async def settings_group(self, ctx: commands.Context):
         """Manage your notification preferences."""
         if ctx.invoked_subcommand is None:

@@ -288,6 +288,19 @@ class Utility(commands.Cog):
             else:
                 await ctx.send("Error: Could not create poll message for reactions.")
 
+    @commands.hybrid_command(name="help", description="Shows the help message.")
+    async def help_command(self, ctx: commands.Context, command: Optional[str] = None):
+        """
+        Shows the help message.
+        """
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=True)
+            
+        if command:
+            await ctx.send_help(command)
+        else:
+            await ctx.send_help()
+
     @commands.hybrid_command(name="upcoming_releases", description="Shows upcoming movies and TV shows.")
     @app_commands.describe(category="Filter by 'movies', 'tv', or 'all' (default).")
     async def upcoming_releases(self, ctx: commands.Context, category: str = "all"):

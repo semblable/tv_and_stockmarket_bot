@@ -23,9 +23,6 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy the environment file
-COPY .env .
-
 # Copy the rest of the application code into the container at /app
 COPY bot.py .
 COPY config.py .
