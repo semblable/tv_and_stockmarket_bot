@@ -63,28 +63,23 @@ class MyTVShowsPaginatorView(BasePaginatorView):
     async def _get_embed_for_current_page(self) -> discord.Embed:
         self._update_button_states()
 
+        if not self.items:
+            embed.description = "You have no TV show subscriptions."
+            return embed
+
         start_index = self.current_page * self.items_per_page
         end_index = start_index + self.items_per_page
         page_subs = self.items[start_index:end_index]
 
-        embed_title = "📺 Your TV Show Subscriptions"
-        if self.total_pages > 1:
-            embed_title += f" (Page {self.current_page + 1}/{self.total_pages})"
-        
-        embed = discord.Embed(title=embed_title, color=discord.Color.purple())
-        
+        if not page_subs and self.total_pages > 0 :
+            embed.description = "No subscriptions to display on this page."
+            return embed
+            
         footer_parts = []
         if self.items:
             footer_parts.append(f"Showing {len(page_subs)} of {len(self.items)} total.")
         footer_parts.append("Data from TMDB.")
         embed.set_footer(text=" ".join(footer_parts))
-
-        if not self.items:
-            embed.description = "You have no TV show subscriptions."
-            return embed
-        if not page_subs and self.total_pages > 0 :
-            embed.description = "No subscriptions to display on this page."
-            return embed
 
         shows_with_errors = 0
         for sub in page_subs:
