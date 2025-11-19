@@ -66,57 +66,10 @@ def normalize_symbol(symbol: str) -> str:
     # Return as-is for US stocks and others
     return symbol
 
-def get_quote(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    Fetch current quote data using Yahoo Finance Query1 API.
-    """
-    normalized = normalize_symbol(symbol)
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
-    params = {"symbols": normalized}
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("quoteResponse", {}).get("result", [])
-        if not results:
-            logger.warning(f"No quote data in response for {normalized}")
-            return None
-        q = results[0]
-        from datetime import datetime as _dt
-        return {
-            "01. symbol": normalized,
-            "05. price": f"{q.get('regularMarketPrice', 0):.2f}",
-            "09. change": f"{q.get('regularMarketChange', 0):+.2f}",
-            "10. change percent": f"{q.get('regularMarketChangePercent', 0):+.2f}%", 
-            "03. high": f"{q.get('regularMarketDayHigh', 0):.2f}",
-            "04. low": f"{q.get('regularMarketDayLow', 0):.2f}",
-            "06. volume": str(int(q.get('regularMarketVolume', 0))),
-            "07. latest trading day": _dt.fromtimestamp(q.get("regularMarketTime", 0)).strftime('%Y-%m-%d'),
-            "source": "yahoo_finance",
-            "currency": q.get('currency', ''),
-            "exchange": q.get('fullExchangeName', ''),
-            "longName": q.get('longName', ''),
-            "marketCap": q.get('marketCap', 'N/A'),
-            "trailingPE": q.get('trailingPE', 'N/A'),
-            "epsTrailingTwelveMonths": q.get('epsTrailingTwelveMonths', 'N/A'),
-            "fiftyTwoWeekHigh": q.get('fiftyTwoWeekHigh', 'N/A'),
-            "fiftyTwoWeekLow": q.get('fiftyTwoWeekLow', 'N/A')
-        }
-    except Exception as e:
-        logger.error(f"Error in direct get_quote for {normalized}: {e}")
-        return None
-
 def get_stock_price(symbol: str) -> Optional[Dict[str, Any]]:
     """
-    Get current stock price, first via direct quote API, then fallback to yfinance.
+    Get current stock price using yfinance library.
     """
-    # Try direct quote API first
-    quote = get_quote(symbol)
-    if quote:
-        return quote
-
-    # Fallback to yfinance Ticker history method
     try:
         normalized_symbol = normalize_symbol(symbol)
         logger.info(f"Fetching Yahoo Finance data via yfinance for {normalized_symbol}")
@@ -164,7 +117,7 @@ def get_stock_price(symbol: str) -> Optional[Dict[str, Any]]:
         return result
         
     except Exception as e:
-        logger.error(f"Error fetching Yahoo Finance data via fallback for {symbol}: {e}")
+        logger.error(f"Error fetching Yahoo Finance data for {symbol}: {e}")
         return None
 
 def get_stock_news(symbol: str, limit: int = 5) -> Optional[List[Dict[str, Any]]]:
