@@ -1,0 +1,128 @@
+name: Deploy to Oracle Cloud
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # IMAGE_NAME will be set dynamically to ensure lowercase
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install app dependencies
+          if [ -f tv_and_stockmarket_bot/requirements.txt ]; then pip install -r tv_and_stockmarket_bot/requirements.txt; fi
+          # Install testing dependencies
+          pip install pytest pytest-asyncio
+
+      - name: Run Tests
+        run: |
+          # Add the bot directory to PYTHONPATH so tests can find the modules
+          export PYTHONPATH=$PYTHONPATH:$(pwd)/tv_and_stockmarket_bot
+          pytest tests/
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Downcase REPO
+        run: |
+          echo "REPO_LC=${GITHUB_REPOSITORY,,}" >>${GITHUB_ENV}
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPO_LC }}
+          tags: |
+            type=raw,value=latest
+            type=sha
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          # Context must be the subdirectory where Dockerfile and code exist
+          context: tv_and_stockmarket_bot
+          file: tv_and_stockmarket_bot/bot.Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Downcase REPO
+        run: |
+          echo "REPO_LC=${GITHUB_REPOSITORY,,}" >>${GITHUB_ENV}
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.REPO_LC }}:latest
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ${{ secrets.OCI_USERNAME }}
+          key: ${{ secrets.OCI_SSH_KEY }}
+          envs: GITHUB_TOKEN,ENV_FILE_CONTENT,REGISTRY,IMAGE
+          script: |
+            # 1. Login to Registry
+            echo "$GITHUB_TOKEN" | docker login $REGISTRY -u ${{ github.actor }} --password-stdin
+
+            # 2. Create .env file safely
+            echo "$ENV_FILE_CONTENT" > .env
+
+            # 3. Pull new image
+            docker pull $IMAGE
+
+            # 4. Stop and remove old container (if exists)
+            docker stop bot-container || true
+            docker rm bot-container || true
+            
+            # 5. Ensure host data directory exists
+            mkdir -p $HOME/data
+
+            # 6. Run new container
+            # CRITICAL: The -v maps the HOST folder ($HOME/data) to the CONTAINER folder (/app/data)
+            # This is what persists your database (app.db)
+            docker run -d \
+              --name bot-container \
+              --restart unless-stopped \
+              -v $HOME/data:/app/data \
+              --env-file .env \
+              $IMAGE
+
+            # 7. Cleanup unused images to save disk space on VM
+            docker image prune -f
+
