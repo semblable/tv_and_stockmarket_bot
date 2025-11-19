@@ -100,5 +100,5 @@ The bot uses an SQLite database located at `data/app.db`.
 
 ---
 
-## License.
+## License
 MIT
