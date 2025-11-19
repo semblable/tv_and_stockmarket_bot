@@ -62,6 +62,8 @@ class MyTVShowsPaginatorView(BasePaginatorView):
 
     async def _get_embed_for_current_page(self) -> discord.Embed:
         self._update_button_states()
+        
+        embed = discord.Embed(title="My TV Shows", color=discord.Color.blue())
 
         if not self.items:
             embed.description = "You have no TV show subscriptions."
