@@ -631,14 +631,20 @@ class TVShows(commands.Cog):
             logger.error(f"Unexpected error sending tv_info for {show_id}: {e}")
             await self.send_response(ctx, "An unexpected error occurred while displaying TV show info.", ephemeral=True)
 
-    @commands.hybrid_command(name="tv_schedule", description="Displays your upcoming TV show episode schedule for the next 7 days.")
-    async def tv_schedule(self, ctx: commands.Context):
+    @commands.hybrid_command(name="tv_schedule", description="Displays your upcoming TV show episode schedule.")
+    @discord.app_commands.describe(days="Number of days to show schedule for (7, 30, or 90). Default is 7.")
+    @discord.app_commands.choices(days=[
+        discord.app_commands.Choice(name="Next 7 Days", value=7),
+        discord.app_commands.Choice(name="Next 30 Days", value=30),
+        discord.app_commands.Choice(name="Next 90 Days", value=90)
+    ])
+    async def tv_schedule(self, ctx: commands.Context, days: int = 7):
         """
         Displays a personalized schedule of upcoming TV episodes for the shows
-        a user is subscribed to, within the next 7 days.
+        a user is subscribed to, within the specified number of days (default 7).
         """
         user_id = ctx.author.id
-        logger.info(f"tv_schedule: Generating schedule for user_id: {user_id}")
+        logger.info(f"tv_schedule: Generating schedule for user_id: {user_id}, days: {days}")
         await ctx.defer(ephemeral=True)
 
         try:
@@ -655,7 +661,7 @@ class TVShows(commands.Cog):
             return
 
         today = date.today()
-        seven_days_later = today + timedelta(days=7)
+        schedule_end_date = today + timedelta(days=days)
 
         upcoming_episodes_by_date = {}
 
@@ -683,7 +689,7 @@ class TVShows(commands.Cog):
                              if air_date_str:
                                  try:
                                     ep_air_date = datetime.strptime(air_date_str, '%Y-%m-%d').date()
-                                    if today <= ep_air_date < seven_days_later:
+                                    if today <= ep_air_date < schedule_end_date:
                                         ep_name = next_ep.get('name', 'TBA')
                                         ep_season = next_ep.get('season', 0)
                                         ep_num = next_ep.get('number', 0)
@@ -721,7 +727,7 @@ class TVShows(commands.Cog):
                     if air_date_str:
                         try:
                             ep_air_date = datetime.strptime(air_date_str, '%Y-%m-%d').date()
-                            if today <= ep_air_date < seven_days_later:
+                            if today <= ep_air_date < schedule_end_date:
                                 ep_name = next_ep.get('name', 'TBA')
                                 ep_season = next_ep.get('season_number', 0) 
                                 ep_num = next_ep.get('episode_number', 0) 
@@ -757,11 +763,11 @@ class TVShows(commands.Cog):
         logger.info(f"tv_schedule: Final upcoming_episodes_by_date for user {user_id}: {upcoming_episodes_by_date}")
         if not upcoming_episodes_by_date:
             logger.info(f"tv_schedule: No upcoming episodes found for user {user_id}. Sending corresponding message.")
-            await self.send_response(ctx, "✨ No episodes for your subscribed shows are scheduled to air in the next 7 days.", ephemeral=True)
+            await self.send_response(ctx, f"✨ No episodes for your subscribed shows are scheduled to air in the next {days} days.", ephemeral=True)
             return
 
         embed = discord.Embed(
-            title="🗓️ Your TV Schedule - Next 7 Days",
+            title=f"🗓️ Your TV Schedule - Next {days} Days",
             color=discord.Color.teal()
         )
         embed.set_footer(text="All times are based on original air dates from TMDB/TVMaze.")
