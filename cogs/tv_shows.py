@@ -12,7 +12,7 @@ import asyncio
 import logging
 import json
 import typing
-from utils.paginator import BasePaginatorView, SelectionView # Import BasePaginatorView
+from utils.paginator import BasePaginatorView # Import BasePaginatorView
 
 logger = logging.getLogger(__name__)
 

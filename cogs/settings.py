@@ -60,7 +60,7 @@ class SettingsCog(commands.Cog, name="Settings"):
         if ctx.invoked_subcommand is None:
             await self.view_settings(ctx)
 
-    @settings_group.command(name="view", aliases=["show"])
+    @settings_group.command(name="current", aliases=["show", "view"])
     async def view_settings(self, ctx: commands.Context):
         """Displays your current notification settings."""
         user_id = ctx.author.id

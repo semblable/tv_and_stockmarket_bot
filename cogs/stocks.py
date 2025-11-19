@@ -952,6 +952,32 @@ class Stocks(commands.Cog):
             
         await ctx.send(embed=embed, ephemeral=False)
 
+    async def get_rate_async(self, from_curr, to_curr):
+        if from_curr == to_curr: return 1.0
+        pair = f"{from_curr}/{to_curr}"
+        
+        # Try DB first (run in executor because sqlite is blocking)
+        rate = await self.bot.loop.run_in_executor(None, self.db_manager.get_currency_rate, pair)
+        if rate: return rate
+        
+        # Try inverse from DB
+        inv_pair = f"{to_curr}/{from_curr}"
+        inv_rate = await self.bot.loop.run_in_executor(None, self.db_manager.get_currency_rate, inv_pair)
+        if inv_rate: return 1.0 / inv_rate
+
+        # Fetch from API (Alpha Vantage)
+        rate = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_currency_exchange_rate, from_curr, to_curr)
+        if rate:
+             await self.bot.loop.run_in_executor(None, self.db_manager.update_currency_rate, pair, rate)
+             # Store inverse too
+             if rate > 0:
+                 inv_pair = f"{to_curr}/{from_curr}"
+                 inv_rate = 1.0 / rate
+                 await self.bot.loop.run_in_executor(None, self.db_manager.update_currency_rate, inv_pair, inv_rate)
+             return rate
+        
+        return None
+
     @commands.hybrid_command(name="my_portfolio", description="View your stock portfolio performance.")
     async def my_portfolio(self, ctx: commands.Context) -> None:
         """
@@ -983,11 +1009,15 @@ class Stocks(commands.Cog):
         overall_cost_basis_usd = 0.0
         overall_market_value_usd = 0.0
         
-        individual_holdings_details = []
+        # Track which holdings are successfully included in totals
+        fully_calculated_count = 0
+        warnings = []
 
         status_msg = None
         if len(portfolio_stocks) > 5:
             status_msg = await ctx.send(f"Fetching current prices for {len(portfolio_stocks)} holdings...", ephemeral=True)
+
+        individual_holdings_details = []
 
         for stock_data in portfolio_stocks:
             symbol = stock_data["symbol"]
@@ -1032,64 +1062,54 @@ class Stocks(commands.Cog):
             gain_loss = 0.0
             gain_loss_pct_str = "N/A"
 
-            # Calculate USD equivalent for totals
-            def get_rate_to_usd(currency):
-                if currency == 'USD': return 1.0
-                rate = self.db_manager.get_currency_rate(f"{currency}/USD")
-                if rate: return rate
-                # Try inverse
-                rate_inv = self.db_manager.get_currency_rate(f"USD/{currency}")
-                if rate_inv: return 1.0 / rate_inv
-                return None
+            # Determine Rates to USD asynchronously
+            cost_basis_usd_rate = await self.get_rate_async(cost_basis_currency, "USD")
+            market_value_usd_rate = await self.get_rate_async(market_value_currency, "USD")
 
-            cost_basis_usd_rate = get_rate_to_usd(cost_basis_currency)
-            market_value_usd_rate = get_rate_to_usd(market_value_currency)
+            include_in_totals = True
 
-            if cost_basis_usd_rate:
-                overall_cost_basis_usd += cost_basis * cost_basis_usd_rate
-            else:
-                # Fallback: if rate unknown, assume 1:1 or just log warning (affects total accuracy)
-                logger.warning(f"Missing exchange rate for {cost_basis_currency} -> USD")
-                overall_cost_basis_usd += cost_basis # Potentially wrong, but keeps sum going
+            if cost_basis_usd_rate is None:
+                include_in_totals = False
+                if cost_basis_currency != "USD":
+                     warnings.append(f"⚠️ Could not convert cost basis for {symbol} ({cost_basis_currency}) to USD.")
 
-            if current_price is not None and not api_error_for_stock:
+            if not api_error_for_stock:
                 market_value = quantity * current_price
-                
-                if market_value_usd_rate:
-                    overall_market_value_usd += market_value * market_value_usd_rate
-                else:
-                    logger.warning(f"Missing exchange rate for {market_value_currency} -> USD")
-                    overall_market_value_usd += market_value
+                if market_value_usd_rate is None:
+                    include_in_totals = False
+                    if market_value_currency != "USD":
+                        warnings.append(f"⚠️ Could not convert market value for {symbol} ({market_value_currency}) to USD.")
+            else:
+                include_in_totals = False # Price missing, can't calc market value, exclude from totals
+            
+            if include_in_totals and not api_error_for_stock:
+                overall_cost_basis_usd += cost_basis * cost_basis_usd_rate
+                overall_market_value_usd += market_value * market_value_usd_rate
+                fully_calculated_count += 1
 
-                # Individual Gain/Loss
-                # We need to convert cost basis to market value currency for comparison
-                # OR convert both to USD. Let's convert cost basis to market value currency.
-                
-                # rate: cost_currency -> market_currency
-                # We can derive from USD rates: (cost -> USD) * (USD -> market) = (cost -> USD) / (market -> USD)
-                conversion_rate = None
-                if cost_basis_currency == market_value_currency:
-                    conversion_rate = 1.0
-                elif cost_basis_usd_rate and market_value_usd_rate:
-                     conversion_rate = cost_basis_usd_rate / market_value_usd_rate
-                
-                if conversion_rate:
-                    converted_cost_basis = cost_basis * conversion_rate
-                    gain_loss = market_value - converted_cost_basis
-                    if converted_cost_basis != 0:
-                        gain_loss_pct = (gain_loss / converted_cost_basis) * 100
-                        gain_loss_pct_str = f"{gain_loss_pct:+.2f}%"
-                    else:
-                        gain_loss_pct_str = "N/A (zero cost basis)"
+            # Individual Gain/Loss
+            conversion_rate_for_calc = None
+            if cost_basis_currency == market_value_currency:
+                conversion_rate_for_calc = 1.0
+            elif cost_basis_usd_rate and market_value_usd_rate:
+                 conversion_rate_for_calc = cost_basis_usd_rate / market_value_usd_rate
+            
+            if not api_error_for_stock and conversion_rate_for_calc:
+                converted_cost_basis = cost_basis * conversion_rate_for_calc
+                gain_loss = market_value - converted_cost_basis
+                if converted_cost_basis != 0:
+                    gain_loss_pct = (gain_loss / converted_cost_basis) * 100
+                    gain_loss_pct_str = f"{gain_loss_pct:+.2f}%"
                 else:
-                    gain_loss = "N/A (No Rate)"
-                    gain_loss_pct_str = "N/A"
-
+                    gain_loss_pct_str = "N/A (zero cost)"
             elif api_error_for_stock:
                 market_value = "N/A (API Error)"
                 gain_loss = "N/A"
                 gain_loss_pct_str = "N/A"
                 current_price = "N/A (API Error)"
+            else:
+                 gain_loss = "N/A (Rate Missing)"
+                 gain_loss_pct_str = "N/A"
 
             individual_holdings_details.append({
                 "symbol": symbol,
@@ -1121,18 +1141,25 @@ class Stocks(commands.Cog):
 
         embed.color = summary_color
 
-        # Display totals in USD
         overall_market_value_display = f"${overall_market_value_usd:,.2f}"
         cost_basis_display = f"${overall_cost_basis_usd:,.2f}"
         overall_gain_loss_display = f"${overall_gain_loss_usd:,.2f}"
         
+        summary_val = (
+            f"**Total Market Value:** {overall_market_value_display}\n"
+            f"**Total Cost Basis:** {cost_basis_display}\n"
+            f"**Total Gain/Loss:** {overall_gain_loss_display} ({overall_gain_loss_pct_str})"
+        )
+        
+        if fully_calculated_count < len(portfolio_stocks):
+             summary_val += f"\n\n⚠️ *Totals include only {fully_calculated_count}/{len(portfolio_stocks)} holdings due to missing data (price/currency).*"
+
+        if warnings:
+            summary_val += "\n" + "\n".join(list(set(warnings))[:3])
+
         embed.add_field(
             name="📈 Overall Portfolio Summary (USD)",
-            value=(
-                f"**Total Market Value:** {overall_market_value_display}\n"
-                f"**Total Cost Basis:** {cost_basis_display}\n"
-                f"**Total Gain/Loss:** {overall_gain_loss_display} ({overall_gain_loss_pct_str})"
-            ),
+            value=summary_val,
             inline=False
         )
 
@@ -1160,7 +1187,6 @@ class Stocks(commands.Cog):
                 market_value_display = str(item['market_value'])
             
             if isinstance(item['gain_loss'], (int, float)):
-                # Use market symbol for gain/loss
                 if item.get('market_value_currency') == 'PLN':
                     gain_loss_display_val = f"{item['gain_loss']:+,.2f} {market_symbol}"
                 else:
