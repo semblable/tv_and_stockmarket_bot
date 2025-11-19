@@ -21,7 +21,7 @@ sys.path.insert(0, package_path)
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(1, project_root)
 
-from tv_and_stockmarket_bot.data_manager import DataManager
+from data_manager import DataManager
 
 @pytest.fixture
 def db_manager():
@@ -33,7 +33,7 @@ def db_manager():
     temp_db_path = os.path.join(temp_dir, "test_bot.db")
     
     # Patch SQLITE_DB_PATH in data_manager module to use our temp path
-    with patch('tv_and_stockmarket_bot.data_manager.SQLITE_DB_PATH', temp_db_path):
+    with patch('data_manager.SQLITE_DB_PATH', temp_db_path):
         manager = DataManager()
         # Initialize DB (creates tables) - assuming DataManager does this in __init__ or has a method
         # Looking at DataManager code, it calls _initialize_db() in __init__
