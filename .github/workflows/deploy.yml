@@ -31,9 +31,11 @@ jobs:
 
       - name: Run Tests
         run: |
+          # Debug: List files
+          ls -R
           # Add the bot directory to PYTHONPATH so tests can find the modules
           export PYTHONPATH=$PYTHONPATH:$(pwd)
-          pytest tests/
+          pytest -vv tests/
 
   build-and-push:
     needs: test

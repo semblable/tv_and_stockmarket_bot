@@ -13,13 +13,11 @@ os.environ["OPENWEATHERMAP_API_KEY"] = "dummy_owm_key"
 os.environ["GEMINI_API_KEY"] = "dummy_gemini_key"
 os.environ["SQLITE_DB_PATH"] = "bot_data.db" # Optional
 
-# Add the package directory to sys.path
-package_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'tv_and_stockmarket_bot'))
-sys.path.insert(0, package_path)
-
-# Also add the root project path
+# Add the root project path to sys.path
+# Assuming tests/conftest.py is one level deep from root
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(1, project_root)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from data_manager import DataManager
 
