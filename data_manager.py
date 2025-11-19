@@ -252,6 +252,16 @@ class DataManager:
         """
         create_table_if_not_exists("user_preferences", create_user_preferences_sql)
 
+        # Currency Rates
+        create_currency_rates_sql = """
+        CREATE TABLE IF NOT EXISTS currency_rates (
+            currency_pair TEXT PRIMARY KEY,
+            rate REAL NOT NULL,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        create_table_if_not_exists("currency_rates", create_currency_rates_sql)
+
         # Sent Episode Notifications
         create_sent_episode_notifications_sql = """
         CREATE TABLE IF NOT EXISTS sent_episode_notifications (
@@ -731,6 +741,26 @@ class DataManager:
                 logger.error(f"Error decoding preference value for user {user_id_str}, key {key} in get_all_preferences: {e}")
                 user_prefs[key] = None # Or some default error indicator
         return user_prefs
+
+    # --- Currency Rates ---
+    def update_currency_rate(self, currency_pair: str, rate: float) -> bool:
+        query = """
+        INSERT INTO currency_rates (currency_pair, rate, last_updated)
+        VALUES (:pair, :rate, CURRENT_TIMESTAMP)
+        ON CONFLICT(currency_pair) DO UPDATE SET
+            rate = :rate,
+            last_updated = CURRENT_TIMESTAMP
+        """
+        params = {"pair": currency_pair, "rate": rate}
+        return self._execute_query(query, params, commit=True)
+
+    def get_currency_rate(self, currency_pair: str) -> Optional[float]:
+        query = "SELECT rate FROM currency_rates WHERE currency_pair = :pair"
+        params = {"pair": currency_pair}
+        result = self._execute_query(query, params, fetch_one=True)
+        if result:
+            return float(result['rate'])
+        return None
 
     def close(self) -> None:
         """Closes the database connection."""

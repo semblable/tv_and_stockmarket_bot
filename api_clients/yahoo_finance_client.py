@@ -59,6 +59,10 @@ def normalize_symbol(symbol: str) -> str:
     if symbol in POLISH_STOCK_SYMBOLS:
         return f"{symbol}.WA"
     
+    # Strip .US suffix for US stocks (Yahoo Finance defaults to US)
+    if symbol.endswith('.US'):
+        return symbol[:-3]
+    
     # Return as-is for US stocks and others
     return symbol
 

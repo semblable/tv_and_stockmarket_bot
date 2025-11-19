@@ -316,6 +316,49 @@ def get_intraday_time_series(symbol: str, interval: str = '60min', outputsize: s
         print(f"Error decoding JSON response for intraday time series from Alpha Vantage for '{symbol}' (interval: {interval}). Response: {response.text if 'response' in locals() else 'N/A'}")
         return None
 
+def get_currency_exchange_rate(from_currency: str, to_currency: str):
+    """
+    Fetches the real-time exchange rate for a currency pair.
+
+    Args:
+        from_currency: The currency to convert from (e.g., "USD", "EUR").
+        to_currency: The currency to convert to (e.g., "PLN", "USD").
+
+    Returns:
+        A float representing the exchange rate if successful.
+        Returns None on error.
+    """
+    if not ALPHA_VANTAGE_API_KEY:
+        print("CRITICAL: ALPHA_VANTAGE_API_KEY not configured.")
+        return None
+
+    params = {
+        "function": "CURRENCY_EXCHANGE_RATE",
+        "from_currency": from_currency,
+        "to_currency": to_currency,
+        "apikey": ALPHA_VANTAGE_API_KEY
+    }
+
+    try:
+        response = requests.get(BASE_URL, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        if "Realtime Currency Exchange Rate" in data:
+            rate_str = data["Realtime Currency Exchange Rate"].get("5. Exchange Rate")
+            if rate_str:
+                return float(rate_str)
+        elif "Error Message" in data:
+            print(f"Alpha Vantage API Error for exchange rate {from_currency}/{to_currency}: {data['Error Message']}")
+        elif "Note" in data:
+            print(f"Alpha Vantage API Note for exchange rate {from_currency}/{to_currency}: {data['Note']}")
+        
+        return None
+
+    except Exception as e:
+        print(f"Error fetching exchange rate for {from_currency}/{to_currency}: {e}")
+        return None
+
 def search_symbol(keywords: str):
     """
     Searches for stock symbols matching the keywords.

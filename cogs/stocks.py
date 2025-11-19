@@ -4,6 +4,7 @@ import discord
 import asyncio
 import logging
 import typing
+from datetime import datetime
 from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
 from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series
@@ -20,6 +21,7 @@ if not logging.getLogger().hasHandlers():
 
 # Decreased interval since Yahoo Finance has higher limits/no strict free tier limits like AV
 STOCK_CHECK_INTERVAL_MINUTES = 15 
+CURRENCY_UPDATE_INTERVAL_HOURS = 6
 
 SUPPORTED_TIMESPAN = {
     "1D": {"func": yahoo_finance_client.get_intraday_time_series, "params": {'interval': '15m', 'outputsize': 'compact'}, "label": "1 Day", "is_intraday": True},
@@ -64,10 +66,9 @@ class MyStocksPaginatorView(BasePaginatorView):
 
         description_lines = []
         
-        # Rate limiting removed for Yahoo Finance
-        
         for i, stock_item in enumerate(page_subs):
             symbol_upper = stock_item['symbol'].upper()
+            normalized_symbol = yahoo_finance_client.normalize_symbol(symbol_upper)
             stock_display = f"**{symbol_upper}**:"
             
             quantity = stock_item.get('quantity')
@@ -75,8 +76,8 @@ class MyStocksPaginatorView(BasePaginatorView):
             if quantity is not None and purchase_price is not None:
                 stock_display += f" ({quantity} @ ${purchase_price:,.2f})"
             
-            # Primary: Yahoo Finance
-            price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol_upper)
+            # Primary: Yahoo Finance (using normalized symbol)
+            price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, normalized_symbol)
             
             # Fallback: Alpha Vantage (only if YF fails completely)
             if not price_data:
@@ -88,10 +89,19 @@ class MyStocksPaginatorView(BasePaginatorView):
                 elif "05. price" in price_data:
                     raw_price = price_data.get('05. price')
                     raw_change = price_data.get('09. change', '0')
+                    currency = price_data.get('currency', 'USD')
+                    
+                    currency_symbols = {'USD': '$', 'PLN': 'zł', 'EUR': '€', 'GBP': '£', 'CAD': 'C$', 'JPY': '¥'}
+                    currency_symbol = currency_symbols.get(currency, currency)
+
                     try:
                         price_val = float(raw_price)
-                        price_display_val = f"${price_val:,.2f}"
+                        if currency == 'PLN':
+                            price_display_val = f"{price_val:,.2f} {currency_symbol}"
+                        else:
+                            price_display_val = f"{currency_symbol}{price_val:,.2f}"
                     except (ValueError, TypeError): price_display_val = "N/A"
+                    
                     try:
                         change_val_float = float(raw_change)
                         trend_emoji = "📈 " if change_val_float > 0 else "📉 " if change_val_float < 0 else ""
@@ -133,6 +143,7 @@ class Stocks(commands.Cog):
         self.unique_stocks_queue: typing.List[str] = []
         self.current_queue_index = 0
         self.check_stock_alerts.start()
+        self.check_currency_rates.start()
         self.popular_stocks = [
             # Tech Giants
             "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "META", "TSLA", "AVGO", "CSCO", "ADBE", "CRM", "AMD", "NFLX", "INTC", "ORCL", "IBM", "QCOM", "TXN", "NOW", "INTU", "AMAT", "UBER", "SONY", "SAP", "ASML", "TSM",
@@ -167,11 +178,12 @@ class Stocks(commands.Cog):
 
     def cog_unload(self) -> None:
         self.check_stock_alerts.cancel()
+        self.check_currency_rates.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
         print("Stocks Cog is ready.")
-        logger.info("Stocks Cog is ready and stock alert monitoring task is running.")
+        logger.info("Stocks Cog is ready. Monitoring tasks (Alerts, Currency) started.")
 
     async def stock_symbol_autocomplete(self, interaction: discord.Interaction, current: str) -> typing.List[discord.app_commands.Choice[str]]:
         """
@@ -205,6 +217,65 @@ class Stocks(commands.Cog):
         
         filtered = [s for s in tracked_symbols if current_upper in s]
         return [discord.app_commands.Choice(name=s, value=s) for s in filtered[:25]]
+
+    @tasks.loop(hours=CURRENCY_UPDATE_INTERVAL_HOURS)
+    async def check_currency_rates(self) -> None:
+        """
+        Periodic task to update currency exchange rates.
+        """
+        if not self.db_manager:
+            logger.error("StocksCog: DataManager not available. Cannot update currency rates.")
+            return
+
+        logger.info("Updating currency exchange rates...")
+        
+        # Pairs to update: Convert TO USD
+        pairs_to_update = [
+            ("EUR", "USD"),
+            ("GBP", "USD"),
+            ("PLN", "USD"),
+            ("CAD", "USD"),
+            ("JPY", "USD")
+        ]
+        
+        for from_curr, to_curr in pairs_to_update:
+            rate = await self.bot.loop.run_in_executor(
+                None, 
+                alpha_vantage_client.get_currency_exchange_rate, 
+                from_curr, 
+                to_curr
+            )
+            
+            if rate:
+                pair_key = f"{from_curr}/{to_curr}"
+                await self.bot.loop.run_in_executor(
+                    None,
+                    self.db_manager.update_currency_rate,
+                    pair_key,
+                    rate
+                )
+                logger.info(f"Updated rate for {pair_key}: {rate}")
+                
+                # Also store inverse rate for convenience (e.g. USD/PLN)
+                if rate > 0:
+                    inverse_pair_key = f"{to_curr}/{from_curr}"
+                    inverse_rate = 1.0 / rate
+                    await self.bot.loop.run_in_executor(
+                        None,
+                        self.db_manager.update_currency_rate,
+                        inverse_pair_key,
+                        inverse_rate
+                    )
+            else:
+                logger.warning(f"Failed to fetch rate for {from_curr}/{to_curr}")
+            
+            # Respect API limits (5 calls/min usually for free tier, though currency might be different)
+            await asyncio.sleep(15)
+
+    @check_currency_rates.before_loop
+    async def before_check_currency_rates(self) -> None:
+        await self.bot.wait_until_ready()
+        logger.info("Currency update task waiting for bot to be ready...")
 
     @tasks.loop(minutes=STOCK_CHECK_INTERVAL_MINUTES)
     async def check_stock_alerts(self) -> None:
@@ -249,11 +320,11 @@ class Stocks(commands.Cog):
 
         self.current_queue_index = (self.current_queue_index + 1) % len(self.unique_stocks_queue)
         
-        # Small delay only to be nice to local loop, not for API limits
         await asyncio.sleep(0.5)
         
         # Primary: Yahoo Finance
-        price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol_to_check)
+        normalized_symbol = yahoo_finance_client.normalize_symbol(symbol_to_check)
+        price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, normalized_symbol)
         
         if not price_data:
              # Fallback
@@ -266,12 +337,10 @@ class Stocks(commands.Cog):
 
         try:
             current_price = float(price_data['05. price'])
-            # For alerts, previous close is optional if we only check price threshold, but needed for DPC
             previous_close_price = 0
             if '08. previous close' in price_data:
                  previous_close_price = float(price_data['08. previous close'])
             elif '05. price' in price_data and '09. change' in price_data:
-                 # Infer previous close
                  change = float(price_data['09. change'])
                  previous_close_price = current_price - change
             
@@ -349,12 +418,15 @@ class Stocks(commands.Cog):
         logger.info(f"[STOCK_PRICE_DEBUG] Command received for symbol: {symbol}")
         upper_symbol = symbol.upper()
         
-        logger.info(f"[STOCK_PRICE_DEBUG] Attempting Yahoo Finance for {upper_symbol}")
-        price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, upper_symbol)
+        # Normalize for Yahoo Finance (e.g., remove .US)
+        normalized_symbol = yahoo_finance_client.normalize_symbol(upper_symbol)
+
+        logger.info(f"[STOCK_PRICE_DEBUG] Attempting Yahoo Finance for {upper_symbol} (Normalized: {normalized_symbol})")
+        price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, normalized_symbol)
         data_source = "Yahoo Finance"
 
         if not price_data or "error" in price_data:
-             logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance failed for {upper_symbol}. Falling back to Alpha Vantage.")
+             logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance failed for {normalized_symbol}. Falling back to Alpha Vantage with original symbol {upper_symbol}.")
              av_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, upper_symbol)
              if av_data and "error" not in av_data:
                  price_data = av_data
@@ -907,8 +979,10 @@ class Stocks(commands.Cog):
         embed = discord.Embed(title="💰 Your Stock Portfolio", color=discord.Color.gold())
         embed.set_footer(text="Data provided by Yahoo Finance. Prices may be delayed.")
 
-        overall_cost_basis = 0
-        overall_market_value = 0
+        # We will normalize all totals to USD for consistency in the summary
+        overall_cost_basis_usd = 0.0
+        overall_market_value_usd = 0.0
+        
         individual_holdings_details = []
 
         status_msg = None
@@ -920,8 +994,11 @@ class Stocks(commands.Cog):
             quantity = stock_data["quantity"]
             purchase_price = stock_data["purchase_price"]
 
+            # Normalize symbol for Yahoo
+            normalized_symbol = yahoo_finance_client.normalize_symbol(symbol)
+
             # Primary: Yahoo Finance
-            current_price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol)
+            current_price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, normalized_symbol)
             data_source = "Yahoo Finance"
 
             if not current_price_data or "error" in current_price_data:
@@ -955,22 +1032,59 @@ class Stocks(commands.Cog):
             gain_loss = 0.0
             gain_loss_pct_str = "N/A"
 
-            overall_cost_basis += cost_basis
+            # Calculate USD equivalent for totals
+            def get_rate_to_usd(currency):
+                if currency == 'USD': return 1.0
+                rate = self.db_manager.get_currency_rate(f"{currency}/USD")
+                if rate: return rate
+                # Try inverse
+                rate_inv = self.db_manager.get_currency_rate(f"USD/{currency}")
+                if rate_inv: return 1.0 / rate_inv
+                return None
+
+            cost_basis_usd_rate = get_rate_to_usd(cost_basis_currency)
+            market_value_usd_rate = get_rate_to_usd(market_value_currency)
+
+            if cost_basis_usd_rate:
+                overall_cost_basis_usd += cost_basis * cost_basis_usd_rate
+            else:
+                # Fallback: if rate unknown, assume 1:1 or just log warning (affects total accuracy)
+                logger.warning(f"Missing exchange rate for {cost_basis_currency} -> USD")
+                overall_cost_basis_usd += cost_basis # Potentially wrong, but keeps sum going
 
             if current_price is not None and not api_error_for_stock:
                 market_value = quantity * current_price
-                overall_market_value += market_value
                 
+                if market_value_usd_rate:
+                    overall_market_value_usd += market_value * market_value_usd_rate
+                else:
+                    logger.warning(f"Missing exchange rate for {market_value_currency} -> USD")
+                    overall_market_value_usd += market_value
+
+                # Individual Gain/Loss
+                # We need to convert cost basis to market value currency for comparison
+                # OR convert both to USD. Let's convert cost basis to market value currency.
+                
+                # rate: cost_currency -> market_currency
+                # We can derive from USD rates: (cost -> USD) * (USD -> market) = (cost -> USD) / (market -> USD)
+                conversion_rate = None
                 if cost_basis_currency == market_value_currency:
-                    gain_loss = market_value - cost_basis
-                    if cost_basis != 0:
-                        gain_loss_pct = (gain_loss / cost_basis) * 100
+                    conversion_rate = 1.0
+                elif cost_basis_usd_rate and market_value_usd_rate:
+                     conversion_rate = cost_basis_usd_rate / market_value_usd_rate
+                
+                if conversion_rate:
+                    converted_cost_basis = cost_basis * conversion_rate
+                    gain_loss = market_value - converted_cost_basis
+                    if converted_cost_basis != 0:
+                        gain_loss_pct = (gain_loss / converted_cost_basis) * 100
                         gain_loss_pct_str = f"{gain_loss_pct:+.2f}%"
                     else:
                         gain_loss_pct_str = "N/A (zero cost basis)"
                 else:
-                    gain_loss = "N/A (Mismatch)"
+                    gain_loss = "N/A (No Rate)"
                     gain_loss_pct_str = "N/A"
+
             elif api_error_for_stock:
                 market_value = "N/A (API Error)"
                 gain_loss = "N/A"
@@ -993,54 +1107,29 @@ class Stocks(commands.Cog):
                 "data_source": data_source
             })
 
-        overall_gain_loss = overall_market_value - overall_cost_basis
+        overall_gain_loss_usd = overall_market_value_usd - overall_cost_basis_usd
         overall_gain_loss_pct_str = "N/A"
-        if overall_cost_basis != 0 and isinstance(overall_market_value, (int, float)) and overall_market_value > 0 :
-            overall_gain_loss_pct = (overall_gain_loss / overall_cost_basis) * 100
+        if overall_cost_basis_usd != 0:
+            overall_gain_loss_pct = (overall_gain_loss_usd / overall_cost_basis_usd) * 100
             overall_gain_loss_pct_str = f"{overall_gain_loss_pct:+.2f}%"
-        elif overall_cost_basis == 0 and isinstance(overall_market_value, (int, float)) and overall_market_value > 0:
+        elif overall_cost_basis_usd == 0 and overall_market_value_usd > 0:
              overall_gain_loss_pct_str = "+∞%"
-        elif overall_cost_basis == 0 and isinstance(overall_market_value, (int, float)) and overall_market_value == 0:
-             overall_gain_loss_pct_str = "N/A"
 
         summary_color = discord.Color.default()
-        if isinstance(overall_gain_loss, (int,float)):
-            if overall_gain_loss > 0: summary_color = discord.Color.green()
-            elif overall_gain_loss < 0: summary_color = discord.Color.red()
+        if overall_gain_loss_usd > 0: summary_color = discord.Color.green()
+        elif overall_gain_loss_usd < 0: summary_color = discord.Color.red()
 
         embed.color = summary_color
 
-        currencies_used = set()
-        for item in individual_holdings_details:
-             if isinstance(item.get('current_price'), (int, float)):
-                 currencies_used.add(item.get('market_value_currency'))
-             currencies_used.add(item.get('cost_basis_currency'))
+        # Display totals in USD
+        overall_market_value_display = f"${overall_market_value_usd:,.2f}"
+        cost_basis_display = f"${overall_cost_basis_usd:,.2f}"
+        overall_gain_loss_display = f"${overall_gain_loss_usd:,.2f}"
         
-        mixed_currencies = len(currencies_used) > 1
-        
-        if mixed_currencies:
-            overall_market_value_display = f"${overall_market_value:,.2f}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
-            overall_gain_loss_display = f"${overall_gain_loss:,.2f}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
-            currency_note = " (mixed currencies, totals approximate)"
-            cost_basis_display = f"${overall_cost_basis:,.2f}"
-        else:
-            single_currency = list(currencies_used)[0] if currencies_used else 'USD'
-            summary_currency_symbol = currency_symbols.get(single_currency, single_currency)
-            
-            if single_currency == 'PLN':
-                overall_market_value_display = f"{overall_market_value:,.2f} {summary_currency_symbol}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
-                overall_gain_loss_display = f"{overall_gain_loss:,.2f} {summary_currency_symbol}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
-                cost_basis_display = f"{overall_cost_basis:,.2f} {summary_currency_symbol}"
-            else:
-                overall_market_value_display = f"{summary_currency_symbol}{overall_market_value:,.2f}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
-                overall_gain_loss_display = f"{summary_currency_symbol}{overall_gain_loss:,.2f}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
-                cost_basis_display = f"{summary_currency_symbol}{overall_cost_basis:,.2f}"
-            currency_note = ""
-
         embed.add_field(
-            name="📈 Overall Portfolio Summary",
+            name="📈 Overall Portfolio Summary (USD)",
             value=(
-                f"**Total Market Value:** {overall_market_value_display}{currency_note}\n"
+                f"**Total Market Value:** {overall_market_value_display}\n"
                 f"**Total Cost Basis:** {cost_basis_display}\n"
                 f"**Total Gain/Loss:** {overall_gain_loss_display} ({overall_gain_loss_pct_str})"
             ),
@@ -1320,4 +1409,4 @@ class Stocks(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Stocks(bot, db_manager=bot.db_manager))
-    print("Stocks Cog has been loaded and stock alert task initialized.")
+    print("Stocks Cog has been loaded and monitoring tasks initialized.")
