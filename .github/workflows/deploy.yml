@@ -25,14 +25,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Install app dependencies
-          if [ -f tv_and_stockmarket_bot/requirements.txt ]; then pip install -r tv_and_stockmarket_bot/requirements.txt; fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           # Install testing dependencies
           pip install pytest pytest-asyncio
 
       - name: Run Tests
         run: |
           # Add the bot directory to PYTHONPATH so tests can find the modules
-          export PYTHONPATH=$PYTHONPATH:$(pwd)/tv_and_stockmarket_bot
+          export PYTHONPATH=$PYTHONPATH:$(pwd)
           pytest tests/
 
   build-and-push:
@@ -70,8 +70,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           # Context must be the subdirectory where Dockerfile and code exist
-          context: tv_and_stockmarket_bot
-          file: tv_and_stockmarket_bot/bot.Dockerfile
+          context: .
+          file: bot.Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
