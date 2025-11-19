@@ -3,11 +3,13 @@ FROM python:3.12-slim
 
 # Install curl for debugging network issues
 # Also install ca-certificates for HTTPS connections and dnsutils for DNS debugging
+# Added build-essential for compiling python packages if wheels are missing
 RUN apt-get update && apt-get install -y \
     curl \
     ca-certificates \
     dnsutils \
     iputils-ping \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory in the container
@@ -17,7 +19,9 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Upgrade pip first to ensure we can install newer wheels
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy the environment file
 COPY .env .

@@ -21,8 +21,15 @@ class MyCustomHelpCommand(commands.HelpCommand):
 
     async def send_bot_help(self, mapping):
         ctx = self.context
-        embed = discord.Embed(title="Bot Commands", color=self.color)
+        embed = discord.Embed(title="📺🤖 TV & Stock Market Bot Help", color=self.color)
         description_parts = [
+            "**Welcome!** I can help you track your favorite TV shows and monitor the stock market.",
+            "",
+            "**✨ New Features:**",
+            "• **Global Stocks:** Now supporting Global 100 companies and top 20 Polish stocks (WIG20)!",
+            "• **Robust Charts:** Improved stock charts using Yahoo Finance data.",
+            "• **Smart Notifications:** TV show alerts now persist across restarts.",
+            "",
             f"Use `{ctx.prefix}help <command_name>` for more details on a specific command.",
             f"Use `{ctx.prefix}help <CategoryName>` for more details on a category of commands."
         ]

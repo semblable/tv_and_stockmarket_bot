@@ -335,12 +335,13 @@ class Stocks(commands.Cog):
         await self.bot.wait_until_ready()
         logger.info("Stock alert monitoring task is waiting for bot to be ready...")
 
-    @commands.hybrid_command(name="stock_price", description="Get the current price of a stock.")
+    @commands.hybrid_command(name="stock_price", description="Get current price (Supports US, Global 100, Polish WIG20).")
     @discord.app_commands.describe(symbol="The stock symbol (e.g., AAPL, MSFT, LPP.WA)")
     @discord.app_commands.autocomplete(symbol=stock_symbol_autocomplete)
     async def stock_price(self, ctx: commands.Context, *, symbol: str) -> None:
         """
         Fetches and displays the current price and other relevant information for a given stock symbol.
+        Supports US stocks, Global 100 companies, and top Polish stocks (add .WA for Polish).
         Using Yahoo Finance as primary source for better limits and data.
         """
         await ctx.defer(ephemeral=True)
@@ -462,9 +463,9 @@ class Stocks(commands.Cog):
                 await ctx.send(f"Error fetching data for {symbol.upper()}. Unexpected data format received from the provider.")
 
 
-    @commands.hybrid_command(name="track_stock", description="Track a stock symbol, optionally with quantity and purchase price.")
+    @commands.hybrid_command(name="track_stock", description="Track a stock (US, Global, Polish) for portfolio/alerts.")
     @discord.app_commands.describe(
-        symbol="The stock symbol to track (e.g., AAPL, MSFT)",
+        symbol="The stock symbol to track (e.g., AAPL, MSFT, LPP.WA)",
         quantity="Number of shares (e.g., 10.5)",
         purchase_price="Price per share at purchase (e.g., 150.75)"
     )
@@ -472,6 +473,7 @@ class Stocks(commands.Cog):
     async def track_stock(self, ctx: commands.Context, symbol: str, quantity: typing.Optional[float] = None, purchase_price: typing.Optional[float] = None) -> None:
         """
         Allows a user to start tracking a stock symbol.
+        Supports US, Global, and Polish stocks.
         Optionally, users can provide quantity and purchase price for portfolio tracking.
         """
         upper_symbol = symbol.upper()
@@ -694,7 +696,7 @@ class Stocks(commands.Cog):
         else:
             await ctx.send(f"No changes made to alerts for {symbol_upper}. Values might be the same as current, or a database error occurred.", ephemeral=True)
 
-    @commands.hybrid_command(name="stock_chart", description="Generate a price chart for a stock symbol over a timespan.")
+    @commands.hybrid_command(name="stock_chart", description="Generate a price chart (1D, 5D, 1M, 1Y, etc).")
     @discord.app_commands.describe(
         symbol="The stock symbol (e.g., AAPL, MSFT)",
         timespan=f"The timespan for the chart. Default '1M'. Options: {', '.join(SUPPORTED_TIMESPAN.keys())}"
@@ -703,6 +705,7 @@ class Stocks(commands.Cog):
     async def stock_chart(self, ctx: commands.Context, symbol: str, timespan: str = "1M") -> None:
         """
         Generates and displays a stock price chart for a given symbol and timespan.
+        Uses Yahoo Finance for reliable historical data.
         """
         normalized_symbol = yahoo_finance_client.normalize_symbol(symbol.upper())
         symbol_for_display = symbol.upper()
