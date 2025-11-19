@@ -115,7 +115,7 @@ class GeminiAI(commands.Cog):
     def _delete_session(self, ctx: commands.Context):
         self.sessions.pop(self._make_key(ctx), None)
 
-    # Basic history trimming – keep last 20 exchanges (40 messages)
+    # Basic history trimming – keep last 20 exchanges (40 messages) 
     def _prune_history(self, chat_session, max_exchanges: int = 20):
         try:
             history = chat_session.history  # list[dict]
