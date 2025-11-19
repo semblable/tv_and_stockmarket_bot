@@ -467,17 +467,19 @@ class Stocks(commands.Cog):
     @discord.app_commands.describe(
         symbol="The stock symbol to track (e.g., AAPL, MSFT, LPP.WA)",
         quantity="Number of shares (e.g., 10.5)",
-        purchase_price="Price per share at purchase (e.g., 150.75)"
+        purchase_price="Price per share at purchase (e.g., 150.75)",
+        currency="Currency code (e.g., USD, PLN, EUR, GBP)"
     )
     @discord.app_commands.autocomplete(symbol=stock_symbol_autocomplete)
-    async def track_stock(self, ctx: commands.Context, symbol: str, quantity: typing.Optional[float] = None, purchase_price: typing.Optional[float] = None) -> None:
+    async def track_stock(self, ctx: commands.Context, symbol: str, quantity: typing.Optional[float] = None, purchase_price: typing.Optional[float] = None, currency: typing.Optional[str] = None) -> None:
         """
         Allows a user to start tracking a stock symbol.
         Supports US, Global, and Polish stocks.
-        Optionally, users can provide quantity and purchase price for portfolio tracking.
+        Optionally, users can provide quantity, purchase price, and currency for portfolio tracking.
         """
         upper_symbol = symbol.upper()
         user_id = ctx.author.id
+        upper_currency = currency.upper() if currency else None
 
         if (quantity is not None and purchase_price is None) or \
            (quantity is None and purchase_price is not None):
@@ -493,11 +495,12 @@ class Stocks(commands.Cog):
 
         await ctx.defer(ephemeral=True)
         
-        success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tracked_stock, user_id, upper_symbol, quantity, purchase_price)
+        success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tracked_stock, user_id, upper_symbol, quantity, purchase_price, upper_currency)
 
         if success:
             if quantity is not None and purchase_price is not None:
-                await ctx.send(f"Successfully tracking {upper_symbol} with {quantity} shares at ${purchase_price:,.2f} each. Portfolio data updated.", ephemeral=True)
+                currency_msg = f" {upper_currency}" if upper_currency else ""
+                await ctx.send(f"Successfully tracking {upper_symbol} with {quantity} shares at ${purchase_price:,.2f}{currency_msg} each. Portfolio data updated.", ephemeral=True)
             else:
                 tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
                 existing_stock_info = next((s for s in tracked_stocks_list if s['symbol'] == upper_symbol), None)
@@ -926,21 +929,26 @@ class Stocks(commands.Cog):
                 data_source = "Alpha Vantage"
 
             current_price = None
-            currency = "USD"
+            api_currency = "USD"
             api_error_for_stock = False
 
             if current_price_data and "05. price" in current_price_data:
                 try:
                     current_price = float(current_price_data["05. price"])
-                    currency = current_price_data.get('currency', 'USD')
+                    api_currency = current_price_data.get('currency', 'USD')
                 except (ValueError, TypeError):
                     logger.error(f"Portfolio: Could not parse current price for {symbol}. Data: {current_price_data}")
                     api_error_for_stock = True
             else:
                 api_error_for_stock = True
 
+            user_currency = stock_data.get("currency")
+            cost_basis_currency = user_currency if user_currency else api_currency
+            market_value_currency = api_currency
+
             currency_symbols = {'USD': '$', 'PLN': 'zł', 'EUR': '€', 'GBP': '£', 'CAD': 'C$', 'JPY': '¥'}
-            currency_symbol = currency_symbols.get(currency, currency)
+            cost_basis_symbol = currency_symbols.get(cost_basis_currency, cost_basis_currency)
+            market_value_symbol = currency_symbols.get(market_value_currency, market_value_currency)
 
             cost_basis = quantity * purchase_price
             market_value = 0.0
@@ -952,12 +960,17 @@ class Stocks(commands.Cog):
             if current_price is not None and not api_error_for_stock:
                 market_value = quantity * current_price
                 overall_market_value += market_value
-                gain_loss = market_value - cost_basis
-                if cost_basis != 0:
-                    gain_loss_pct = (gain_loss / cost_basis) * 100
-                    gain_loss_pct_str = f"{gain_loss_pct:+.2f}%"
+                
+                if cost_basis_currency == market_value_currency:
+                    gain_loss = market_value - cost_basis
+                    if cost_basis != 0:
+                        gain_loss_pct = (gain_loss / cost_basis) * 100
+                        gain_loss_pct_str = f"{gain_loss_pct:+.2f}%"
+                    else:
+                        gain_loss_pct_str = "N/A (zero cost basis)"
                 else:
-                    gain_loss_pct_str = "N/A (zero cost basis)"
+                    gain_loss = "N/A (Mismatch)"
+                    gain_loss_pct_str = "N/A"
             elif api_error_for_stock:
                 market_value = "N/A (API Error)"
                 gain_loss = "N/A"
@@ -969,8 +982,10 @@ class Stocks(commands.Cog):
                 "quantity": quantity,
                 "purchase_price": purchase_price,
                 "current_price": current_price,
-                "currency": currency,
-                "currency_symbol": currency_symbol,
+                "cost_basis_currency": cost_basis_currency,
+                "market_value_currency": market_value_currency,
+                "cost_basis_symbol": cost_basis_symbol,
+                "market_value_symbol": market_value_symbol,
                 "cost_basis": cost_basis,
                 "market_value": market_value,
                 "gain_loss": gain_loss,
@@ -995,7 +1010,12 @@ class Stocks(commands.Cog):
 
         embed.color = summary_color
 
-        currencies_used = set(item.get('currency', 'USD') for item in individual_holdings_details if isinstance(item.get('current_price'), (int, float)))
+        currencies_used = set()
+        for item in individual_holdings_details:
+             if isinstance(item.get('current_price'), (int, float)):
+                 currencies_used.add(item.get('market_value_currency'))
+             currencies_used.add(item.get('cost_basis_currency'))
+        
         mixed_currencies = len(currencies_used) > 1
         
         if mixed_currencies:
@@ -1031,38 +1051,40 @@ class Stocks(commands.Cog):
         for item in individual_holdings_details:
             symbol_header = f"--- **{item['symbol']}** ---"
             
-            currency_symbol = item.get('currency_symbol', '$')
+            cost_symbol = item.get('cost_basis_symbol', '$')
+            market_symbol = item.get('market_value_symbol', '$')
             
             if isinstance(item['current_price'], (int, float)):
-                if item.get('currency') == 'PLN':
-                    current_price_display = f"{item['current_price']:,.2f} {currency_symbol}"
+                if item.get('market_value_currency') == 'PLN':
+                    current_price_display = f"{item['current_price']:,.2f} {market_symbol}"
                 else:
-                    current_price_display = f"{currency_symbol}{item['current_price']:,.2f}"
+                    current_price_display = f"{market_symbol}{item['current_price']:,.2f}"
             else:
                 current_price_display = str(item['current_price'])
             
             if isinstance(item['market_value'], (int, float)):
-                if item.get('currency') == 'PLN':
-                    market_value_display = f"{item['market_value']:,.2f} {currency_symbol}"
+                if item.get('market_value_currency') == 'PLN':
+                    market_value_display = f"{item['market_value']:,.2f} {market_symbol}"
                 else:
-                    market_value_display = f"{currency_symbol}{item['market_value']:,.2f}"
+                    market_value_display = f"{market_symbol}{item['market_value']:,.2f}"
             else:
                 market_value_display = str(item['market_value'])
             
             if isinstance(item['gain_loss'], (int, float)):
-                if item.get('currency') == 'PLN':
-                    gain_loss_display_val = f"{item['gain_loss']:+,.2f} {currency_symbol}"
+                # Use market symbol for gain/loss
+                if item.get('market_value_currency') == 'PLN':
+                    gain_loss_display_val = f"{item['gain_loss']:+,.2f} {market_symbol}"
                 else:
-                    gain_loss_display_val = f"{currency_symbol}{item['gain_loss']:+,.2f}"
+                    gain_loss_display_val = f"{market_symbol}{item['gain_loss']:+,.2f}"
             else:
                 gain_loss_display_val = str(item['gain_loss'])
 
-            if item.get('currency') == 'PLN':
-                purchase_price_display = f"{item['purchase_price']:,.2f} {currency_symbol}"
-                cost_basis_display = f"{item['cost_basis']:,.2f} {currency_symbol}"
+            if item.get('cost_basis_currency') == 'PLN':
+                purchase_price_display = f"{item['purchase_price']:,.2f} {cost_symbol}"
+                cost_basis_display = f"{item['cost_basis']:,.2f} {cost_symbol}"
             else:
-                purchase_price_display = f"{currency_symbol}{item['purchase_price']:,.2f}"
-                cost_basis_display = f"{currency_symbol}{item['cost_basis']:,.2f}"
+                purchase_price_display = f"{cost_symbol}{item['purchase_price']:,.2f}"
+                cost_basis_display = f"{cost_symbol}{item['cost_basis']:,.2f}"
 
             gain_loss_emoji = ""
             if isinstance(item['gain_loss'], (int, float)):

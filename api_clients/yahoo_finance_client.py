@@ -35,6 +35,7 @@ EUROPEAN_EXCHANGES = {
     '.AS': 'Euronext Amsterdam',
     '.MI': 'Borsa Italiana Milan',
     '.F': 'Frankfurt Stock Exchange',
+    '.DE': 'Xetra (Germany)',
     '.WA': 'Warsaw Stock Exchange'
 }
 

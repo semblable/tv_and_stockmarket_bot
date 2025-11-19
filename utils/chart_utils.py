@@ -27,7 +27,18 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
         print(f"Error generating chart for {symbol}: No data points provided.")
         return None
 
-    labels = [dp[0] for dp in data_points]
+    labels = []
+    for dp in data_points:
+        # Try to simplify labels to "MM-DD" or "HH:MM" to save space/readability
+        # Assuming dp[0] is "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS"
+        ts = dp[0]
+        if len(ts) > 10: # Has time
+            labels.append(ts[11:16]) # HH:MM
+        elif len(ts) >= 10: # YYYY-MM-DD
+            labels.append(ts[5:]) # MM-DD
+        else:
+            labels.append(ts)
+
     closing_prices = [dp[1] for dp in data_points]
 
     # Determine x-axis tick rotation and steps
@@ -127,15 +138,27 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
         # For direct URL, we need to be careful about length.
         # Remove fill and complex options for fallback
         chart_config["data"]["datasets"][0]["fill"] = False
+        chart_config["options"]["plugins"]["title"]["display"] = False # Save space
         del chart_config["options"]["scales"]["y"]["ticks"]["callback"] # remove function for GET
         
-        encoded_config = urllib.parse.quote(json.dumps(chart_config))
+        # Use compact separators to save space
+        encoded_config = urllib.parse.quote(json.dumps(chart_config, separators=(',', ':')))
         url = f"{QUICKCHART_BASE_URL}?c={encoded_config}&w={chart_width}&h={chart_height}&bkg=white"
         
         if len(url) < 2048:
             return url
         else:
             print(f"Chart URL too long ({len(url)} chars).")
+            # Last ditch: decimate data
+            if len(labels) > 100:
+                step = len(labels) // 50
+                chart_config["data"]["labels"] = labels[::step]
+                chart_config["data"]["datasets"][0]["data"] = closing_prices[::step]
+                encoded_config_short = urllib.parse.quote(json.dumps(chart_config, separators=(',', ':')))
+                url_short = f"{QUICKCHART_BASE_URL}?c={encoded_config_short}&w={chart_width}&h={chart_height}&bkg=white"
+                if len(url_short) < 2048:
+                    return url_short
+            
             return None
 
     except Exception as e:

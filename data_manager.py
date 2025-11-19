@@ -153,6 +153,35 @@ class DataManager:
             logger.info("Table 'tv_subscriptions' does not exist. It will be created by 'CREATE TABLE IF NOT EXISTS'.")
         # --- End of tv_subscriptions schema check ---
 
+        # --- Start of tracked_stocks schema check ---
+        # Check if tracked_stocks table exists and if it has the currency column
+        ts_table_exists = False
+        conn = self._get_connection()
+        check_cursor = None
+        try:
+            check_cursor = conn.cursor()
+            check_cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tracked_stocks';")
+            if check_cursor.fetchone():
+                ts_table_exists = True
+        except sqlite3.Error as e:
+            logger.error(f"Error checking if 'tracked_stocks' table exists: {e}")
+        finally:
+            if check_cursor:
+                check_cursor.close()
+
+        if ts_table_exists:
+            columns_info = self._execute_query("PRAGMA table_info(tracked_stocks);", fetch_all=True)
+            if columns_info and isinstance(columns_info, list):
+                column_names = [col_info['name'] for col_info in columns_info if isinstance(col_info, dict) and 'name' in col_info]
+                if "currency" not in column_names:
+                    logger.info("Column 'currency' not found in 'tracked_stocks'. Adding it.")
+                    try:
+                        self._execute_query("ALTER TABLE tracked_stocks ADD COLUMN currency TEXT;", commit=True)
+                        logger.info("Column 'currency' added successfully to tracked_stocks.")
+                    except sqlite3.Error as e:
+                        logger.error(f"Failed to add column 'currency' to tracked_stocks: {e}")
+        # --- End of tracked_stocks schema check ---
+
         # TV Show Subscriptions
         # Storing last_notified_episode_details as TEXT for JSON
         create_tv_subscriptions_sql = """
@@ -188,6 +217,7 @@ class DataManager:
             symbol TEXT NOT NULL,
             quantity REAL, -- Use REAL for floating point numbers
             purchase_price REAL, -- Use REAL for floating point numbers
+            currency TEXT,
             PRIMARY KEY (user_id, symbol)
         )
         """
@@ -429,17 +459,19 @@ class DataManager:
         return self._execute_query(query, params, commit=True)
 
     # --- Tracked Stocks ---
-    def add_tracked_stock(self, user_id: int, stock_symbol: str, quantity: Optional[float] = None, purchase_price: Optional[float] = None) -> bool:
+    def add_tracked_stock(self, user_id: int, stock_symbol: str, quantity: Optional[float] = None, purchase_price: Optional[float] = None, currency: Optional[str] = None) -> bool:
         user_id_str = str(user_id)
         symbol_upper = stock_symbol.upper()
+        currency_upper = currency.upper() if currency else None
         
         # MERGE can handle insert or update logic
         query = """
-        INSERT INTO tracked_stocks (user_id, symbol, quantity, purchase_price)
-        VALUES (:user_id, :symbol, :quantity, :purchase_price)
+        INSERT INTO tracked_stocks (user_id, symbol, quantity, purchase_price, currency)
+        VALUES (:user_id, :symbol, :quantity, :purchase_price, :currency)
         ON CONFLICT(user_id, symbol) DO UPDATE SET
             quantity = COALESCE(:quantity, quantity), -- Use COALESCE for NVL equivalent
-            purchase_price = COALESCE(:purchase_price, purchase_price)
+            purchase_price = COALESCE(:purchase_price, purchase_price),
+            currency = COALESCE(:currency, currency)
         """
         # Note: SQLite's ON CONFLICT DO UPDATE SET updates ALL listed fields if there's a conflict.
         # The COALESCE function handles the case where the input parameter is None,
@@ -449,7 +481,7 @@ class DataManager:
         # it doesn't overwrite the existing value. If the stock is new, it inserts
         # with NULLs if quantity/price are None, which is acceptable.
 
-        params = {"user_id": user_id_str, "symbol": symbol_upper, "quantity": quantity, "purchase_price": purchase_price}
+        params = {"user_id": user_id_str, "symbol": symbol_upper, "quantity": quantity, "purchase_price": purchase_price, "currency": currency_upper}
         
         # The original Oracle logic had a check for new stocks requiring both quantity and price.
         # The SQLite UPSERT doesn't enforce this at the DB level.
@@ -462,7 +494,7 @@ class DataManager:
 
     def get_user_tracked_stocks_for_symbol(self, user_id_str: str, symbol_upper: str) -> Optional[Dict[str, Any]]:
         # Helper for add_tracked_stock
-        query = "SELECT symbol, quantity, purchase_price FROM tracked_stocks WHERE user_id = :user_id AND symbol = :symbol"
+        query = "SELECT symbol, quantity, purchase_price, currency FROM tracked_stocks WHERE user_id = :user_id AND symbol = :symbol"
         return self._execute_query(query, {"user_id": user_id_str, "symbol": symbol_upper}, fetch_one=True)
 
 
@@ -475,7 +507,7 @@ class DataManager:
 
     def get_user_tracked_stocks(self, user_id: int) -> List[Dict[str, Any]]:
         user_id_str = str(user_id)
-        query = "SELECT symbol, quantity, purchase_price FROM tracked_stocks WHERE user_id = :user_id"
+        query = "SELECT symbol, quantity, purchase_price, currency FROM tracked_stocks WHERE user_id = :user_id"
         params = {"user_id": user_id_str}
         stocks = self._execute_query(query, params, fetch_all=True)
         # Ensure numeric types are float if not None
