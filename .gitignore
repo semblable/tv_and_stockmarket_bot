@@ -254,10 +254,6 @@ public
 tmp/
 temp/
 
-# Test files
-test_*.py
-*_test.py
-test_old_behavior.py
 
 # Backup files
 *.bak
