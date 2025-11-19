@@ -52,7 +52,10 @@ def get_show_details(tvmaze_id: int, embed: str | list[str] = None) -> dict:
     url = f"{BASE_URL}/shows/{tvmaze_id}"
     params = {}
     if embed:
-        params['embed'] = embed
+        if isinstance(embed, list):
+            params['embed[]'] = embed
+        else:
+            params['embed'] = embed
 
     try:
         response = requests.get(url, params=params, timeout=10)
@@ -107,5 +110,20 @@ def get_episode_by_id(episode_id: int) -> dict:
         return response.json()
     except requests.exceptions.RequestException as e:
         logger.error(f"Error fetching TVMaze episode details for ID {episode_id}: {e}")
+        raise TVMazeConnectionError(f"Connection error: {e}") from e
+
+def get_show_episodes(tvmaze_id: int) -> list[dict]:
+    """
+    Gets a list of all episodes for a specific TV show by its TVMaze ID.
+    """
+    url = f"{BASE_URL}/shows/{tvmaze_id}/episodes"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching TVMaze episodes for show ID {tvmaze_id}: {e}")
         raise TVMazeConnectionError(f"Connection error: {e}") from e
 

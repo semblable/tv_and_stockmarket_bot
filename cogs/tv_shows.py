@@ -950,9 +950,38 @@ class TVShows(commands.Cog):
                             actual_show_name_display = tvmaze_details.get('name', show_name_stored)
                             
                             embedded = tvmaze_details.get('_embedded', {})
+                            check_full_list = False
+                            
+                            # Check if we should fetch the full episode list
+                            # We fetch if there's indication of recent activity to catch batch releases
+                            if 'nextepisode' in embedded and embedded['nextepisode']:
+                                n_air_date = embedded['nextepisode'].get('airdate')
+                                if n_air_date:
+                                    try:
+                                        n_date = datetime.strptime(n_air_date, '%Y-%m-%d').date()
+                                        if n_date == today:
+                                            check_full_list = True
+                                    except ValueError: pass
+
+                            if not check_full_list and 'previousepisode' in embedded and embedded['previousepisode']:
+                                p_air_date = embedded['previousepisode'].get('airdate')
+                                if p_air_date:
+                                    try:
+                                        p_date = datetime.strptime(p_air_date, '%Y-%m-%d').date()
+                                        if (today - timedelta(days=7)) <= p_date <= today:
+                                            check_full_list = True
+                                    except ValueError: pass
+                            
                             potential_episodes = []
-                            if 'nextepisode' in embedded: potential_episodes.append(embedded['nextepisode'])
-                            if 'previousepisode' in embedded: potential_episodes.append(embedded['previousepisode'])
+                            if check_full_list:
+                                # Fetch all episodes to catch batch drops
+                                all_episodes = await self.bot.loop.run_in_executor(None, tvmaze_client.get_show_episodes, tvmaze_id)
+                                if all_episodes:
+                                    potential_episodes = all_episodes
+                            else:
+                                # Just check the embedded ones if no recent activity detected (saves API calls)
+                                if 'nextepisode' in embedded: potential_episodes.append(embedded['nextepisode'])
+                                if 'previousepisode' in embedded: potential_episodes.append(embedded['previousepisode'])
                             
                             for ep in potential_episodes:
                                 if not ep: continue
@@ -1043,63 +1072,91 @@ class TVShows(commands.Cog):
                     except Exception as e:
                         logger.error(f"TMDB fallback check failed for show {show_id}: {e}")
 
-                for episode_to_notify in episodes_to_notify:
-                    ep_id = episode_to_notify.get('id')
-                    ep_name = episode_to_notify.get('name', 'Episode Name TBA')
-                    ep_season = episode_to_notify.get('season_number', 'S?')
-                    ep_num = episode_to_notify.get('episode_number', 'E?')
-                    ep_air_date_str = episode_to_notify.get('air_date', 'Unknown Air Date')
-                    source = episode_to_notify.get('source', 'Unknown')
+                if episodes_to_notify:
+                    episodes_to_notify.sort(key=lambda x: (x.get('season_number', 0), x.get('episode_number', 0)))
                     
-                    try:
-                        date_obj = datetime.strptime(ep_air_date_str, '%Y-%m-%d').date()
-                        ep_air_date_str = date_obj.strftime('%Y-%m-%d')
-                    except ValueError:
-                        pass
-
-                    embed = discord.Embed(
-                        title=f"📺 New Episode Alert: {actual_show_name_display}",
-                        description=f"**S{ep_season:02d}E{ep_num:02d} - \"{ep_name}\"** has aired!",
-                        color=discord.Color.green()
-                    )
-                    embed.add_field(name="Air Date", value=ep_air_date_str, inline=True)
+                    embed = None
+                    is_multi = len(episodes_to_notify) > 1
                     
-                    vote_avg = episode_to_notify.get('vote_average')
-                    if vote_avg and isinstance(vote_avg, (int, float)) and vote_avg > 0:
-                        embed.add_field(name="Episode Rating", value=f"{vote_avg:.1f}/10", inline=True)
-                    
-                    # Try to get poster from sub, or TMDB details if available
+                    # Common data (poster, show name)
                     poster_url = None
                     if tmdb_show_details and tmdb_show_details.get('poster_path'):
                         poster_url = tmdb_client.get_poster_url(tmdb_show_details['poster_path'], size="w185")
                     elif poster_path:
                         poster_url = tmdb_client.get_poster_url(poster_path, size="w185")
-                    
-                    if poster_url:
-                        embed.set_thumbnail(url=poster_url)
-                    
-                    embed.set_footer(text=f"Data provided by {source}")
 
+                    if is_multi:
+                        embed = discord.Embed(
+                            title=f"📺 New Episodes Alert: {actual_show_name_display}",
+                            description=f"**{len(episodes_to_notify)} new episodes** have aired!",
+                            color=discord.Color.green()
+                        )
+                        if poster_url:
+                            embed.set_thumbnail(url=poster_url)
+                        
+                        for ep in episodes_to_notify[:25]: # Limit to 25 fields to avoid error
+                            ep_name = ep.get('name', 'TBA')
+                            ep_season = ep.get('season_number', 0)
+                            ep_num = ep.get('episode_number', 0)
+                            ep_air_date = ep.get('air_date', 'Unknown')
+                            
+                            embed.add_field(
+                                name=f"S{ep_season:02d}E{ep_num:02d}",
+                                value=f"\"{ep_name}\"\n{ep_air_date}",
+                                inline=True
+                            )
+                        
+                        if len(episodes_to_notify) > 25:
+                            embed.set_footer(text=f"And {len(episodes_to_notify) - 25} more... | Data provided by {episodes_to_notify[0].get('source', 'Unknown')}")
+                        else:
+                            embed.set_footer(text=f"Data provided by {episodes_to_notify[0].get('source', 'Unknown')}")
+                            
+                    else:
+                        # Single episode logic (preserved style)
+                        ep = episodes_to_notify[0]
+                        ep_name = ep.get('name', 'Episode Name TBA')
+                        ep_season = ep.get('season_number', 'S?')
+                        ep_num = ep.get('episode_number', 'E?')
+                        ep_air_date_str = ep.get('air_date', 'Unknown Air Date')
+                        source = ep.get('source', 'Unknown')
+                        
+                        embed = discord.Embed(
+                            title=f"📺 New Episode Alert: {actual_show_name_display}",
+                            description=f"**S{ep_season:02d}E{ep_num:02d} - \"{ep_name}\"** has aired!",
+                            color=discord.Color.green()
+                        )
+                        embed.add_field(name="Air Date", value=ep_air_date_str, inline=True)
+                        
+                        vote_avg = ep.get('vote_average')
+                        if vote_avg and isinstance(vote_avg, (int, float)) and vote_avg > 0:
+                            embed.add_field(name="Episode Rating", value=f"{vote_avg:.1f}/10", inline=True)
+                        
+                        if poster_url:
+                            embed.set_thumbnail(url=poster_url)
+                        
+                        embed.set_footer(text=f"Data provided by {source}")
+
+                    # Send Notification
                     try:
                         await user.send(embed=embed)
-                        logger.info(f"Sent new episode notification for '{actual_show_name_display}' S{ep_season}E{ep_num} to user {user_id} using {source}.")
+                        logger.info(f"Sent notification for {len(episodes_to_notify)} episodes of '{actual_show_name_display}' to user {user_id}.")
                         
-                        # Log the notification using the ID we used (TVMaze or TMDB)
-                        # This ID is unique within the context of the source, but we only store one ID in DB column.
-                        # Ideally we should track source, but schema is fixed for now.
-                        # Collisions are unlikely between TMDB and TVMaze episode IDs, but possible.
-                        # Given the request "replace tmdb", using TVMaze ID is the way to go.
-                        
-                        await self.bot.loop.run_in_executor(
-                            None, 
-                            self.db_manager.add_sent_episode_notification,
-                            user_id,
-                            show_id, # Still using TMDB show ID as key
-                            ep_id,
-                            ep_season if isinstance(ep_season, int) else 0,
-                            ep_num if isinstance(ep_num, int) else 0
-                        )
-                        logger.info(f"Logged sent notification for User {user_id}, Show {show_id}, Episode {ep_id}.")
+                        # Log all sent notifications
+                        for ep in episodes_to_notify:
+                            ep_id = ep.get('id')
+                            ep_season = ep.get('season_number', 0)
+                            ep_num = ep.get('episode_number', 0)
+                            
+                            await self.bot.loop.run_in_executor(
+                                None, 
+                                self.db_manager.add_sent_episode_notification,
+                                user_id,
+                                show_id, 
+                                ep_id,
+                                ep_season if isinstance(ep_season, int) else 0,
+                                ep_num if isinstance(ep_num, int) else 0
+                            )
+                        logger.info(f"Logged {len(episodes_to_notify)} sent notifications for User {user_id}, Show {show_id}.")
 
                     except discord.Forbidden:
                         print(f"Could not send DM to user {user_id} (DM disabled or bot blocked).")
