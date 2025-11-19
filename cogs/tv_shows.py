@@ -232,6 +232,33 @@ class TVShows(commands.Cog):
         
         return choices[:25]
 
+    async def _resolve_tvmaze_id(self, show_id: int, show_name: str) -> typing.Optional[int]:
+        """Helper to resolve TVMaze ID from TMDB ID."""
+        tvmaze_id = None
+        try:
+            # Fetch external IDs from TMDB
+            details = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id, "external_ids")
+            if details and 'external_ids' in details:
+                ext_ids = details['external_ids']
+                imdb_id = ext_ids.get('imdb_id')
+                thetvdb_id = ext_ids.get('tvdb_id')
+                
+                tvmaze_show = None
+                if imdb_id:
+                    tvmaze_show = await self.bot.loop.run_in_executor(None, tvmaze_client.lookup_show_by_imdb, imdb_id)
+                
+                if not tvmaze_show and thetvdb_id:
+                    tvmaze_show = await self.bot.loop.run_in_executor(None, tvmaze_client.lookup_show_by_thetvdb, thetvdb_id)
+                
+                if tvmaze_show:
+                    tvmaze_id = tvmaze_show.get('id')
+                    logger.info(f"Resolved TVMaze ID {tvmaze_id} for show '{show_name}' (TMDB ID: {show_id})")
+                else:
+                    logger.warning(f"Could not resolve TVMaze ID for show '{show_name}' (TMDB ID: {show_id})")
+        except Exception as e:
+             logger.error(f"Error resolving TVMaze ID during subscription for {show_name}: {e}")
+        return tvmaze_id
+
     @commands.hybrid_command(name="tv_subscribe", description="Subscribe to TV show notifications.")
     @discord.app_commands.describe(show_name="The name of the TV show to subscribe to")
     @discord.app_commands.autocomplete(show_name=tv_autocomplete)
@@ -309,29 +336,7 @@ class TVShows(commands.Cog):
         poster_path = selected_show.get('poster_path', "")
 
         # Resolve TVMaze ID
-        tvmaze_id = None
-        try:
-            # Fetch external IDs from TMDB
-            details = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id, "external_ids")
-            if details and 'external_ids' in details:
-                ext_ids = details['external_ids']
-                imdb_id = ext_ids.get('imdb_id')
-                thetvdb_id = ext_ids.get('tvdb_id')
-                
-                tvmaze_show = None
-                if imdb_id:
-                    tvmaze_show = await self.bot.loop.run_in_executor(None, tvmaze_client.lookup_show_by_imdb, imdb_id)
-                
-                if not tvmaze_show and thetvdb_id:
-                    tvmaze_show = await self.bot.loop.run_in_executor(None, tvmaze_client.lookup_show_by_thetvdb, thetvdb_id)
-                
-                if tvmaze_show:
-                    tvmaze_id = tvmaze_show.get('id')
-                    logger.info(f"Resolved TVMaze ID {tvmaze_id} for show '{actual_show_name}' (TMDB ID: {show_id})")
-                else:
-                    logger.warning(f"Could not resolve TVMaze ID for show '{actual_show_name}' (TMDB ID: {show_id})")
-        except Exception as e:
-             logger.error(f"Error resolving TVMaze ID during subscription for {actual_show_name}: {e}")
+        tvmaze_id = await self._resolve_tvmaze_id(show_id, actual_show_name)
 
         try:
             success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tv_show_subscription, ctx.author.id, show_id, actual_show_name, poster_path, tvmaze_id)
@@ -342,6 +347,132 @@ class TVShows(commands.Cog):
         except Exception as e:
             logger.exception(f"Error adding TV subscription for user {ctx.author.id} to show {show_id} ('{actual_show_name}')")
             await self.send_response(ctx, f"Sorry, there was an error subscribing to '{actual_show_name}'. Please try again later.", ephemeral=True)
+
+    @commands.hybrid_command(name="tv_batch_subscribe", description="Subscribe to multiple TV shows (comma-separated).")
+    @discord.app_commands.describe(show_names="Comma-separated list of TV shows")
+    async def tv_batch_subscribe(self, ctx: commands.Context, *, show_names: str):
+        """
+        Subscribe to multiple TV shows at once.
+        Example: /tv_batch_subscribe show_names: Show A, Show B, Show C
+        """
+        await ctx.defer(ephemeral=True)
+        
+        shows = [s.strip() for s in show_names.split(',') if s.strip()]
+        
+        if not shows:
+            await self.send_response(ctx, "Please provide a list of show names separated by commas.", ephemeral=True)
+            return
+
+        if len(shows) > 20:
+             await self.send_response(ctx, "Please limit batch subscriptions to 20 shows at a time to avoid rate limits.", ephemeral=True)
+             return
+
+        results = {
+            "success": [],
+            "failed": [],
+            "ambiguous": [],
+            "already_subscribed": []
+        }
+        
+        # Fetch existing subscriptions to check for duplicates
+        try:
+            existing_subs = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tv_subscriptions, ctx.author.id)
+            existing_tmdb_ids = {sub['show_tmdb_id'] for sub in existing_subs}
+        except Exception as e:
+            logger.error(f"Error fetching existing subscriptions for batch subscribe: {e}")
+            existing_tmdb_ids = set()
+
+        for show_name in shows:
+            try:
+                search_results = await self.bot.loop.run_in_executor(None, tmdb_client.search_tv_shows, show_name)
+            except Exception as e:
+                logger.error(f"Batch subscribe search error for '{show_name}': {e}")
+                results["failed"].append(f"{show_name} (Search Error)")
+                continue
+
+            if not search_results:
+                results["failed"].append(f"{show_name} (Not Found)")
+                continue
+
+            selected_show = None
+            
+            # Auto-selection logic
+            if len(search_results) == 1:
+                selected_show = search_results[0]
+            else:
+                # Try to find exact match
+                exact_matches = [s for s in search_results if s.get('name', '').lower() == show_name.lower()]
+                if len(exact_matches) == 1:
+                    selected_show = exact_matches[0]
+                elif len(exact_matches) > 1:
+                     # Multiple exact matches? Pick the most popular/first one?
+                     # Usually the first one returned by TMDB is the most relevant.
+                     selected_show = exact_matches[0] 
+                else:
+                     # No exact match. Check if the first result is a "very good" match?
+                     # For batch, we might be strict to avoid wrong subscriptions.
+                     # But users might expect loose matching.
+                     # Let's go with: if strict match fails, mark as ambiguous.
+                     results["ambiguous"].append(show_name)
+                     continue
+            
+            if not selected_show:
+                 results["failed"].append(show_name) # Should not happen given logic above
+                 continue
+
+            show_id = selected_show['id']
+            actual_show_name = selected_show['name']
+            
+            if show_id in existing_tmdb_ids:
+                results["already_subscribed"].append(actual_show_name)
+                continue
+
+            poster_path = selected_show.get('poster_path', "")
+            
+            tvmaze_id = await self._resolve_tvmaze_id(show_id, actual_show_name)
+
+            try:
+                success = await self.bot.loop.run_in_executor(
+                    None, 
+                    self.db_manager.add_tv_show_subscription, 
+                    ctx.author.id, 
+                    show_id, 
+                    actual_show_name, 
+                    poster_path, 
+                    tvmaze_id
+                )
+                if success:
+                    results["success"].append(actual_show_name)
+                    existing_tmdb_ids.add(show_id) # Add to avoid dupes within the same batch if user listed twice
+                else:
+                    results["failed"].append(f"{actual_show_name} (Database Error)")
+            except Exception as e:
+                logger.exception(f"Error batch subscribing to {actual_show_name}")
+                results["failed"].append(f"{actual_show_name} (Unknown Error)")
+            
+            # Small delay to be nice to APIs
+            await asyncio.sleep(0.2)
+
+        # Build Report
+        embed = discord.Embed(title="Batch Subscription Results", color=discord.Color.blue())
+        
+        if results["success"]:
+            success_str = "\n".join([f"✅ {name}" for name in results["success"]])
+            embed.add_field(name="Subscribed", value=success_str[:1024], inline=False)
+        
+        if results["already_subscribed"]:
+            already_str = "\n".join([f"ℹ️ {name}" for name in results["already_subscribed"]])
+            embed.add_field(name="Already Subscribed", value=already_str[:1024], inline=False)
+
+        if results["ambiguous"]:
+            ambiguous_str = "\n".join([f"❓ {name}" for name in results["ambiguous"]])
+            embed.add_field(name="Ambiguous (Please subscribe individually)", value=ambiguous_str[:1024], inline=False)
+            
+        if results["failed"]:
+            failed_str = "\n".join([f"❌ {name}" for name in results["failed"]])
+            embed.add_field(name="Failed", value=failed_str[:1024], inline=False)
+
+        await self.send_response(ctx, embed=embed, ephemeral=True)
 
     @commands.hybrid_command(name="tv_unsubscribe", description="Unsubscribe from TV show notifications.")
     @discord.app_commands.describe(show_name="The name of the TV show to unsubscribe from")
