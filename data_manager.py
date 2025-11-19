@@ -46,7 +46,6 @@ class DataManager:
         """SQLite connections don't need explicit release like connection pools."""
         pass # No-op for SQLite single connection
 
-
     def _execute_query(self, query: str, params: Optional[Dict[str, Any]] = None, fetch_one: bool = False, fetch_all: bool = False, commit: bool = False) -> Any:
         """Executes a given SQL query."""
         conn = self._get_connection()
@@ -362,6 +361,27 @@ class DataManager:
         }
         result = self._execute_query(query, params, fetch_one=True)
         return bool(result) # True if a record is found, False otherwise
+
+    def has_user_been_notified_for_episode_by_number(self, user_id: int, show_tmdb_id: int, season_number: int, episode_number: int) -> bool:
+        """
+        Checks if a user has been notified for an episode based on season/episode number.
+        Useful for robustness across different data providers (TMDB vs TVMaze) where IDs might differ.
+        """
+        user_id_str = str(user_id)
+        query = """
+        SELECT 1 FROM sent_episode_notifications
+        WHERE user_id = :user_id AND show_tmdb_id = :show_tmdb_id 
+          AND season_number = :season_number AND episode_number = :episode_number
+        LIMIT 1
+        """
+        params = {
+            "user_id": user_id_str,
+            "show_tmdb_id": show_tmdb_id,
+            "season_number": season_number,
+            "episode_number": episode_number
+        }
+        result = self._execute_query(query, params, fetch_one=True)
+        return bool(result)
 
     # --- Movie Subscriptions ---
     def add_movie_subscription(self, user_id: int, tmdb_id: int, title: str, poster_path: str) -> bool:

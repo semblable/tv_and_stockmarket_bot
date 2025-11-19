@@ -11,6 +11,7 @@ from api_clients import yahoo_finance_client
 from utils.chart_utils import generate_stock_chart_url
 from data_manager import DataManager
 from utils.paginator import BasePaginatorView
+import random
 
 # Configure logging for this cog
 logger = logging.getLogger(__name__)
@@ -132,6 +133,23 @@ class Stocks(commands.Cog):
         self.unique_stocks_queue: typing.List[str] = []
         self.current_queue_index = 0
         self.check_stock_alerts.start()
+        self.popular_stocks = [
+            # Tech Giants
+            "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "META", "TSLA", "AVGO", "CSCO", "ADBE", "CRM", "AMD", "NFLX", "INTC", "ORCL", "IBM", "QCOM", "TXN", "NOW", "INTU", "AMAT", "UBER", "SONY", "SAP", "ASML", "TSM",
+            # Financials
+            "JPM", "V", "MA", "BAC", "WFC", "MS", "GS", "AXP", "C", "BLK", "SPGI", "CB", "MMC", "PGR", "SCHW", "RY", "TD", "HDB", "HSBC", "UBS",
+            # Healthcare
+            "LLY", "UNH", "JNJ", "MRK", "ABBV", "TMO", "NVO", "AZN", "NVS", "PFE", "AMGN", "ISRG", "SYK", "ELV", "GILD", "VRTX", "REGN", "ZTS", "BMY", "DHR",
+            # Consumer
+            "AMZN", "TSLA", "WMT", "PG", "HD", "COST", "KO", "PEP", "MCD", "DIS", "NKE", "PM", "LOW", "SBUX", "TGT", "TJX", "UL", "BUD", "TM", "HMC",
+            # Industrial/Energy/Materials
+            "XOM", "CVX", "SHEL", "TTE", "BP", "CAT", "GE", "HON", "UNP", "UPS", "DE", "LMT", "RTX", "BA", "MMM", "LIN", "RIO", "BHP",
+            # ETFs
+            "SPY", "VOO", "QQQ", "IWM", "DIA", "VTI", "VEA", "VWO", "GLD", "SLV",
+            # Polish Top 20 (WIG20 approx)
+            "PKN.WA", "PKO.WA", "PEO.WA", "DNP.WA", "LPP.WA", "PZU.WA", "ALE.WA", "KGH.WA", "SPL.WA", "CDR.WA", 
+            "CPS.WA", "PGE.WA", "KRU.WA", "ALR.WA", "OPL.WA", "JSW.WA", "ACP.WA", "KTY.WA", "MBK.WA", "LWB.WA"
+        ]
 
     async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False, view=None):
         kwargs = {}
@@ -163,9 +181,7 @@ class Stocks(commands.Cog):
         tracked_stocks = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
         tracked_symbols = [s['symbol'] for s in tracked_stocks]
         
-        popular_stocks = ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA", "NVDA", "META", "NFLX", "AMD", "INTC", "SPY", "VOO", "QQQ", "IWM", "DIA", "BRK.B", "JPM", "JNJ", "V", "PG", "UNH", "HD", "MA", "DIS", "PYPL"]
-        
-        all_candidates = sorted(list(set(tracked_symbols + popular_stocks)))
+        all_candidates = sorted(list(set(tracked_symbols + self.popular_stocks)))
         current_upper = current.upper()
         
         if not current:
