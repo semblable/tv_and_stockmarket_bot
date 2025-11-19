@@ -90,7 +90,13 @@ def get_quote(symbol: str) -> Optional[Dict[str, Any]]:
             "07. latest trading day": _dt.fromtimestamp(q.get("regularMarketTime", 0)).strftime('%Y-%m-%d'),
             "source": "yahoo_finance",
             "currency": q.get('currency', ''),
-            "exchange": q.get('fullExchangeName', '')
+            "exchange": q.get('fullExchangeName', ''),
+            "longName": q.get('longName', ''),
+            "marketCap": q.get('marketCap', 'N/A'),
+            "trailingPE": q.get('trailingPE', 'N/A'),
+            "epsTrailingTwelveMonths": q.get('epsTrailingTwelveMonths', 'N/A'),
+            "fiftyTwoWeekHigh": q.get('fiftyTwoWeekHigh', 'N/A'),
+            "fiftyTwoWeekLow": q.get('fiftyTwoWeekLow', 'N/A')
         }
     except Exception as e:
         logger.error(f"Error in direct get_quote for {normalized}: {e}")
@@ -142,12 +148,58 @@ def get_stock_price(symbol: str) -> Optional[Dict[str, Any]]:
             '07. latest trading day': hist.index[-1].strftime('%Y-%m-%d'),
             'source': 'yahoo_finance',
             'currency': info.get('currency', 'USD'),
-            'exchange': info.get('exchange', 'Unknown')
+            'exchange': info.get('exchange', 'Unknown'),
+            'longName': info.get('longName', ''),
+            'marketCap': info.get('marketCap', 'N/A'),
+            'trailingPE': info.get('trailingPE', 'N/A'),
+            'epsTrailingTwelveMonths': info.get('trailingEps', 'N/A'),
+            'fiftyTwoWeekHigh': info.get('fiftyTwoWeekHigh', 'N/A'),
+            'fiftyTwoWeekLow': info.get('fiftyTwoWeekLow', 'N/A')
         }
         return result
         
     except Exception as e:
         logger.error(f"Error fetching Yahoo Finance data via fallback for {symbol}: {e}")
+        return None
+
+def get_stock_news(symbol: str, limit: int = 5) -> Optional[List[Dict[str, Any]]]:
+    """
+    Fetch recent news for a stock symbol using yfinance.
+    
+    Args:
+        symbol: Stock symbol
+        limit: Max number of articles
+        
+    Returns:
+        List of news dictionaries or None
+    """
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+        ticker = yf.Ticker(normalized_symbol)
+        news = ticker.news
+        
+        if not news:
+            return None
+            
+        processed_news = []
+        for item in news[:limit]:
+            # Convert timestamp to readable string
+            published = item.get('providerPublishTime', 0)
+            published_str = datetime.fromtimestamp(published).strftime('%Y-%m-%d %H:%M:%S') if published else "N/A"
+            
+            processed_news.append({
+                "title": item.get("title", "No Title"),
+                "url": item.get("link", ""),
+                "source": item.get("publisher", "Yahoo Finance"),
+                "time_published": published_str,
+                "summary": "No summary available" if not item.get("relatedTickers") else f"Related: {', '.join(item.get('relatedTickers'))}", # Yahoo news structure varies, relatedTickers is a proxy for relevance context
+                "sentiment_label": "N/A", # Yahoo doesn't provide sentiment label
+                "sentiment_score": "N/A"
+            })
+            
+        return processed_news
+    except Exception as e:
+        logger.error(f"Error fetching news for {symbol}: {e}")
         return None
 
 def get_daily_time_series(symbol: str, outputsize: str = "compact") -> Optional[List[Tuple[str, float]]]:
@@ -256,39 +308,54 @@ def get_intraday_time_series(symbol: str, interval: str = "60min", outputsize: s
 
 def search_symbol(query: str) -> List[Dict[str, str]]:
     """
-    Search for stock symbols (basic implementation).
-    Yahoo Finance doesn't have a direct search API, so this is a placeholder.
-    
-    Args:
-        query: Search query
-    
-    Returns:
-        List of symbol matches (limited functionality)
+    Search for stock symbols using Yahoo Finance Auto-Complete API.
     """
-    # This is a basic implementation - Yahoo Finance doesn't have a search API
-    # In a full implementation, you might use other services or symbol lists
-    
-    query_upper = query.upper()
-    
-    # Check if it's a known Polish stock
-    if query_upper in POLISH_STOCK_SYMBOLS:
-        return [{
-            'symbol': f"{query_upper}.WA",
-            'name': f"{query_upper} (Warsaw Stock Exchange)",
-            'type': 'stock',
-            'exchange': 'Warsaw Stock Exchange'
-        }]
-    
-    # Basic symbol validation
-    if len(query_upper) <= 5 and query_upper.isalpha():
-        return [{
-            'symbol': query_upper,
-            'name': f"{query_upper} (Symbol)",
-            'type': 'stock',
-            'exchange': 'Unknown'
-        }]
-    
-    return []
+    url = "https://query2.finance.yahoo.com/v1/finance/search"
+    params = {
+        "q": query,
+        "lang": "en-US",
+        "region": "US",
+        "quotesCount": 10,
+        "newsCount": 0,
+        "enableFuzzyQuery": False,
+        "quotesQueryId": "tss_match_phrase_query"
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        quotes = data.get("quotes", [])
+        results = []
+        
+        for q in quotes:
+            if not q.get('symbol'): continue
+            results.append({
+                'symbol': q['symbol'],
+                'name': q.get('longname') or q.get('shortname') or q['symbol'],
+                'type': q.get('quoteType', 'Unknown'),
+                'exchange': q.get('exchange', 'Unknown'),
+                'region': 'US' # Defaulting to US as region isn't always explicit in this specific endpoint, but mostly accurate
+            })
+            
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error searching symbol {query}: {e}")
+        # Fallback to basic check if API fails
+        if query.upper() in POLISH_STOCK_SYMBOLS:
+             return [{
+                'symbol': f"{query.upper()}.WA",
+                'name': f"{query.upper()} (Warsaw Stock Exchange)",
+                'type': 'stock',
+                'exchange': 'Warsaw Stock Exchange',
+                 'region': 'PL'
+            }]
+        return []
 
 def test_connection() -> bool:
     """
@@ -326,16 +393,15 @@ if __name__ == "__main__":
     if aapl_data:
         print(f"AAPL Price: {aapl_data['05. price']} {aapl_data.get('currency', 'USD')}")
         print(f"Change: {aapl_data['09. change']} ({aapl_data['10. change percent']})")
+        print(f"Market Cap: {aapl_data.get('marketCap')}")
+        print(f"PE Ratio: {aapl_data.get('trailingPE')}")
     else:
         print("Failed to fetch AAPL data")
-    
-    # Test time series
-    print("\n3. Testing time series for LPP:")
-    lpp_series = get_daily_time_series("LPP", "compact")
-    if lpp_series:
-        print(f"Fetched {len(lpp_series)} data points")
-        print(f"Latest: {lpp_series[-1]}")
-    else:
-        print("Failed to fetch LPP time series")
-    
-    print("\nYahoo Finance client test completed!") 
+        
+    # Test Search
+    print("\n3. Testing Search for 'Microsoft':")
+    results = search_symbol("Microsoft")
+    for r in results[:3]:
+        print(f"Found: {r['symbol']} - {r['name']}")
+
+    print("\nYahoo Finance client test completed!")

@@ -17,17 +17,18 @@ logger = logging.getLogger(__name__)
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-STOCK_CHECK_INTERVAL_MINUTES = 60
+# Decreased interval since Yahoo Finance has higher limits/no strict free tier limits like AV
+STOCK_CHECK_INTERVAL_MINUTES = 15 
 
 SUPPORTED_TIMESPAN = {
-    "1D": {"func": get_intraday_time_series, "params": {'interval': '15min', 'outputsize': 'compact'}, "label": "1 Day", "is_intraday": True},
-    "5D": {"func": get_intraday_time_series, "params": {'interval': '60min', 'outputsize': 'compact'}, "label": "5 Days", "is_intraday": True},
-    "1M": {"func": get_daily_time_series, "params": {'outputsize': 'compact'}, "label": "1 Month", "is_intraday": False},
-    "3M": {"func": get_daily_time_series, "params": {'outputsize': 'compact'}, "label": "3 Months", "is_intraday": False},
-    "6M": {"func": get_daily_time_series, "params": {'outputsize': 'full'}, "label": "6 Months", "is_intraday": False},
-    "YTD": {"func": get_daily_time_series, "params": {'outputsize': 'full'}, "label": "Year-to-Date", "is_intraday": False},
-    "1Y": {"func": get_daily_time_series, "params": {'outputsize': 'full'}, "label": "1 Year", "is_intraday": False},
-    "MAX": {"func": get_daily_time_series, "params": {'outputsize': 'full'}, "label": "Max Available", "is_intraday": False},
+    "1D": {"func": yahoo_finance_client.get_intraday_time_series, "params": {'interval': '15m', 'outputsize': 'compact'}, "label": "1 Day", "is_intraday": True},
+    "5D": {"func": yahoo_finance_client.get_intraday_time_series, "params": {'interval': '60m', 'outputsize': 'compact'}, "label": "5 Days", "is_intraday": True},
+    "1M": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'compact'}, "label": "1 Month", "is_intraday": False},
+    "3M": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'compact'}, "label": "3 Months", "is_intraday": False},
+    "6M": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'full'}, "label": "6 Months", "is_intraday": False},
+    "YTD": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'full'}, "label": "Year-to-Date", "is_intraday": False},
+    "1Y": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'full'}, "label": "1 Year", "is_intraday": False},
+    "MAX": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'full'}, "label": "Max Available", "is_intraday": False},
 }
 
 class MyStocksPaginatorView(BasePaginatorView):
@@ -54,24 +55,15 @@ class MyStocksPaginatorView(BasePaginatorView):
             embed_title += f" (Page {self.current_page + 1}/{self.total_pages})"
         
         embed = discord.Embed(title=embed_title, color=discord.Color.purple())
-        embed.set_footer(text="Data provided by Alpha Vantage. Prices may be delayed. Alerts shown are active.")
+        embed.set_footer(text="Data provided by Yahoo Finance. Prices may be delayed. Alerts shown are active.")
 
         if not page_subs:
             embed.description = "No stocks to display on this page."
             return embed
 
         description_lines = []
-        api_call_count = 0
         
-        # We use a small delay between calls to avoid rate limits, but here we are inside a view update.
-        # A long delay might be bad UX, but necessary for free API.
-        # With 5 items per page, max delay is ~60s if we wait 12s each. That's too long.
-        # Alpha Vantage free tier is 5 calls/minute.
-        # If we paginate, user might click "Next" faster than 1 min.
-        # We should probably just show cached data or warn about limits.
-        # Or, fetch in parallel if we have premium (not assumed).
-        # For free tier, we must limit rate.
-        # We'll try to fetch, but if limit hit, we show "Limit Reached".
+        # Rate limiting removed for Yahoo Finance
         
         for i, stock_item in enumerate(page_subs):
             symbol_upper = stock_item['symbol'].upper()
@@ -82,20 +74,17 @@ class MyStocksPaginatorView(BasePaginatorView):
             if quantity is not None and purchase_price is not None:
                 stock_display += f" ({quantity} @ ${purchase_price:,.2f})"
             
-            if api_call_count > 0:
-                await asyncio.sleep(12) # Wait 12s to respect 5 calls/min limit (60/5 = 12)
+            # Primary: Yahoo Finance
+            price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol_upper)
             
-            price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol_upper)
-            api_call_count += 1
+            # Fallback: Alpha Vantage (only if YF fails completely)
+            if not price_data:
+                 price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol_upper)
 
             if price_data:
                 if "error" in price_data:
-                    error_type = price_data["error"]
-                    if error_type == "api_limit": 
-                        stock_display += f" ⚠️ Price: API limit."
-                    else: 
-                        stock_display += f" ❌ Price: N/A"
-                elif "01. symbol" in price_data and "05. price" in price_data:
+                    stock_display += f" ❌ Price: N/A (Error)"
+                elif "05. price" in price_data:
                     raw_price = price_data.get('05. price')
                     raw_change = price_data.get('09. change', '0')
                     try:
@@ -169,7 +158,6 @@ class Stocks(commands.Cog):
     async def stock_symbol_autocomplete(self, interaction: discord.Interaction, current: str) -> typing.List[discord.app_commands.Choice[str]]:
         """
         Autocomplete for general stock symbols (popular + tracked).
-        Does not search remote API to avoid rate limits.
         """
         user_id = interaction.user.id
         tracked_stocks = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
@@ -178,7 +166,6 @@ class Stocks(commands.Cog):
         popular_stocks = ["AAPL", "MSFT", "GOOG", "AMZN", "TSLA", "NVDA", "META", "NFLX", "AMD", "INTC", "SPY", "VOO", "QQQ", "IWM", "DIA", "BRK.B", "JPM", "JNJ", "V", "PG", "UNH", "HD", "MA", "DIS", "PYPL"]
         
         all_candidates = sorted(list(set(tracked_symbols + popular_stocks)))
-        
         current_upper = current.upper()
         
         if not current:
@@ -246,19 +233,32 @@ class Stocks(commands.Cog):
 
         self.current_queue_index = (self.current_queue_index + 1) % len(self.unique_stocks_queue)
         
-        await asyncio.sleep(2)
-        price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol_to_check)
+        # Small delay only to be nice to local loop, not for API limits
+        await asyncio.sleep(0.5)
+        
+        # Primary: Yahoo Finance
+        price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol_to_check)
+        
+        if not price_data:
+             # Fallback
+             price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol_to_check)
 
-        if not price_data or "error" in price_data or "05. price" not in price_data or "08. previous close" not in price_data:
+        if not price_data or "error" in price_data or "05. price" not in price_data:
             error_msg = price_data.get("message", "Unknown API error or invalid/incomplete data") if isinstance(price_data, dict) else "No data received"
             logger.error(f"Could not fetch complete price data for {symbol_to_check} during alert check: {error_msg}")
-            if isinstance(price_data, dict) and price_data.get("error") == "api_limit":
-                logger.warning(f"Alpha Vantage API limit reached while checking {symbol_to_check}. Task will retry next cycle.")
             return
 
         try:
             current_price = float(price_data['05. price'])
-            previous_close_price = float(price_data['08. previous close'])
+            # For alerts, previous close is optional if we only check price threshold, but needed for DPC
+            previous_close_price = 0
+            if '08. previous close' in price_data:
+                 previous_close_price = float(price_data['08. previous close'])
+            elif '05. price' in price_data and '09. change' in price_data:
+                 # Infer previous close
+                 change = float(price_data['09. change'])
+                 previous_close_price = current_price - change
+            
             logger.info(f"Data for {symbol_to_check}: Current Price: {current_price}, Previous Close: {previous_close_price}")
         except (ValueError, TypeError) as e:
             logger.error(f"Could not parse price/previous close for {symbol_to_check}. Data: {price_data}. Error: {e}")
@@ -291,8 +291,7 @@ class Stocks(commands.Cog):
 
             if not triggered_message and previous_close_price != 0:
                 percentage_change = ((current_price - previous_close_price) / previous_close_price) * 100
-                logger.info(f"DPC calc for {symbol_to_check} (User {user_id_int}): Current: {current_price}, Prev Close: {previous_close_price}, Change: {percentage_change:.2f}%")
-
+                
                 if alert_details.get('dpc_above_active') and alert_details.get('dpc_above_target') is not None:
                     if percentage_change > float(alert_details['dpc_above_target']):
                         triggered_message = f"📈 **DPC Alert!** {symbol_to_check} is up +{percentage_change:.2f}% today (currently ${current_price:.2f}), meeting your +{float(alert_details['dpc_above_target']):.2f}% target."
@@ -302,9 +301,7 @@ class Stocks(commands.Cog):
                     if percentage_change < 0 and abs(percentage_change) > float(alert_details['dpc_below_target']):
                          triggered_message = f"📉 **DPC Alert!** {symbol_to_check} is down {percentage_change:.2f}% today (currently ${current_price:.2f}), meeting your -{float(alert_details['dpc_below_target']):.2f}% target."
                          deactivate_direction = "dpc_below"
-            elif not triggered_message and previous_close_price == 0:
-                logger.warning(f"Cannot calculate DPC for {symbol_to_check} as previous_close_price is 0.")
-
+            
             if triggered_message and deactivate_direction:
                 try:
                     await discord_user_obj.send(triggered_message)
@@ -328,37 +325,28 @@ class Stocks(commands.Cog):
     async def stock_price(self, ctx: commands.Context, *, symbol: str) -> None:
         """
         Fetches and displays the current price and other relevant information for a given stock symbol.
-        Supports both US stocks (Alpha Vantage) and international stocks like Polish stocks (Yahoo Finance).
+        Using Yahoo Finance as primary source for better limits and data.
         """
         await ctx.defer(ephemeral=True)
         
         logger.info(f"[STOCK_PRICE_DEBUG] Command received for symbol: {symbol}")
         upper_symbol = symbol.upper()
         
-        logger.info(f"[STOCK_PRICE_DEBUG] Attempting Alpha Vantage for {upper_symbol}")
-        price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, upper_symbol)
-        data_source = "Alpha Vantage"
-        logger.info(f"[STOCK_PRICE_DEBUG] Alpha Vantage raw response for {upper_symbol}: {price_data}")
+        logger.info(f"[STOCK_PRICE_DEBUG] Attempting Yahoo Finance for {upper_symbol}")
+        price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, upper_symbol)
+        data_source = "Yahoo Finance"
 
         if not price_data or "error" in price_data:
-            if price_data and price_data.get("error") == "api_limit":
-                logger.info(f"[STOCK_PRICE_DEBUG] Alpha Vantage API limit for {upper_symbol}. Falling back to Yahoo.")
-            else:
-                logger.info(f"[STOCK_PRICE_DEBUG] Alpha Vantage failed for {upper_symbol} (Data: {price_data}). Falling back to Yahoo.")
-            
-            logger.info(f"[STOCK_PRICE_DEBUG] Attempting Yahoo Finance for {upper_symbol} (normalized to {yahoo_finance_client.normalize_symbol(upper_symbol)})")
-            price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, upper_symbol)
-            data_source = "Yahoo Finance"
-            logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance raw response for {yahoo_finance_client.normalize_symbol(upper_symbol)}: {price_data}")
-            
-            if not price_data:
-                logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance also failed for {yahoo_finance_client.normalize_symbol(upper_symbol)}. No more APIs to try.")
+             logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance failed for {upper_symbol}. Falling back to Alpha Vantage.")
+             av_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, upper_symbol)
+             if av_data and "error" not in av_data:
+                 price_data = av_data
+                 data_source = "Alpha Vantage"
         
         if not price_data:
-            logger.error(f"[STOCK_PRICE_DEBUG] All APIs failed for {upper_symbol}.")
             embed = discord.Embed(
                 title="❌ Stock Not Found",
-                description=f"Could not retrieve data for **{upper_symbol}** from Alpha Vantage or Yahoo Finance.\n\n" +
+                description=f"Could not retrieve data for **{upper_symbol}** from Yahoo Finance or Alpha Vantage.\n\n" +
                            f"Please check the symbol and try again.\n\n" +
                            f"💡 **Tip**: For Polish stocks, try adding `.WA` suffix (e.g., `{upper_symbol}.WA`)",
                 color=discord.Color.red()
@@ -368,22 +356,9 @@ class Stocks(commands.Cog):
 
         if price_data:
             if "error" in price_data:
-                error_type = price_data["error"]
-                error_message = price_data.get("message", "An unspecified error occurred.")
-                logger.error(f"[STOCK_PRICE_DEBUG] Final data source ({data_source}) reported error for {upper_symbol}: Type: {error_type}, Msg: {error_message}")
-                if error_type == "api_limit":
-                    await self.send_response(ctx,f"Could not retrieve price for {upper_symbol}: {error_message}")
-                elif error_type == "config_error":
-                    print(f"Stock price configuration error for {upper_symbol}: {error_message}")
-                    await self.send_response(ctx,f"Could not retrieve price for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.")
-                elif error_type == "api_error":
-                    await self.send_response(ctx,f"Could not retrieve price for {upper_symbol}: {error_message}")
-                else:
-                    print(f"Stock price: Unknown error type '{error_type}' for {upper_symbol}: {error_message}")
-                    await self.send_response(ctx,f"Error fetching data for {upper_symbol}. An unexpected error occurred with the data provider.")
-            elif "01. symbol" in price_data and "05. price" in price_data:
-                logger.info(f"[STOCK_PRICE_DEBUG] Successfully processed data for {upper_symbol} from {data_source}.")
-                stock_symbol_from_api = price_data['01. symbol']
+                 await self.send_response(ctx,f"Error fetching data for {upper_symbol}: {price_data.get('message')}")
+            elif "05. price" in price_data:
+                stock_symbol_from_api = price_data.get('01. symbol', upper_symbol)
                 
                 currency = price_data.get('currency', 'USD')
                 currency_symbols = {'USD': '$', 'PLN': 'zł', 'EUR': '€', 'GBP': '£', 'CAD': 'C$', 'JPY': '¥'}
@@ -391,11 +366,11 @@ class Stocks(commands.Cog):
                 
                 def get_formatted_value(key, prefix="", suffix="", is_numeric=True, is_currency=False, is_volume=False):
                     value = price_data.get(key)
-                    if value is None or value == "":
+                    if value is None or value == "" or value == "N/A":
                         return "N/A"
                     try:
                         if is_numeric:
-                            num_value = float(value.rstrip('%'))
+                            num_value = float(str(value).rstrip('%'))
                             if is_currency:
                                 return f"{num_value:,.2f} {currency_symbol}" if currency == 'PLN' else f"{currency_symbol}{num_value:,.2f}"
                             elif is_volume:
@@ -410,19 +385,25 @@ class Stocks(commands.Cog):
                         return "N/A"
                 
                 price = get_formatted_value('05. price', is_currency=True)
-                change_val_str = price_data.get('09. change', '0')
-                
                 change_display = get_formatted_value('09. change')
                 change_percent_display = get_formatted_value('10. change percent')
 
                 day_high = get_formatted_value('03. high', is_currency=True)
                 day_low = get_formatted_value('04. low', is_currency=True)
                 volume = get_formatted_value('06. volume', is_volume=True)
+                
+                # Extended fundamentals (Yahoo Finance)
+                market_cap = get_formatted_value('marketCap', is_volume=True, prefix="$") if currency == 'USD' else get_formatted_value('marketCap', is_volume=True)
+                pe_ratio = get_formatted_value('trailingPE', is_numeric=True)
+                eps = get_formatted_value('epsTrailingTwelveMonths', is_numeric=True)
+                year_high = get_formatted_value('fiftyTwoWeekHigh', is_currency=True)
+                year_low = get_formatted_value('fiftyTwoWeekLow', is_currency=True)
 
                 embed_color = discord.Color.light_grey()
                 trend_emoji = "📊"
 
                 try:
+                    change_val_str = price_data.get('09. change', '0')
                     change_float = float(change_val_str)
                     if change_float > 0:
                         embed_color = discord.Color.green()
@@ -434,6 +415,8 @@ class Stocks(commands.Cog):
                     pass
 
                 embed = discord.Embed(title=f"{trend_emoji} Stock Info for {stock_symbol_from_api}", color=embed_color)
+                if price_data.get('longName'):
+                    embed.description = f"**{price_data.get('longName')}**"
                 
                 embed.add_field(name="💰 Price", value=price, inline=True)
                 embed.add_field(name="↕️ Change", value=f"{change_display}", inline=True)
@@ -443,9 +426,16 @@ class Stocks(commands.Cog):
                 embed.add_field(name="🔽 Day's Low", value=day_low, inline=True)
                 embed.add_field(name="📊 Volume", value=volume, inline=True)
                 
-                embed.add_field(name="🗓️ 52-Week High", value="N/A", inline=True)
-                embed.add_field(name="🗓️ 52-Week Low", value="N/A", inline=True)
-                embed.add_field(name="🏦 Market Cap", value="N/A", inline=True)
+                if data_source == "Yahoo Finance":
+                    embed.add_field(name="🗓️ 52-Week High", value=year_high, inline=True)
+                    embed.add_field(name="🗓️ 52-Week Low", value=year_low, inline=True)
+                    embed.add_field(name="🏦 Market Cap", value=market_cap, inline=True)
+                    embed.add_field(name="📉 P/E Ratio", value=pe_ratio, inline=True)
+                    embed.add_field(name="💵 EPS (TTM)", value=eps, inline=True)
+                else:
+                    embed.add_field(name="🗓️ 52-Week High", value="N/A", inline=True)
+                    embed.add_field(name="🗓️ 52-Week Low", value="N/A", inline=True)
+                    embed.add_field(name="🏦 Market Cap", value="N/A", inline=True)
                 
                 if currency != 'USD' and 'exchange' in price_data:
                     embed.add_field(name="🏢 Exchange", value=price_data['exchange'], inline=True)
@@ -453,12 +443,7 @@ class Stocks(commands.Cog):
                 embed.set_footer(text=f"Data provided by {data_source}")
                 await ctx.send(embed=embed)
             else:
-                logger.error(f"[STOCK_PRICE_DEBUG] Unexpected data structure for {upper_symbol} from {data_source}: {price_data}")
-                print(f"Stock price: Unexpected data structure for {symbol.upper()}: {price_data}")
                 await ctx.send(f"Error fetching data for {symbol.upper()}. Unexpected data format received from the provider.")
-        else:
-            logger.error(f"[STOCK_PRICE_DEBUG] Both Alpha Vantage and Yahoo Finance returned None for {upper_symbol}.")
-            await ctx.send(f"Error fetching data for {symbol.upper()}. Could not connect to the data provider or the symbol is invalid.")
 
 
     @commands.hybrid_command(name="track_stock", description="Track a stock symbol, optionally with quantity and purchase price.")
@@ -525,7 +510,6 @@ class Stocks(commands.Cog):
     async def my_tracked_stocks(self, ctx: commands.Context) -> None:
         """
         Lists all stock symbols you are currently tracking, along with their current prices.
-        Note: Due to API rate limits, fetching prices for many stocks may take some time.
         """
         await ctx.defer(ephemeral=True)
         
@@ -536,9 +520,9 @@ class Stocks(commands.Cog):
             await ctx.send("You are not tracking any stocks. Use `/track_stock <symbol>` to add some!", ephemeral=True)
             return
 
-        # Check if there are too many stocks, notify user about time.
-        if len(tracked_stocks_list) > 5:
-             await ctx.send(f"You have {len(tracked_stocks_list)} tracked stocks. fetching prices might take a while due to API rate limits.", ephemeral=True)
+        # Warning about rate limits removed as we are using Yahoo Finance primarily
+        if len(tracked_stocks_list) > 10:
+             await ctx.send(f"You have {len(tracked_stocks_list)} tracked stocks. Fetching prices...", ephemeral=True)
 
         view = MyStocksPaginatorView(user_id=user_id, items=tracked_stocks_list, bot_instance=self.bot, db_manager=self.db_manager)
         await view.start(ctx, ephemeral=True)
@@ -721,42 +705,30 @@ class Stocks(commands.Cog):
         api_params = config["params"].copy()
         display_label = config["label"]
 
-        logger.info(f"Fetching chart data for {symbol_for_display} (normalized: {normalized_symbol}), timespan {timespan_upper} using Alpha Vantage first.")
-        data_source = "Alpha Vantage"
+        logger.info(f"Fetching chart data for {symbol_for_display} (normalized: {normalized_symbol}), timespan {timespan_upper} using Yahoo Finance.")
+        data_source = "Yahoo Finance"
 
         if config["is_intraday"]:
-            time_series_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_intraday_time_series, symbol_for_display, api_params['interval'], api_params['outputsize'])
+            yahoo_interval = api_params['interval']
+            # Map interval names if needed (client handles most)
+            time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_intraday_time_series, normalized_symbol, yahoo_interval)
         else:
-            time_series_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_daily_time_series, symbol_for_display, api_params['outputsize'])
+            time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, normalized_symbol, api_params['outputsize'])
 
-        alpha_vantage_failed = False
         if not time_series_data:
-            logger.warning(f"Alpha Vantage: No time series data for {symbol_for_display} ({display_label}).")
-            alpha_vantage_failed = True
-        elif isinstance(time_series_data, dict) and "error" in time_series_data:
-            logger.warning(f"Alpha Vantage: API error for {symbol_for_display} ({display_label}): {time_series_data.get('message')}")
-            alpha_vantage_failed = True
-        elif isinstance(time_series_data, list) and not time_series_data:
-            logger.warning(f"Alpha Vantage: Empty list returned for {symbol_for_display} ({display_label}).")
-            alpha_vantage_failed = True
-
-        if alpha_vantage_failed:
-            logger.info(f"Attempting to fetch chart data for {normalized_symbol} via Yahoo Finance.")
-            data_source = "Yahoo Finance"
-            yahoo_outputsize = "compact" if api_params.get('outputsize') == "compact" else "full"
-
+            logger.info(f"Yahoo Finance failed/empty for {normalized_symbol}. Trying Alpha Vantage fallback.")
+            data_source = "Alpha Vantage"
+            # Map back params for AV
+            av_params = api_params.copy()
+            # AV uses specific intervals: 1min, 5min, 15min, 30min, 60min
+            # YF client uses similar strings, so map back if needed, but let's use standard AV func
             if config["is_intraday"]:
-                av_interval = api_params['interval']
-                if av_interval == "1min": yahoo_interval = "1m"
-                elif av_interval == "5min": yahoo_interval = "5m"
-                elif av_interval == "15min": yahoo_interval = "15m"
-                elif av_interval == "30min": yahoo_interval = "30m"
-                elif av_interval == "60min": yahoo_interval = "60m"
-                else: yahoo_interval = "60m"
-                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_intraday_time_series, normalized_symbol, yahoo_interval)
+                 # Convert '15m' -> '15min' if needed
+                 interval = api_params['interval'].replace('m', 'min') if 'min' not in api_params['interval'] else api_params['interval']
+                 time_series_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_intraday_time_series, symbol_for_display, interval, api_params['outputsize'])
             else:
-                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, normalized_symbol, yahoo_outputsize)
-        
+                 time_series_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_daily_time_series, symbol_for_display, api_params['outputsize'])
+
         if not time_series_data:
             await ctx.send(f"Could not retrieve time series data for {symbol_for_display} ({display_label}) from any provider. The symbol might be invalid or there's no data.", ephemeral=True)
             return
@@ -821,7 +793,14 @@ class Stocks(commands.Cog):
         await ctx.defer(ephemeral=True)
         upper_symbol = symbol.upper()
         
-        news_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_news, upper_symbol, 5)
+        # Primary: Yahoo Finance
+        news_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_news, upper_symbol, 5)
+        data_source = "Yahoo Finance"
+        
+        if not news_data:
+             # Fallback
+             news_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_news, upper_symbol, 5)
+             data_source = "Alpha Vantage"
 
         if news_data is None:
             await ctx.send(f"📰 No news found for {upper_symbol}, or an error occurred while fetching.", ephemeral=True)
@@ -830,15 +809,7 @@ class Stocks(commands.Cog):
         if isinstance(news_data, dict) and "error" in news_data:
             error_type = news_data["error"]
             error_message = news_data.get("message", "An unspecified error occurred.")
-            if error_type == "api_limit":
-                await ctx.send(f"Could not retrieve news for {upper_symbol}: {error_message}", ephemeral=True)
-            elif error_type == "config_error":
-                logger.error(f"Stock news configuration error for {upper_symbol}: {error_message}")
-                await ctx.send(f"Could not retrieve news for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.", ephemeral=True)
-            elif error_type == "api_error":
-                await ctx.send(f"Could not retrieve news for {upper_symbol}: {error_message}", ephemeral=True)
-            else:
-                await ctx.send(f"Error fetching news for {upper_symbol}. An unexpected error occurred with the data provider.", ephemeral=True)
+            await ctx.send(f"Could not retrieve news for {upper_symbol}: {error_message}", ephemeral=True)
             return
 
         if not isinstance(news_data, list) or not news_data:
@@ -849,7 +820,7 @@ class Stocks(commands.Cog):
             title=f"📰 Recent News for {upper_symbol}",
             color=discord.Color.blue()
         )
-        embed.set_footer(text="News provided by Alpha Vantage. Summaries may be truncated.")
+        embed.set_footer(text=f"News provided by {data_source}. Summaries may be truncated.")
 
         for i, article in enumerate(news_data):
             if i >= 5:
@@ -872,9 +843,12 @@ class Stocks(commands.Cog):
                 field_title = f"{title}"
 
             field_value = f"**Source:** {source}\n" \
-                          f"**Published:** {time_published}\n" \
-                          f"**Sentiment:** {sentiment_label}\n" \
-                          f"**Summary:** {summary}"
+                          f"**Published:** {time_published}\n"
+            
+            if sentiment_label != "N/A":
+                 field_value += f"**Sentiment:** {sentiment_label}\n"
+            
+            field_value += f"**Summary:** {summary}"
             
             embed.add_field(name=field_title[:256], value=field_value[:1024], inline=False)
 
@@ -909,32 +883,28 @@ class Stocks(commands.Cog):
             return
 
         embed = discord.Embed(title="💰 Your Stock Portfolio", color=discord.Color.gold())
-        embed.set_footer(text="Data provided by Alpha Vantage. Prices may be delayed.")
+        embed.set_footer(text="Data provided by Yahoo Finance. Prices may be delayed.")
 
         overall_cost_basis = 0
         overall_market_value = 0
-        api_call_count = 0
         individual_holdings_details = []
 
         status_msg = None
-        if len(portfolio_stocks) > 1:
-            status_msg = await ctx.send(f"Fetching current prices for {len(portfolio_stocks)} holdings... this may take a moment due to API rate limits.", ephemeral=True)
+        if len(portfolio_stocks) > 5:
+            status_msg = await ctx.send(f"Fetching current prices for {len(portfolio_stocks)} holdings...", ephemeral=True)
 
         for stock_data in portfolio_stocks:
             symbol = stock_data["symbol"]
             quantity = stock_data["quantity"]
             purchase_price = stock_data["purchase_price"]
 
-            if api_call_count > 0:
-                await asyncio.sleep(13)
-
-            current_price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol)
-            data_source = "Alpha Vantage"
-            api_call_count += 1
+            # Primary: Yahoo Finance
+            current_price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol)
+            data_source = "Yahoo Finance"
 
             if not current_price_data or "error" in current_price_data:
-                current_price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol)
-                data_source = "Yahoo Finance"
+                current_price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol)
+                data_source = "Alpha Vantage"
 
             current_price = None
             currency = "USD"
