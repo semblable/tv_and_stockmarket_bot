@@ -1135,32 +1135,32 @@ class TVShows(commands.Cog):
                                     
                                     if should_check:
                                         # Check if notified (using episode ID or Season/Episode number for robustness)
-                                    already_notified = await self.bot.loop.run_in_executor(
-                                        None, self.db_manager.has_user_been_notified_for_episode, user_id, show_id, ep_id
-                                    )
-                                    
-                                    if not already_notified:
-                                        # Robustness check: Check by season/episode number too
-                                        ep_season = ep.get('season', 0)
-                                        ep_num = ep.get('number', 0)
-                                        already_notified_by_num = await self.bot.loop.run_in_executor(
-                                            None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
+                                        already_notified = await self.bot.loop.run_in_executor(
+                                            None, self.db_manager.has_user_been_notified_for_episode, user_id, show_id, ep_id
                                         )
-                                        if already_notified_by_num:
-                                            already_notified = True
+                                        
+                                        if not already_notified:
+                                            # Robustness check: Check by season/episode number too
+                                            ep_season = ep.get('season', 0)
+                                            ep_num = ep.get('number', 0)
+                                            already_notified_by_num = await self.bot.loop.run_in_executor(
+                                                None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
+                                            )
+                                            if already_notified_by_num:
+                                                already_notified = True
 
-                                    if not already_notified:
-                                         if not any(e['id'] == ep_id for e in episodes_to_notify):
-                                             normalized_ep = {
-                                                 'id': ep_id,
-                                                 'name': ep.get('name', 'TBA'),
-                                                 'season_number': ep.get('season', 0),
-                                                 'episode_number': ep.get('number', 0),
-                                                 'air_date': air_date_str,
-                                                 'vote_average': ep.get('rating', {}).get('average'),
-                                                 'source': 'TVMaze'
-                                             }
-                                             episodes_to_notify.append(normalized_ep)
+                                        if not already_notified:
+                                            if not any(e['id'] == ep_id for e in episodes_to_notify):
+                                                normalized_ep = {
+                                                    'id': ep_id,
+                                                    'name': ep.get('name', 'TBA'),
+                                                    'season_number': ep.get('season', 0),
+                                                    'episode_number': ep.get('number', 0),
+                                                    'air_date': air_date_str,
+                                                    'vote_average': ep.get('rating', {}).get('average'),
+                                                    'source': 'TVMaze'
+                                                }
+                                                episodes_to_notify.append(normalized_ep)
                                 except ValueError: pass
 
                     except Exception as e:
