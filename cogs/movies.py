@@ -466,40 +466,40 @@ class MoviesCog(commands.Cog, name="Movies"):
 
         if len(matching_subscriptions) == 1:
             movie_to_unsubscribe = matching_subscriptions[0]
-            else:
-                display_results = matching_subscriptions[:5]
+        else:
+            display_results = matching_subscriptions[:5]
 
-                embeds_list = []
-                message_content = "Multiple subscribed movies match. Please click the button to unsubscribe:"
+            embeds_list = []
+            message_content = "Multiple subscribed movies match. Please click the button to unsubscribe:"
 
-                for i, sub_data_item in enumerate(display_results):
-                    movie_embed = discord.Embed(
-                        description=f"{NUMBER_EMOJIS[i]} **{sub_data_item['title']}**",
-                        color=discord.Color.red()
-                    )
-                    
-                    poster_path = sub_data_item.get('poster_path')
-                    if poster_path:
-                        poster_url = tmdb_client.get_poster_url(poster_path, size="w154")
-                        if poster_url:
-                            movie_embed.set_thumbnail(url=poster_url)
-
-                    embeds_list.append(movie_embed)
+            for i, sub_data_item in enumerate(display_results):
+                movie_embed = discord.Embed(
+                    description=f"{NUMBER_EMOJIS[i]} **{sub_data_item['title']}**",
+                    color=discord.Color.red()
+                )
                 
-                if not embeds_list:
-                     await self.send_response(ctx,"Could not prepare selection list. Please try again.", ephemeral=True)
-                     return
+                poster_path = sub_data_item.get('poster_path')
+                if poster_path:
+                    poster_url = tmdb_client.get_poster_url(poster_path, size="w154")
+                    if poster_url:
+                        movie_embed.set_thumbnail(url=poster_url)
 
-                view = SelectionView(ctx, display_results)
-                await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=True, wait=True, view=view)
-                
-                await view.wait()
-
-                if view.selected_result:
-                    movie_to_unsubscribe = view.selected_result
-                else:
-                    await self.send_response(ctx, "Selection timed out or cancelled.", ephemeral=True)
+                embeds_list.append(movie_embed)
+            
+            if not embeds_list:
+                    await self.send_response(ctx,"Could not prepare selection list. Please try again.", ephemeral=True)
                     return
+
+            view = SelectionView(ctx, display_results)
+            await self.send_response(ctx, content=message_content, embeds=embeds_list, ephemeral=True, wait=True, view=view)
+            
+            await view.wait()
+
+            if view.selected_result:
+                movie_to_unsubscribe = view.selected_result
+            else:
+                await self.send_response(ctx, "Selection timed out or cancelled.", ephemeral=True)
+                return
 
         if not movie_to_unsubscribe:
             await self.send_response(ctx,"Could not identify movie to unsubscribe from. Please try again.", ephemeral=True)
