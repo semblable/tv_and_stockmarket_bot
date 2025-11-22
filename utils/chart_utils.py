@@ -3,28 +3,16 @@
 import json
 import urllib.parse
 import requests
+import io
 
 QUICKCHART_BASE_URL = "https://quickchart.io/chart"
 QUICKCHART_SHORT_URL = "https://quickchart.io/chart/create"
 
-def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list, chart_width: int = 800, chart_height: int = 500):
+def _create_chart_config(symbol: str, timespan_label: str, data_points: list):
     """
-    Generates a stock chart image URL using QuickChart.io.
-
-    Args:
-        symbol: The stock symbol (e.g., "AAPL").
-        timespan_label: The timespan label for the chart title (e.g., "1M", "1Y").
-        data_points: A list of tuples (timestamp_str, value_float), sorted chronologically.
-                     Example: [('2023-01-01', 150.00), ('2023-01-02', 152.50)]
-        chart_width: Width of the chart image in pixels.
-        chart_height: Height of the chart image in pixels.
-
-    Returns:
-        A string URL to the generated chart image if successful.
-        None if data_points is empty or an error occurs.
+    Helper to create the QuickChart config dictionary.
     """
     if not data_points:
-        print(f"Error generating chart for {symbol}: No data points provided.")
         return None
 
     labels = []
@@ -91,7 +79,7 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
                     "ticks": {
                         "autoSkip": True,
                         "maxTicksLimit": 10,
-                        "maxRotation": 45,
+                        "maxRotation": x_tick_rotation,
                         "minRotation": 45
                     },
                     "grid": {
@@ -114,6 +102,47 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
     if y_min > 0 and y_max > y_min:
         chart_config["options"]["scales"]["y"]["min"] = y_min
         chart_config["options"]["scales"]["y"]["max"] = y_max
+        
+    return chart_config
+
+def get_stock_chart_image(symbol: str, timespan_label: str, data_points: list, chart_width: int = 800, chart_height: int = 500):
+    """
+    Generates a stock chart image and returns it as bytes (io.BytesIO).
+    Uses QuickChart.io POST endpoint to retrieve the image directly.
+    """
+    chart_config = _create_chart_config(symbol, timespan_label, data_points)
+    if not chart_config:
+        print(f"Error generating chart config for {symbol}: No data points.")
+        return None
+
+    try:
+        post_payload = {
+            "chart": chart_config,
+            "width": chart_width,
+            "height": chart_height,
+            "backgroundColor": "white",
+            "format": "png"
+        }
+        
+        response = requests.post(QUICKCHART_BASE_URL, json=post_payload, timeout=15)
+        if response.status_code == 200:
+            return io.BytesIO(response.content)
+        else:
+            print(f"QuickChart error: {response.status_code} {response.text}")
+            return None
+
+    except Exception as e:
+        print(f"Error fetching chart image: {e}")
+        return None
+
+def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list, chart_width: int = 800, chart_height: int = 500):
+    """
+    Generates a stock chart image URL using QuickChart.io.
+    Kept for backward compatibility, but prefer get_stock_chart_image for better reliability.
+    """
+    chart_config = _create_chart_config(symbol, timespan_label, data_points)
+    if not chart_config:
+        return None
 
     try:
         post_payload = {
@@ -135,13 +164,14 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
             print(f"QuickChart short URL failed: {e}")
 
         # Fallback: Construct Direct URL (simplified)
-        # For direct URL, we need to be careful about length.
         # Remove fill and complex options for fallback
         chart_config["data"]["datasets"][0]["fill"] = False
-        chart_config["options"]["plugins"]["title"]["display"] = False # Save space
-        del chart_config["options"]["scales"]["y"]["ticks"]["callback"] # remove function for GET
+        if "title" in chart_config["options"]["plugins"]:
+            chart_config["options"]["plugins"]["title"]["display"] = False # Save space
         
-        # Use compact separators to save space
+        if "callback" in chart_config["options"]["scales"]["y"]["ticks"]:
+            del chart_config["options"]["scales"]["y"]["ticks"]["callback"] # remove function for GET
+        
         encoded_config = urllib.parse.quote(json.dumps(chart_config, separators=(',', ':')))
         url = f"{QUICKCHART_BASE_URL}?c={encoded_config}&w={chart_width}&h={chart_height}&bkg=white"
         
@@ -149,16 +179,6 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
             return url
         else:
             print(f"Chart URL too long ({len(url)} chars).")
-            # Last ditch: decimate data
-            if len(labels) > 100:
-                step = len(labels) // 50
-                chart_config["data"]["labels"] = labels[::step]
-                chart_config["data"]["datasets"][0]["data"] = closing_prices[::step]
-                encoded_config_short = urllib.parse.quote(json.dumps(chart_config, separators=(',', ':')))
-                url_short = f"{QUICKCHART_BASE_URL}?c={encoded_config_short}&w={chart_width}&h={chart_height}&bkg=white"
-                if len(url_short) < 2048:
-                    return url_short
-            
             return None
 
     except Exception as e:

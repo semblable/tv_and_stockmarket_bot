@@ -9,7 +9,7 @@ from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
 from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series
 from api_clients import yahoo_finance_client
-from utils.chart_utils import generate_stock_chart_url
+from utils.chart_utils import generate_stock_chart_url, get_stock_chart_image
 from data_manager import DataManager
 from utils.paginator import BasePaginatorView
 import random
@@ -863,17 +863,18 @@ class Stocks(commands.Cog):
                 await ctx.send(f"An error occurred while processing YTD data for {symbol_for_display}.", ephemeral=True)
                 return
 
-        logger.info(f"Generating chart URL for {symbol_for_display} ({display_label}) with {len(time_series_data)} data points.")
-        chart_url = generate_stock_chart_url(symbol_for_display, display_label, time_series_data)
+        logger.info(f"Generating chart image for {symbol_for_display} ({display_label}) with {len(time_series_data)} data points.")
+        chart_image = await self.bot.loop.run_in_executor(None, get_stock_chart_image, symbol_for_display, display_label, time_series_data)
 
-        if chart_url:
+        if chart_image:
             embed = discord.Embed(
                 title=f"📈 Stock Chart for {symbol_for_display} ({display_label})",
                 color=discord.Color.blue()
             )
-            embed.set_image(url=chart_url)
+            file = discord.File(chart_image, filename="chart.png")
+            embed.set_image(url="attachment://chart.png")
             embed.set_footer(text=f"Chart generated using QuickChart.io | Data from {data_source}")
-            await ctx.send(embed=embed)
+            await ctx.send(file=file, embed=embed)
         else:
             await ctx.send(f"Sorry, I couldn't generate the chart for {symbol_for_display} ({display_label}) at this time.", ephemeral=True)
 
