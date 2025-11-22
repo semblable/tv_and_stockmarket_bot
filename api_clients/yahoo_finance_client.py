@@ -160,13 +160,14 @@ def get_stock_news(symbol: str, limit: int = 5) -> Optional[List[Dict[str, Any]]
         logger.error(f"Error fetching news for {symbol}: {e}")
         return None
 
-def get_daily_time_series(symbol: str, outputsize: str = "compact") -> Optional[List[Tuple[str, float]]]:
+def get_daily_time_series(symbol: str, outputsize: str = "compact", period: str = None) -> Optional[List[Tuple[str, float]]]:
     """
     Get daily time series data for charts.
     
     Args:
         symbol: Stock symbol
-        outputsize: 'compact' for last 100 days, 'full' for all available
+        outputsize: 'compact' for last 100 days, 'full' for all available (deprecated if period is provided)
+        period: Optional period to fetch (e.g., "1mo", "1y", "max", "ytd"). Overrides outputsize.
     
     Returns:
         List of (date_string, close_price) tuples or None if error
@@ -177,12 +178,16 @@ def get_daily_time_series(symbol: str, outputsize: str = "compact") -> Optional[
         
         ticker = yf.Ticker(normalized_symbol)
         
-        # Determine period based on outputsize
-        period = "3mo" if outputsize == "compact" else "max"
-        hist = ticker.history(period=period)
+        # Determine period
+        if period:
+             target_period = period
+        else:
+             target_period = "3mo" if outputsize == "compact" else "max"
+             
+        hist = ticker.history(period=target_period)
         
         if hist.empty:
-            logger.warning(f"No historical data found for {normalized_symbol}")
+            logger.warning(f"No historical data found for {normalized_symbol} with period {target_period}")
             return None
         
         # Convert to format expected by chart generation
@@ -195,7 +200,7 @@ def get_daily_time_series(symbol: str, outputsize: str = "compact") -> Optional[
         # Sort chronologically (oldest first)
         time_series_data.sort(key=lambda x: x[0])
         
-        logger.info(f"Successfully fetched {len(time_series_data)} data points for {normalized_symbol}")
+        logger.info(f"Successfully fetched {len(time_series_data)} data points for {normalized_symbol} (period={target_period})")
         return time_series_data
         
     except Exception as e:
