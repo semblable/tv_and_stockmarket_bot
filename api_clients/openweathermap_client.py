@@ -24,13 +24,14 @@ ICON_TO_EMOJI = {
     "50d": "🌫️", "50n": "🌫️",  # mist
 }
 
-async def get_weather_data(location: str, session: aiohttp.ClientSession) -> Optional[Dict[str, Any]]:
+async def get_weather_data(location: str, session: aiohttp.ClientSession, forecast_limit: int = 3) -> Optional[Dict[str, Any]]:
     """
     Fetches current weather and a short forecast for a given location using OpenWeatherMap API.
 
     Args:
         location: The city name or zip code.
         session: The aiohttp ClientSession.
+        forecast_limit: Number of forecast items (3-hour intervals) to return. Default 3 (9 hours).
 
     Returns:
         A dictionary containing processed weather data, or None if an error occurs.
@@ -48,7 +49,7 @@ async def get_weather_data(location: str, session: aiohttp.ClientSession) -> Opt
         "q": location,
         "appid": OPENWEATHERMAP_API_KEY,
         "units": "metric",
-        "cnt": 8 # Roughly 24 hours of forecast (8 * 3-hour intervals)
+        "cnt": 40 # Roughly 5 days (40 * 3-hour intervals) - we'll slice this based on forecast_limit
     }
 
     processed_data = {}
@@ -93,7 +94,7 @@ async def get_weather_data(location: str, session: aiohttp.ClientSession) -> Opt
                 forecast_data = await resp.json()
                 forecast_list = []
                 if forecast_data.get("list"):
-                    for item in forecast_data["list"][:3]: # Next 3 forecasts (9 hours)
+                    for item in forecast_data["list"][:forecast_limit]: # Use forecast_limit here
                         forecast_list.append({
                             "dt": item.get("dt"),
                             "temp": item.get("main", {}).get("temp"),

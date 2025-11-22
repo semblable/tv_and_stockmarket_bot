@@ -4,19 +4,33 @@ from discord.ext import commands
 import re # For DND time validation
 from datetime import datetime, time # For DND time checking (though not used in this file directly yet)
 import logging # Import logging
+from typing import Optional, List
 
 from data_manager import DataManager # Import DataManager class#
 
 logger = logging.getLogger(__name__)
 
 # Helper to create a consistent embed for settings
-def create_settings_embed(ctx, user_preferences):
+def create_settings_embed(ctx, user_preferences, weather_schedules):
     """Creates a Discord embed to display user settings."""
     embed = discord.Embed(
         title=f"⚙️ Notification Settings for {ctx.author.display_name}",
         color=discord.Color.blue()
     )
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
+
+    # Weather Settings
+    weather_loc = user_preferences.get('weather_default_location', 'Not Set')
+    schedules_count = len(weather_schedules)
+    
+    embed.add_field(
+        name="🌤️ Weather Settings",
+        value=f"Default Location: **{weather_loc}**\n"
+              f"Active Schedules: **{schedules_count}**\n"
+              f"`{ctx.prefix}settings weather_default <location>`\n"
+              f"`{ctx.prefix}settings weather_schedule list`",
+        inline=False
+    )
 
     # TV Show DM Overview
     tv_overview_status = "✅ On" if user_preferences.get('tv_show_dm_overview', True) else "❌ Off"
@@ -69,8 +83,72 @@ class SettingsCog(commands.Cog, name="Settings"):
             "dnd_enabled": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_enabled", False),
             "dnd_start_time": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_start_time", "22:00"),
             "dnd_end_time": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_end_time", "07:00"),
+            "weather_default_location": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "weather_default_location", "Not Set"),
         }
-        embed = create_settings_embed(ctx, preferences)
+        weather_schedules = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_weather_schedules, user_id)
+        
+        embed = create_settings_embed(ctx, preferences, weather_schedules)
+        await ctx.send(embed=embed)
+
+    @settings_group.command(name="weather_default")
+    async def set_weather_default(self, ctx: commands.Context, *, location: str):
+        """Sets your default weather location."""
+        user_id = ctx.author.id
+        await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, "weather_default_location", location)
+        await ctx.send(f"✅ Default weather location set to: **{location}**")
+
+    @settings_group.group(name="weather_schedule", invoke_without_command=True)
+    async def weather_schedule_group(self, ctx: commands.Context):
+        """Manage scheduled weather notifications."""
+        if ctx.invoked_subcommand is None:
+            await self.list_weather_schedules(ctx)
+
+    @weather_schedule_group.command(name="add")
+    async def add_weather_schedule(self, ctx: commands.Context, time: str, *, location: Optional[str] = None):
+        """
+        Add a scheduled weather notification.
+        Time must be in HH:MM format (UTC). Location is optional if default is set.
+        """
+        # Validate time
+        time_pattern = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+        if not time_pattern.match(time):
+             await ctx.send("❌ Invalid time format. Please use HH:MM (24-hour format, e.g., 08:00).", ephemeral=True)
+             return
+        
+        user_id = ctx.author.id
+        await self.bot.loop.run_in_executor(None, self.db_manager.add_weather_schedule, user_id, time, location)
+        
+        msg = f"✅ Scheduled weather notification for **{time}** UTC."
+        if location:
+            msg += f" (Location: {location})"
+        else:
+            msg += " (Using default location)"
+        await ctx.send(msg)
+
+    @weather_schedule_group.command(name="remove")
+    async def remove_weather_schedule(self, ctx: commands.Context, time: str):
+        """Remove a scheduled weather notification."""
+        user_id = ctx.author.id
+        await self.bot.loop.run_in_executor(None, self.db_manager.remove_weather_schedule, user_id, time)
+        await ctx.send(f"✅ Removed weather schedule for **{time}**.")
+
+    @weather_schedule_group.command(name="list")
+    async def list_weather_schedules(self, ctx: commands.Context):
+        """List your scheduled weather notifications."""
+        user_id = ctx.author.id
+        schedules = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_weather_schedules, user_id)
+        
+        if not schedules:
+            await ctx.send("You have no scheduled weather notifications.")
+            return
+            
+        embed = discord.Embed(title="📅 Your Weather Schedules", color=discord.Color.blue())
+        description = ""
+        for s in schedules:
+            loc = s['location'] or "Default"
+            description += f"• **{s['schedule_time']}** UTC - {loc}\n"
+        
+        embed.description = description
         await ctx.send(embed=embed)
 
     @settings_group.command(name="tv_overview", aliases=["tvoverview"])

@@ -276,6 +276,18 @@ class DataManager:
         )
         """
         create_table_if_not_exists("sent_episode_notifications", create_sent_episode_notifications_sql)
+
+        # Weather Schedules
+        create_weather_schedules_sql = """
+        CREATE TABLE IF NOT EXISTS weather_schedules (
+            user_id TEXT NOT NULL,
+            schedule_time TEXT NOT NULL,
+            location TEXT,
+            PRIMARY KEY (user_id, schedule_time)
+        )
+        """
+        create_table_if_not_exists("weather_schedules", create_weather_schedules_sql)
+
         logger.info("Database initialization check complete.")
 
     # --- TV Show Subscriptions ---
@@ -761,6 +773,35 @@ class DataManager:
         if result:
             return float(result['rate'])
         return None
+
+    # --- Weather Schedules ---
+    def add_weather_schedule(self, user_id: int, schedule_time: str, location: Optional[str] = None) -> bool:
+        user_id_str = str(user_id)
+        query = """
+        INSERT INTO weather_schedules (user_id, schedule_time, location)
+        VALUES (:user_id, :time, :location)
+        ON CONFLICT(user_id, schedule_time) DO UPDATE SET
+            location = :location
+        """
+        params = {"user_id": user_id_str, "time": schedule_time, "location": location}
+        return self._execute_query(query, params, commit=True)
+
+    def remove_weather_schedule(self, user_id: int, schedule_time: str) -> bool:
+        user_id_str = str(user_id)
+        query = "DELETE FROM weather_schedules WHERE user_id = :user_id AND schedule_time = :time"
+        params = {"user_id": user_id_str, "time": schedule_time}
+        return self._execute_query(query, params, commit=True)
+
+    def get_user_weather_schedules(self, user_id: int) -> List[Dict[str, Any]]:
+        user_id_str = str(user_id)
+        query = "SELECT schedule_time, location FROM weather_schedules WHERE user_id = :user_id"
+        params = {"user_id": user_id_str}
+        return self._execute_query(query, params, fetch_all=True)
+
+    def get_weather_schedules_for_time(self, schedule_time: str) -> List[Dict[str, Any]]:
+        query = "SELECT user_id, location FROM weather_schedules WHERE schedule_time = :time"
+        params = {"time": schedule_time}
+        return self._execute_query(query, params, fetch_all=True)
 
     def close(self) -> None:
         """Closes the database connection."""

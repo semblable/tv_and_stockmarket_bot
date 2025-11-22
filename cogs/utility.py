@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import logging
 from typing import Optional, List
@@ -20,10 +20,12 @@ class Utility(commands.Cog):
     async def cog_load(self):
         """Initialize the AIOHTTP session when the cog is loaded."""
         self._session = aiohttp.ClientSession()
-        logger.info("Utility Cog loaded and AIOHTTP session created.")
+        self.check_weather_notifications.start()
+        logger.info("Utility Cog loaded, AIOHTTP session created, and weather task started.")
 
     async def cog_unload(self):
         """Close the AIOHTTP session when the cog is unloaded."""
+        self.check_weather_notifications.cancel()
         if self._session:
             await self._session.close()
             logger.info("Utility Cog unloaded and AIOHTTP session closed.")
@@ -71,11 +73,14 @@ class Utility(commands.Cog):
                 return datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc).strftime('%I:%M %p UTC')
             return "N/A"
 
-    @app_commands.command(name="weather", description="Fetches current weather and a short forecast for a location.")
-    @app_commands.describe(location="The city name or zip code (e.g., London,UK or 90210)")
-    async def weather(self, interaction: discord.Interaction, location: str):
+    @app_commands.command(name="weather", description="Fetches current weather and a forecast.")
+    @app_commands.describe(
+        location="The city name or zip code. Defaults to your saved location if set.",
+        hours="Forecast duration in hours (default 9, max 120)."
+    )
+    async def weather(self, interaction: discord.Interaction, location: Optional[str] = None, hours: int = 9):
         """
-        Displays the current weather and a short forecast for the specified location.
+        Displays the current weather and a forecast for the specified location.
         """
         await interaction.response.defer(thinking=True)
 
@@ -83,12 +88,23 @@ class Utility(commands.Cog):
             await interaction.followup.send("Sorry, the weather service is not configured by the bot owner. (Missing API Key)")
             return
 
+        user_id = interaction.user.id
+        if not location:
+            location = await self.bot.loop.run_in_executor(None, self.bot.db_manager.get_user_preference, user_id, "weather_default_location")
+            if not location:
+                await interaction.followup.send("Please provide a location or set a default one using the settings command.")
+                return
+
         if not self.session: # Should be initialized by cog_load
             logger.error("AIOHTTP session not available in weather command.")
             await interaction.followup.send("An unexpected error occurred with the bot's internal setup. Please try again later.")
             return
 
-        weather_info = await get_weather_data(location, self.session)
+        # Calculate forecast_limit based on hours (3-hour intervals)
+        # Ensure at least 1 item if hours > 0, max 40 (5 days)
+        forecast_limit = max(1, min(40, (hours + 2) // 3)) # Round up roughly
+
+        weather_info = await get_weather_data(location, self.session, forecast_limit=forecast_limit)
 
         if not weather_info:
             await interaction.followup.send("Sorry, I couldn't fetch weather data at this time. Please try again later.")
@@ -171,16 +187,19 @@ class Utility(commands.Cog):
                 dt_object = datetime.datetime.fromtimestamp(item['dt'], tz=datetime.timezone.utc)
                 if tz_offset is not None:
                     local_dt = dt_object + datetime.timedelta(seconds=tz_offset)
-                    time_str = local_dt.strftime('%I:%M %p')
+                    time_str = local_dt.strftime('%a %I:%M %p') # Added Day of week
                 else:
-                    time_str = dt_object.strftime('%I:%M %p UTC')
+                    time_str = dt_object.strftime('%a %I:%M %p UTC')
 
                 item_temp_c = item.get('temp')
                 item_temp_str = f"{item_temp_c}°C" if item_temp_c is not None else "N/A"
                 forecast_str += f"**{time_str}**: {item_temp_str}, {item.get('condition', 'N/A')} {item.get('emoji', '')}\n"
+            
+            # Truncate if too long (Discord field limit is 1024)
+            if len(forecast_str) > 1024:
+                forecast_str = forecast_str[:1000] + "\n... (truncated)"
 
-            if forecast_str:
-                embed.add_field(name="🌦️ Short Forecast (next ~9 hours)", value=forecast_str.strip(), inline=False)
+            embed.add_field(name=f"🌦️ Forecast (next ~{hours} hours)", value=forecast_str.strip(), inline=False)
         else:
              # Add today's high/low if full forecast isn't available or not processed
             temp_min_c = current.get('temp_min')
@@ -194,6 +213,80 @@ class Utility(commands.Cog):
 
         embed.set_footer(text=f"Weather data provided by OpenWeatherMap | Queried for: {location}")
         await interaction.followup.send(embed=embed)
+
+    @tasks.loop(minutes=1)
+    async def check_weather_notifications(self):
+        """Checks for scheduled weather notifications."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        current_time = now.strftime("%H:%M") # UTC time
+        
+        schedules = await self.bot.loop.run_in_executor(None, self.bot.db_manager.get_weather_schedules_for_time, current_time)
+        
+        if not schedules:
+            return
+
+        logger.info(f"Sending weather notifications for {current_time} UTC to {len(schedules)} users.")
+
+        for schedule in schedules:
+            user_id = int(schedule['user_id'])
+            location = schedule['location']
+            
+            # If location is not in schedule, check default preference
+            if not location:
+                location = await self.bot.loop.run_in_executor(None, self.bot.db_manager.get_user_preference, user_id, "weather_default_location")
+            
+            if not location:
+                # logger.warning(f"User {user_id} has scheduled weather at {current_time} but no location set.")
+                continue
+            
+            # Use the bot's fetch_user/get_user
+            user = self.bot.get_user(user_id)
+            if not user:
+                try:
+                    user = await self.bot.fetch_user(user_id)
+                except discord.NotFound:
+                    logger.warning(f"User {user_id} not found for weather notification.")
+                    continue
+                except Exception as e:
+                    logger.error(f"Error fetching user {user_id}: {e}")
+                    continue
+
+            if not self.session:
+                 continue
+
+            weather_info = await get_weather_data(location, self.session)
+            if not weather_info or "error" in weather_info:
+                logger.error(f"Failed to fetch weather for user {user_id} at {location}")
+                continue
+            
+            current = weather_info.get("current")
+            if not current: continue
+
+            temp_c = current.get("temp")
+            condition = current.get("condition")
+            emoji = current.get("emoji", "")
+            
+            embed = discord.Embed(
+                title=f"{emoji} Daily Weather: {current.get('location_name')}",
+                description=f"It's **{temp_c}°C** and **{condition}**.",
+                color=self.get_temperature_color(temp_c),
+                timestamp=now
+            )
+            embed.add_field(name="Feels Like", value=f"{current.get('feels_like')}°C")
+            embed.add_field(name="Humidity", value=f"{current.get('humidity')}%")
+            embed.add_field(name="Wind", value=f"{current.get('wind_speed')} m/s")
+            embed.set_footer(text="You can manage this schedule in settings.")
+
+            try:
+                await user.send(embed=embed)
+            except discord.Forbidden:
+                logger.warning(f"Could not send DM to user {user_id} (Forbidden).")
+            except Exception as e:
+                logger.error(f"Error sending weather DM to {user_id}: {e}")
+
+    @check_weather_notifications.before_loop
+    async def before_check_weather_notifications(self):
+        await self.bot.wait_until_ready()
 
     @commands.hybrid_command(name="poll", description="Creates a simple poll with emoji reactions.")
     @app_commands.describe(
