@@ -724,13 +724,20 @@ class Stocks(commands.Cog):
         if alpha_vantage_failed:
             logger.info(f"Attempting to fetch chart data for {normalized_symbol} via Yahoo Finance.")
             data_source = "Yahoo Finance"
-            # outputsize for Yahoo: 'compact' for 3 months, 'full' for max
-            yahoo_outputsize = "compact" if api_params.get('outputsize') == "compact" else "full"
+            
+            # Map timespan to Yahoo Finance period
+            yahoo_period = "max" # Default fallback
+            if timespan_upper == "1D": yahoo_period = "1d" # Intraday
+            elif timespan_upper == "5D": yahoo_period = "5d" # Intraday
+            elif timespan_upper == "1M": yahoo_period = "1mo"
+            elif timespan_upper == "3M": yahoo_period = "3mo"
+            elif timespan_upper == "6M": yahoo_period = "6mo"
+            elif timespan_upper == "YTD": yahoo_period = "ytd"
+            elif timespan_upper == "1Y": yahoo_period = "1y"
+            elif timespan_upper == "MAX": yahoo_period = "max"
 
             if config["is_intraday"]:
                 # Map Alpha Vantage interval to approximate Yahoo interval
-                # Yahoo: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
-                # Alpha: 1min, 5min, 15min, 30min, 60min
                 av_interval = api_params['interval']
                 if av_interval == "1min": yahoo_interval = "1m"
                 elif av_interval == "5min": yahoo_interval = "5m"
@@ -738,9 +745,11 @@ class Stocks(commands.Cog):
                 elif av_interval == "30min": yahoo_interval = "30m"
                 elif av_interval == "60min": yahoo_interval = "60m" # or 1h
                 else: yahoo_interval = "60m" # Default
-                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_intraday_time_series, normalized_symbol, yahoo_interval) # Yahoo outputsize not really used for intraday
+                # Yahoo intraday needs '1d' or '5d' period usually, but for 1D/5D timespan we set it above.
+                # If user requested intraday via timespan param logic:
+                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_intraday_time_series, normalized_symbol, yahoo_interval)
             else: # Daily
-                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, normalized_symbol, yahoo_outputsize)
+                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, normalized_symbol, period=yahoo_period)
         
         # Post-fetch processing (common for both AV and YF data)
         if not time_series_data:
@@ -1461,6 +1470,25 @@ class Stocks(commands.Cog):
                     
         except Exception as e:
             await ctx.send(f"❌ Error clearing alert: {str(e)}")
+
+    @commands.command(name="sync_commands", aliases=["sync"])
+    async def sync_commands(self, ctx: commands.Context):
+        """
+        Manually syncs the bot's slash commands with Discord.
+        Useful if new commands are not showing up immediately.
+        """
+        if not await self._is_admin_or_owner(ctx):
+            await ctx.send("This command is restricted to bot administrators.", ephemeral=True)
+            return
+            
+        await ctx.typing()
+        try:
+            synced = await self.bot.tree.sync()
+            await ctx.send(f"✅ Synced {len(synced)} commands.")
+            logger.info(f"Synced {len(synced)} commands via manual trigger.")
+        except Exception as e:
+            logger.error(f"Failed to sync commands: {e}")
+            await ctx.send(f"❌ Failed to sync commands: {e}")
 
 async def setup(bot):
     await bot.add_cog(Stocks(bot))

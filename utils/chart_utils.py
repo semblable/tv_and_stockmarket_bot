@@ -137,7 +137,7 @@ def get_stock_chart_image(symbol: str, timespan_label: str, data_points: list, c
             "format": "png"
         }
         
-        response = requests.post(QUICKCHART_BASE_URL, json=post_payload, timeout=15)
+        response = requests.post(QUICKCHART_BASE_URL, json=post_payload, timeout=30)
         if response.status_code == 200:
             return io.BytesIO(response.content)
         else:
