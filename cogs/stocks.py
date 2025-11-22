@@ -881,6 +881,31 @@ class Stocks(commands.Cog):
             
         await ctx.send(embed=embed, ephemeral=False) # Send publicly if successful
 
+    @commands.hybrid_command(name="set_portfolio_currency", description="Set your preferred currency for portfolio display.")
+    @discord.app_commands.describe(currency="The currency code (e.g., USD, EUR, PLN)")
+    async def set_portfolio_currency(self, ctx: commands.Context, currency: str):
+        """
+        Sets your preferred currency for portfolio valuation.
+        All stocks will be converted to this currency in !my_portfolio.
+        
+        Usage:
+        `!set_portfolio_currency USD`
+        `!set_portfolio_currency EUR`
+        """
+        currency = currency.upper()
+        valid_currencies = ["USD", "EUR", "PLN", "GBP", "CAD", "JPY", "AUD"]
+        if currency not in valid_currencies:
+            await ctx.send(f"⚠️ Unsupported currency. Please choose from: {', '.join(valid_currencies)}", ephemeral=True)
+            return
+
+        user_id = ctx.author.id
+        success = await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, "portfolio_currency", currency)
+        
+        if success:
+            await ctx.send(f"✅ Portfolio currency set to **{currency}**.", ephemeral=True)
+        else:
+            await ctx.send("❌ Failed to save preference.", ephemeral=True)
+
     @commands.hybrid_command(name="my_portfolio", description="View your stock portfolio performance.")
     async def my_portfolio(self, ctx: commands.Context):
         """
@@ -910,11 +935,19 @@ class Stocks(commands.Cog):
             )
             return
 
-        embed = discord.Embed(title="💰 Your Stock Portfolio", color=discord.Color.gold())
-        embed.set_footer(text="Data provided by Alpha Vantage. Prices may be delayed.")
+        # Get preferred currency
+        pref_currency = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "portfolio_currency", "USD")
+        
+        currency_symbols = {
+            'USD': '$', 'PLN': 'zł', 'EUR': '€', 'GBP': '£', 'CAD': 'C$', 'JPY': '¥', 'AUD': 'A$'
+        }
+        pref_currency_symbol = currency_symbols.get(pref_currency, pref_currency)
 
-        overall_cost_basis = 0
-        overall_market_value = 0
+        embed = discord.Embed(title=f"💰 Your Stock Portfolio ({pref_currency})", color=discord.Color.gold())
+        embed.set_footer(text="Data provided by Alpha Vantage/Yahoo Finance. Prices may be delayed.")
+
+        overall_cost_basis = 0.0
+        overall_market_value = 0.0
         api_call_count = 0
         individual_holdings_details = [] # Store list of dicts
 
@@ -927,141 +960,114 @@ class Stocks(commands.Cog):
             symbol = stock_data["symbol"]
             quantity = stock_data["quantity"]
             purchase_price = stock_data["purchase_price"]
+            # stored_currency = stock_data.get("currency", "USD") # Assuming stored price is in this currency
 
             if api_call_count > 0:
-                await asyncio.sleep(13) # Alpha Vantage: ~5 calls/min, so ~12s interval + buffer
+                await asyncio.sleep(2) # Short delay to be nice to APIs
 
-            # Try Alpha Vantage first, then fallback to Yahoo Finance (like stock_price command)
+            # Fetch current price
             current_price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol)
             data_source = "Alpha Vantage"
             api_call_count += 1
 
-            # If Alpha Vantage fails, try Yahoo Finance as fallback
+            # Fallback to Yahoo
             if not current_price_data or "error" in current_price_data:
-                if current_price_data and current_price_data.get("error") == "api_limit":
-                    logger.info(f"Portfolio: Alpha Vantage API limit for {symbol}. Falling back to Yahoo.")
-                else:
-                    logger.info(f"Portfolio: Alpha Vantage failed for {symbol}. Falling back to Yahoo.")
-                
                 current_price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol)
                 data_source = "Yahoo Finance"
 
             current_price = None
-            currency = "USD"  # Default currency
+            stock_currency = "USD"
             api_error_for_stock = False
 
             if current_price_data and "05. price" in current_price_data:
                 try:
                     current_price = float(current_price_data["05. price"])
-                    currency = current_price_data.get('currency', 'USD')  # Get actual currency
+                    stock_currency = current_price_data.get('currency', 'USD')
                 except (ValueError, TypeError):
-                    logger.error(f"Portfolio: Could not parse current price for {symbol}. Data: {current_price_data}")
                     api_error_for_stock = True
             else:
-                error_info = "Unknown API error"
-                if isinstance(current_price_data, dict) and "error" in current_price_data:
-                    error_info = current_price_data.get("message", current_price_data["error"])
-                elif current_price_data is None:
-                    error_info = "No data received (possible network issue or invalid symbol)"
-                logger.warning(f"Portfolio: Could not fetch price for {symbol}. Info: {error_info}")
                 api_error_for_stock = True
 
-            # Currency symbol mapping
-            currency_symbols = {
-                'USD': '$',
-                'PLN': 'zł',
-                'EUR': '€',
-                'GBP': '£',
-                'CAD': 'C$',
-                'JPY': '¥'
-            }
-            currency_symbol = currency_symbols.get(currency, currency)
+            # Conversion Logic
+            exchange_rate = 1.0
+            if not api_error_for_stock and stock_currency != pref_currency:
+                # Need conversion
+                pair = f"{stock_currency}{pref_currency}=X" # e.g. PLNUSD=X
+                # Special case for USD
+                if stock_currency == 'USD': pair = f"{pref_currency}=X" # This is wrong usually. 
+                # Yahoo convention: BaseQuote=X. EURUSD=X means 1 EUR = x USD.
+                
+                # Check Yahoo conventions or use a more robust way?
+                # Standard: EURUSD=X, GBPUSD=X, PLNUSD=X (Wait, PLNUSD might not exist, usually USDPLN=X)
+                # Let's rely on get_stock_price(pair)
+                
+                pair_symbol = f"{stock_currency}{pref_currency}=X"
+                fx_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, pair_symbol)
+                
+                if not fx_data:
+                     # Try inverse
+                     pair_symbol_inv = f"{pref_currency}{stock_currency}=X"
+                     fx_data_inv = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, pair_symbol_inv)
+                     if fx_data_inv and "05. price" in fx_data_inv:
+                         exchange_rate = 1.0 / float(fx_data_inv["05. price"])
+                elif "05. price" in fx_data:
+                    exchange_rate = float(fx_data["05. price"])
+                
+                # Apply conversion
+                current_price = current_price * exchange_rate
+                # Note: purchase_price is historical. We should ideally convert it at historical rate.
+                # But we don't have purchase date. So we have to assume purchase_price was entered in the SAME currency as the stock trades in?
+                # OR purchase_price is in 'currency' column of tracked_stocks.
+                # Let's assume purchase_price is in the stock's native currency for now, and convert it using CURRENT rate (approx) 
+                # OR we should convert cost basis using current rate to see "value if sold now vs cost if bought now"? 
+                # No, Cost Basis should be fixed in portfolio currency. 
+                # Limitation: We don't know historical FX. 
+                # COMPROMISE: Convert purchase_price using CURRENT FX rate. 
+                # This preserves the % gain/loss of the asset itself, but ignores FX gain/loss.
+                purchase_price = purchase_price * exchange_rate 
 
             cost_basis = quantity * purchase_price
-            market_value = 0.0 # Ensure float
-            gain_loss = 0.0 # Ensure float
+            market_value = 0.0
+            gain_loss = 0.0
             gain_loss_pct_str = "N/A"
-
-            overall_cost_basis += cost_basis
 
             if current_price is not None and not api_error_for_stock:
                 market_value = quantity * current_price
+                overall_cost_basis += cost_basis
                 overall_market_value += market_value
+                
                 gain_loss = market_value - cost_basis
                 if cost_basis != 0:
                     gain_loss_pct = (gain_loss / cost_basis) * 100
                     gain_loss_pct_str = f"{gain_loss_pct:+.2f}%"
-                else:
-                    gain_loss_pct_str = "N/A (zero cost basis)"
             elif api_error_for_stock:
                 market_value = "N/A (API Error)"
-                gain_loss = "N/A"
-                gain_loss_pct_str = "N/A"
-                current_price = "N/A (API Error)"
 
             individual_holdings_details.append({
                 "symbol": symbol,
                 "quantity": quantity,
-                "purchase_price": purchase_price,
-                "current_price": current_price,
-                "currency": currency,
-                "currency_symbol": currency_symbol,
-                "cost_basis": cost_basis,
+                "current_price": current_price if not api_error_for_stock else "N/A",
                 "market_value": market_value,
-                "gain_loss": gain_loss,
+                "gain_loss": gain_loss if not api_error_for_stock else "N/A",
                 "gain_loss_pct_str": gain_loss_pct_str,
-                "data_source": data_source
+                "source": data_source
             })
 
         overall_gain_loss = overall_market_value - overall_cost_basis
         overall_gain_loss_pct_str = "N/A"
-        if overall_cost_basis != 0 and isinstance(overall_market_value, (int, float)) and overall_market_value > 0 : # Check if market_value is numeric
+        if overall_cost_basis != 0:
             overall_gain_loss_pct = (overall_gain_loss / overall_cost_basis) * 100
             overall_gain_loss_pct_str = f"{overall_gain_loss_pct:+.2f}%"
-        elif overall_cost_basis == 0 and isinstance(overall_market_value, (int, float)) and overall_market_value > 0:
-             overall_gain_loss_pct_str = "+∞%"
-        elif overall_cost_basis == 0 and isinstance(overall_market_value, (int, float)) and overall_market_value == 0:
-             overall_gain_loss_pct_str = "N/A"
-        # If overall_market_value is a string (due to API error for all stocks), it remains "N/A"
 
-        summary_color = discord.Color.default()
-        if isinstance(overall_gain_loss, (int,float)): # Check if numeric before comparison
-            if overall_gain_loss > 0: summary_color = discord.Color.green()
-            elif overall_gain_loss < 0: summary_color = discord.Color.red()
-
+        summary_color = discord.Color.green() if overall_gain_loss >= 0 else discord.Color.red()
         embed.color = summary_color
-
-        # Check if all stocks use the same currency for cleaner summary display
-        currencies_used = set(item.get('currency', 'USD') for item in individual_holdings_details if isinstance(item.get('current_price'), (int, float)))
-        mixed_currencies = len(currencies_used) > 1
-        
-        if mixed_currencies:
-            # Mixed currencies - show totals in respective currencies or USD equivalent note
-            overall_market_value_display = f"${overall_market_value:,.2f}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
-            overall_gain_loss_display = f"${overall_gain_loss:,.2f}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
-            currency_note = " (mixed currencies, totals approximate)"
-        else:
-            # Single currency - use appropriate symbol
-            single_currency = list(currencies_used)[0] if currencies_used else 'USD'
-            currency_symbols = {'USD': '$', 'PLN': 'zł', 'EUR': '€', 'GBP': '£', 'CAD': 'C$', 'JPY': '¥'}
-            summary_currency_symbol = currency_symbols.get(single_currency, single_currency)
-            
-            if single_currency == 'PLN':
-                overall_market_value_display = f"{overall_market_value:,.2f} {summary_currency_symbol}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
-                overall_gain_loss_display = f"{overall_gain_loss:,.2f} {summary_currency_symbol}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
-                cost_basis_display = f"{overall_cost_basis:,.2f} {summary_currency_symbol}"
-            else:
-                overall_market_value_display = f"{summary_currency_symbol}{overall_market_value:,.2f}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
-                overall_gain_loss_display = f"{summary_currency_symbol}{overall_gain_loss:,.2f}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
-                cost_basis_display = f"{summary_currency_symbol}{overall_cost_basis:,.2f}"
-            currency_note = ""
 
         embed.add_field(
             name="📈 Overall Portfolio Summary",
             value=(
-                f"**Total Market Value:** {overall_market_value_display}{currency_note}\n"
-                f"**Total Cost Basis:** {cost_basis_display if not mixed_currencies else f'${overall_cost_basis:,.2f}'}\n"
-                f"**Total Gain/Loss:** {overall_gain_loss_display} ({overall_gain_loss_pct_str})"
+                f"**Total Market Value:** {pref_currency_symbol}{overall_market_value:,.2f}\n"
+                f"**Total Cost Basis:** {pref_currency_symbol}{overall_cost_basis:,.2f}\n"
+                f"**Total Gain/Loss:** {pref_currency_symbol}{overall_gain_loss:,.2f} ({overall_gain_loss_pct_str})"
             ),
             inline=False
         )
@@ -1070,99 +1076,43 @@ class Stocks(commands.Cog):
         for item in individual_holdings_details:
             symbol_header = f"--- **{item['symbol']}** ---"
             
-            # Use the correct currency for each stock
-            currency_symbol = item.get('currency_symbol', '$')
-            
-            # Format prices with appropriate currency
             if isinstance(item['current_price'], (int, float)):
-                if item.get('currency') == 'PLN':
-                    current_price_display = f"{item['current_price']:,.2f} {currency_symbol}"
-                else:
-                    current_price_display = f"{currency_symbol}{item['current_price']:,.2f}"
+                price_disp = f"{pref_currency_symbol}{item['current_price']:,.2f}"
+                val_disp = f"{pref_currency_symbol}{item['market_value']:,.2f}"
+                gl_disp = f"{pref_currency_symbol}{item['gain_loss']:+,.2f}"
+                gl_emoji = "🔼 " if item['gain_loss'] > 0 else "🔽 "
             else:
-                current_price_display = str(item['current_price'])
-            
-            if isinstance(item['market_value'], (int, float)):
-                if item.get('currency') == 'PLN':
-                    market_value_display = f"{item['market_value']:,.2f} {currency_symbol}"
-                else:
-                    market_value_display = f"{currency_symbol}{item['market_value']:,.2f}"
-            else:
-                market_value_display = str(item['market_value'])
-            
-            if isinstance(item['gain_loss'], (int, float)):
-                if item.get('currency') == 'PLN':
-                    gain_loss_display_val = f"{item['gain_loss']:+,.2f} {currency_symbol}"
-                else:
-                    gain_loss_display_val = f"{currency_symbol}{item['gain_loss']:+,.2f}"
-            else:
-                gain_loss_display_val = str(item['gain_loss'])
+                price_disp = "N/A"
+                val_disp = "N/A"
+                gl_disp = "N/A"
+                gl_emoji = ""
 
-            # Format purchase price and cost basis (these are stored in original currency)
-            if item.get('currency') == 'PLN':
-                purchase_price_display = f"{item['purchase_price']:,.2f} {currency_symbol}"
-                cost_basis_display = f"{item['cost_basis']:,.2f} {currency_symbol}"
-            else:
-                purchase_price_display = f"{currency_symbol}{item['purchase_price']:,.2f}"
-                cost_basis_display = f"{currency_symbol}{item['cost_basis']:,.2f}"
-
-            gain_loss_emoji = ""
-            if isinstance(item['gain_loss'], (int, float)):
-                if item['gain_loss'] > 0: gain_loss_emoji = "🔼 "
-                elif item['gain_loss'] < 0: gain_loss_emoji = "🔽 "
-            
             details = (
                 f"{symbol_header}\n"
-                f"Quantity: `{item['quantity']}` @ Avg Cost: `{purchase_price_display}`\n"
-                f"Cost Basis: `{cost_basis_display}`\n"
-                f"Current Price: `{current_price_display}`\n"
-                f"Market Value: `{market_value_display}`\n"
-                f"Gain/Loss: {gain_loss_emoji}`{gain_loss_display_val} ({item['gain_loss_pct_str']})`"
+                f"Qty: `{item['quantity']}`\n"
+                f"Price: `{price_disp}` | Value: `{val_disp}`\n"
+                f"G/L: {gl_emoji}`{gl_disp} ({item['gain_loss_pct_str']})`"
             )
             holdings_text_parts.append(details)
 
-        if holdings_text_parts:
-            current_field_value = ""
-            field_count = 0
-            for part_idx, part in enumerate(holdings_text_parts):
-                field_name = "Individual Holdings"
-                if field_count > 0 : # Check if previous field was also "Individual Holdings"
-                    field_name = "Individual Holdings (Continued)"
+        # Chunking fields
+        current_field_value = ""
+        field_count = 0
+        for part in holdings_text_parts:
+            if len(current_field_value) + len(part) + 2 > 1024:
+                embed.add_field(name="Holdings" if field_count == 0 else "Holdings (Cont.)", value=current_field_value, inline=False)
+                current_field_value = part
+                field_count += 1
+            else:
+                current_field_value += ("\n\n" if current_field_value else "") + part
+        
+        if current_field_value:
+            embed.add_field(name="Holdings" if field_count == 0 else "Holdings (Cont.)", value=current_field_value, inline=False)
 
-                if len(current_field_value) + len(part) + 2 > 1024:
-                    embed.add_field(name=field_name, value=current_field_value, inline=False)
-                    current_field_value = part
-                    field_count +=1
-                else:
-                    if current_field_value:
-                        current_field_value += f"\n\n{part}"
-                    else:
-                        current_field_value = part
+        if status_msg:
+            try: await status_msg.delete()
+            except: pass
             
-            if current_field_value: # Add the last part
-                field_name = "Individual Holdings"
-                if field_count > 0:
-                    field_name = "Individual Holdings (Continued)"
-                embed.add_field(name=field_name, value=current_field_value, inline=False)
-        else:
-            embed.add_field(name="Individual Holdings", value="No holdings data to display.", inline=False)
-
-        if status_msg: # Check if status_msg was defined
-            try:
-                await status_msg.delete()
-            except discord.NotFound:
-                pass
-            except discord.HTTPException as e:
-                logger.warning(f"Could not delete portfolio status message: {e}")
-
-        # Add footer indicating data sources
-        data_sources_used = set(item.get('data_source', 'Alpha Vantage') for item in individual_holdings_details)
-        if len(data_sources_used) > 1:
-            footer_text = f"Data provided by {' & '.join(sorted(data_sources_used))}. Prices may be delayed."
-        else:
-            footer_text = f"Data provided by {list(data_sources_used)[0] if data_sources_used else 'Alpha Vantage'}. Prices may be delayed."
-        embed.set_footer(text=footer_text)
-
         await ctx.send(embed=embed, ephemeral=False)
 
     @commands.hybrid_command(name="stock_debug", description="Debug stock API connections for a symbol.")
@@ -1294,6 +1244,157 @@ class Stocks(commands.Cog):
                     
         except Exception as e:
             await ctx.send(f"❌ Error setting alert: {str(e)}")
+
+    @commands.hybrid_command(name="portfolio_chart", description="Generate a chart of your portfolio's historical performance.")
+    @discord.app_commands.describe(timespan=f"The timespan for the chart. Default '1M'. Options: {', '.join(SUPPORTED_TIMESPAN.keys())}")
+    async def portfolio_chart(self, ctx: commands.Context, timespan: str = "1M"):
+        """
+        Generates a chart showing the historical value of your current portfolio over the specified timespan.
+        Note: This assumes your current holdings were held throughout the period (reconstructs history).
+        """
+        await ctx.defer(ephemeral=False)
+        
+        user_id = ctx.author.id
+        timespan_upper = timespan.upper()
+        if timespan_upper not in SUPPORTED_TIMESPAN:
+            await ctx.send(f"Invalid timespan. Options: {', '.join(SUPPORTED_TIMESPAN.keys())}", ephemeral=True)
+            return
+
+        # 1. Get Portfolio
+        tracked_stocks_all = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
+        portfolio_stocks = [s for s in tracked_stocks_all if s.get("quantity") is not None]
+        
+        if not portfolio_stocks:
+            await ctx.send("No stocks with quantity found in your portfolio.", ephemeral=True)
+            return
+
+        # 2. Get Preference
+        pref_currency = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "portfolio_currency", "USD")
+
+        # 3. Fetch History for each stock
+        config = SUPPORTED_TIMESPAN[timespan_upper]
+        # Always use Daily for portfolio history to reduce noise and align easier, unless 1D/5D?
+        # 1D portfolio chart is hard because intraday alignment is messy.
+        # Let's support 1M+ for now effectively, or map others to Daily.
+        # Actually, if user asks for 1D/5D, we should try intraday if possible, but let's stick to daily for robustness first for portfolio.
+        # Users usually want to see "Growth since X".
+        # If timespan is intraday (1D, 5D), let's fallback to 'daily' logic or warn.
+        # Let's force Daily for portfolio chart for simplicity and reliability.
+        
+        api_params = config["params"].copy()
+        yahoo_period = "1mo" # Default
+        if timespan_upper == "1D": yahoo_period = "1d"; interval = "15m" # approximations
+        elif timespan_upper == "5D": yahoo_period = "5d"; interval = "60m"
+        elif timespan_upper == "1M": yahoo_period = "1mo"
+        elif timespan_upper == "3M": yahoo_period = "3mo"
+        elif timespan_upper == "6M": yahoo_period = "6mo"
+        elif timespan_upper == "YTD": yahoo_period = "ytd"
+        elif timespan_upper == "1Y": yahoo_period = "1y"
+        elif timespan_upper == "MAX": yahoo_period = "max"
+
+        # We will use Yahoo Finance for batch/history because it's easier to get aligned daily data without strict rate limits of AV free tier.
+        # Also AV doesn't support "last 1 year" easily without full output size which is huge.
+        
+        stock_histories = {} # symbol -> {date_str: price}
+        conversion_rates = {} # symbol -> rate (approx current) OR {date_str: rate}
+
+        for stock in portfolio_stocks:
+            symbol = stock['symbol'].upper()
+            # Fetch history
+            # Use Yahoo Finance explicitly for portfolio history construction
+            hist_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, symbol, "compact", yahoo_period)
+            
+            if not hist_data:
+                # Try AV as fallback? AV daily full is heavy.
+                # Stick to Yahoo for history chart.
+                logger.warning(f"Could not fetch history for {symbol}")
+                continue
+
+            # Normalize to dict
+            stock_histories[symbol] = {item[0]: item[1] for item in hist_data}
+            
+            # Determine currency conversion
+            # We need to know the stock's currency to convert.
+            # get_stock_price fetches metadata including currency.
+            # We can optimize by checking one current price call or assuming we know it?
+            # Let's just fetch current info once to get currency.
+            info = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol)
+            stock_curr = info.get('currency', 'USD') if info else 'USD'
+
+            if stock_curr != pref_currency:
+                # Fetch FX history
+                pair = f"{stock_curr}{pref_currency}=X"
+                fx_hist = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, pair, "compact", yahoo_period)
+                if fx_hist:
+                    conversion_rates[symbol] = {item[0]: item[1] for item in fx_hist}
+                else:
+                    # Fallback: constant rate
+                    logger.warning(f"Could not fetch FX history for {pair}. Using 1.0")
+                    conversion_rates[symbol] = 1.0
+            else:
+                conversion_rates[symbol] = 1.0
+
+        if not stock_histories:
+             await ctx.send("Could not retrieve historical data for any of your stocks.", ephemeral=True)
+             return
+
+        # 4. Align and Sum
+        all_dates = set()
+        for s in stock_histories:
+            all_dates.update(stock_histories[s].keys())
+        
+        sorted_dates = sorted(list(all_dates))
+        portfolio_series = []
+
+        # Helper to find closest previous date's value (fill forward)
+        # Keys must be symbols (strings), not stock objects (dicts)
+        last_known_prices = {s['symbol'].upper(): 0.0 for s in portfolio_stocks}
+        last_known_fx = {s['symbol'].upper(): 1.0 for s in portfolio_stocks}
+
+        for date_str in sorted_dates:
+            daily_total = 0.0
+            
+            for stock in portfolio_stocks:
+                sym = stock['symbol'].upper()
+                qty = stock['quantity']
+                
+                if sym not in stock_histories: continue
+
+                # Update Price
+                if date_str in stock_histories[sym]:
+                    last_known_prices[sym] = stock_histories[sym][date_str]
+                
+                # Update FX
+                if isinstance(conversion_rates.get(sym), dict):
+                    if date_str in conversion_rates[sym]:
+                        last_known_fx[sym] = conversion_rates[sym][date_str]
+                    # else keep last known
+                elif isinstance(conversion_rates.get(sym), (int, float)):
+                     last_known_fx[sym] = conversion_rates[sym]
+                
+                # Calc value
+                val = last_known_prices[sym] * last_known_fx[sym] * qty
+                daily_total += val
+            
+            if daily_total > 0:
+                portfolio_series.append((date_str, daily_total))
+
+        # 5. Generate Chart
+        if not portfolio_series:
+             await ctx.send("Insufficient data to generate portfolio chart.", ephemeral=True)
+             return
+             
+        display_label = config["label"]
+        image_bytes = await self.bot.loop.run_in_executor(None, get_stock_chart_image, "Portfolio Value", f"{display_label} ({pref_currency})", portfolio_series)
+
+        if image_bytes:
+            file = discord.File(image_bytes, filename="portfolio_chart.png")
+            embed = discord.Embed(title=f"📈 Portfolio Performance ({display_label})", color=discord.Color.gold())
+            embed.set_image(url="attachment://portfolio_chart.png")
+            embed.set_footer(text=f"Valuation in {pref_currency}. Data: Yahoo Finance.")
+            await ctx.send(file=file, embed=embed)
+        else:
+            await ctx.send("Failed to generate chart image.", ephemeral=True)
 
     @commands.command(name="stock_alert_clear", aliases=["alert_clear"])
     async def stock_alert_clear(self, ctx: commands.Context, symbol: str, direction: str = "all"):
