@@ -2,6 +2,7 @@
 
 import discord
 import asyncio # Added for rate limiting
+import functools # Added for partial
 import logging # For background task logging
 import typing # For type hinting
 from discord.ext import commands, tasks
@@ -749,7 +750,7 @@ class Stocks(commands.Cog):
                 # If user requested intraday via timespan param logic:
                 time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_intraday_time_series, normalized_symbol, yahoo_interval)
             else: # Daily
-                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, normalized_symbol, period=yahoo_period)
+                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, normalized_symbol, "compact", yahoo_period)
         
         # Post-fetch processing (common for both AV and YF data)
         if not time_series_data:
@@ -1227,25 +1228,27 @@ class Stocks(commands.Cog):
         # Set the alert
         try:
             if direction_lower == 'above':
-                success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
+                func = functools.partial(self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=target, target_below=None,
                     dpc_above_target=None, dpc_below_target=None,
                     clear_above=False, clear_below=False,
                     clear_dpc_above=False, clear_dpc_below=False
                 )
+                success = await self.bot.loop.run_in_executor(None, func)
                 if success:
                     await ctx.send(f"✅ Alert set for {symbol_upper}: notify when price goes **above ${target:.2f}**")
                 else:
                     await ctx.send(f"❌ Failed to set alert for {symbol_upper}. It might already be set to this value.")
             else:  # below
-                success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
+                func = functools.partial(self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=None, target_below=target,
                     dpc_above_target=None, dpc_below_target=None,
                     clear_above=False, clear_below=False,
                     clear_dpc_above=False, clear_dpc_below=False
                 )
+                success = await self.bot.loop.run_in_executor(None, func)
                 if success:
                     await ctx.send(f"✅ Alert set for {symbol_upper}: notify when price goes **below ${target:.2f}**")
                 else:
@@ -1432,37 +1435,40 @@ class Stocks(commands.Cog):
             
         try:
             if direction_lower == 'all':
-                success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
+                func = functools.partial(self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=None, target_below=None,
                     dpc_above_target=None, dpc_below_target=None,
                     clear_above=True, clear_below=True,
                     clear_dpc_above=True, clear_dpc_below=True
                 )
+                success = await self.bot.loop.run_in_executor(None, func)
                 if success:
                     await ctx.send(f"✅ All alerts cleared for {symbol_upper}")
                 else:
                     await ctx.send(f"❌ Failed to clear alerts for {symbol_upper}")
             elif direction_lower == 'above':
-                success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
+                func = functools.partial(self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=None, target_below=None,
                     dpc_above_target=None, dpc_below_target=None,
                     clear_above=True, clear_below=False,
                     clear_dpc_above=False, clear_dpc_below=False
                 )
+                success = await self.bot.loop.run_in_executor(None, func)
                 if success:
                     await ctx.send(f"✅ 'Above' alert cleared for {symbol_upper}")
                 else:
                     await ctx.send(f"❌ Failed to clear 'above' alert for {symbol_upper}")
             else:  # below
-                success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
+                func = functools.partial(self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=None, target_below=None,
                     dpc_above_target=None, dpc_below_target=None,
                     clear_above=False, clear_below=True,
                     clear_dpc_above=False, clear_dpc_below=False
                 )
+                success = await self.bot.loop.run_in_executor(None, func)
                 if success:
                     await ctx.send(f"✅ 'Below' alert cleared for {symbol_upper}")
                 else:
