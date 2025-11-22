@@ -1,295 +1,66 @@
 # cogs/stocks.py
 
 import discord
-import asyncio
-import logging
-import typing
-from datetime import datetime
+import asyncio # Added for rate limiting
+import logging # For background task logging
+import typing # For type hinting
 from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
-from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series
-from api_clients import yahoo_finance_client
-from utils.chart_utils import generate_stock_chart_url, get_stock_chart_image
-from data_manager import DataManager
-from utils.paginator import BasePaginatorView
-import random
+from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series # Added
+from api_clients import yahoo_finance_client # Added Yahoo Finance support
+from utils.chart_utils import generate_stock_chart_url, get_stock_chart_image # Added
+from data_manager import DataManager # Import DataManager class
+# Individual function imports from data_manager are no longer needed if using an instance
 
 # Configure logging for this cog
 logger = logging.getLogger(__name__)
+# Example: Set a basic configuration if no root logger is configured
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Decreased interval since Yahoo Finance has higher limits/no strict free tier limits like AV
-STOCK_CHECK_INTERVAL_MINUTES = 15 
-CURRENCY_UPDATE_INTERVAL_HOURS = 6
+STOCK_CHECK_INTERVAL_MINUTES = 60 # Check one stock approximately every hour
 
 SUPPORTED_TIMESPAN = {
-    "1D": {"func": yahoo_finance_client.get_intraday_time_series, "params": {'interval': '15m', 'outputsize': 'compact'}, "label": "1 Day", "is_intraday": True},
-    "5D": {"func": yahoo_finance_client.get_intraday_time_series, "params": {'interval': '60m', 'outputsize': 'compact'}, "label": "5 Days", "is_intraday": True},
-    "1M": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'compact'}, "label": "1 Month", "is_intraday": False},
-    "3M": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'compact'}, "label": "3 Months", "is_intraday": False},
-    "6M": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'full'}, "label": "6 Months", "is_intraday": False},
-    "YTD": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'full'}, "label": "Year-to-Date", "is_intraday": False},
-    "1Y": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'full'}, "label": "1 Year", "is_intraday": False},
-    "MAX": {"func": yahoo_finance_client.get_daily_time_series, "params": {'outputsize': 'full'}, "label": "Max Available", "is_intraday": False},
+    "1D": {"func": get_intraday_time_series, "params": {'interval': '15min', 'outputsize': 'compact'}, "label": "1 Day", "is_intraday": True},
+    "5D": {"func": get_intraday_time_series, "params": {'interval': '60min', 'outputsize': 'compact'}, "label": "5 Days", "is_intraday": True},
+    "1M": {"func": get_daily_time_series, "params": {'outputsize': 'compact'}, "label": "1 Month", "is_intraday": False},
+    "3M": {"func": get_daily_time_series, "params": {'outputsize': 'compact'}, "label": "3 Months", "is_intraday": False}, # compact is 100 data points
+    "6M": {"func": get_daily_time_series, "params": {'outputsize': 'full'}, "label": "6 Months", "is_intraday": False}, # full for more data
+    "YTD": {"func": get_daily_time_series, "params": {'outputsize': 'full'}, "label": "Year-to-Date", "is_intraday": False},
+    "1Y": {"func": get_daily_time_series, "params": {'outputsize': 'full'}, "label": "1 Year", "is_intraday": False},
+    "MAX": {"func": get_daily_time_series, "params": {'outputsize': 'full'}, "label": "Max Available", "is_intraday": False},
 }
 
-class MyStocksPaginatorView(BasePaginatorView):
-    def __init__(self, *, timeout=300, user_id: int, items: list, bot_instance, db_manager, items_per_page: int = 5):
-        super().__init__(timeout=timeout, user_id=user_id, items=items, items_per_page=items_per_page)
-        self.bot = bot_instance
-        self.db_manager = db_manager
-
-    async def _edit_message(self, interaction: discord.Interaction):
-        await interaction.response.defer() # Acknowledge button click immediately
-        embed = await self._get_embed_for_current_page()
-        await interaction.message.edit(embed=embed, view=self)
-        self.message = interaction.message
-
-    async def _get_embed_for_current_page(self) -> discord.Embed:
-        self._update_button_states()
-
-        start_index = self.current_page * self.items_per_page
-        end_index = start_index + self.items_per_page
-        page_subs = self.items[start_index:end_index]
-
-        embed_title = f"📊 Your Tracked Stocks ({len(self.items)})"
-        if self.total_pages > 1:
-            embed_title += f" (Page {self.current_page + 1}/{self.total_pages})"
-        
-        embed = discord.Embed(title=embed_title, color=discord.Color.purple())
-        embed.set_footer(text="Data provided by Yahoo Finance. Prices may be delayed. Alerts shown are active.")
-
-        if not page_subs:
-            embed.description = "No stocks to display on this page."
-            return embed
-
-        description_lines = []
-        
-        for i, stock_item in enumerate(page_subs):
-            symbol_upper = stock_item['symbol'].upper()
-            normalized_symbol = yahoo_finance_client.normalize_symbol(symbol_upper)
-            stock_display = f"**{symbol_upper}**:"
-            
-            quantity = stock_item.get('quantity')
-            purchase_price = stock_item.get('purchase_price')
-            if quantity is not None and purchase_price is not None:
-                stock_display += f" ({quantity} @ ${purchase_price:,.2f})"
-            
-            # Primary: Yahoo Finance (using normalized symbol)
-            price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, normalized_symbol)
-            
-            # Fallback: Alpha Vantage (only if YF fails completely)
-            if not price_data:
-                 price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol_upper)
-
-            if price_data:
-                if "error" in price_data:
-                    stock_display += f" ❌ Price: N/A (Error)"
-                elif "05. price" in price_data:
-                    raw_price = price_data.get('05. price')
-                    raw_change = price_data.get('09. change', '0')
-                    currency = price_data.get('currency', 'USD')
-                    
-                    currency_symbols = {'USD': '$', 'PLN': 'zł', 'EUR': '€', 'GBP': '£', 'CAD': 'C$', 'JPY': '¥'}
-                    currency_symbol = currency_symbols.get(currency, currency)
-
-                    try:
-                        price_val = float(raw_price)
-                        if currency == 'PLN':
-                            price_display_val = f"{price_val:,.2f} {currency_symbol}"
-                        else:
-                            price_display_val = f"{currency_symbol}{price_val:,.2f}"
-                    except (ValueError, TypeError): price_display_val = "N/A"
-                    
-                    try:
-                        change_val_float = float(raw_change)
-                        trend_emoji = "📈 " if change_val_float > 0 else "📉 " if change_val_float < 0 else ""
-                    except (ValueError, TypeError): trend_emoji = ""
-                    stock_display += f" 💰 {price_display_val} {trend_emoji}"
-                else: 
-                    stock_display += " ❌ Price: N/A (Format)"
-            else: 
-                stock_display += " ❌ Price: N/A (Fetch)"
-
-            alert_info = await self.bot.loop.run_in_executor(None, self.db_manager.get_stock_alert, self.user_id, symbol_upper)
-            alert_texts = []
-            if alert_info:
-                if alert_info.get('active_above') and alert_info.get('target_above') is not None:
-                    alert_texts.append(f"Price > ${float(alert_info['target_above']):.2f}")
-                if alert_info.get('active_below') and alert_info.get('target_below') is not None:
-                    alert_texts.append(f"Price < ${float(alert_info['target_below']):.2f}")
-                if alert_info.get('dpc_above_active') and alert_info.get('dpc_above_target') is not None:
-                    alert_texts.append(f"DPC > +{float(alert_info['dpc_above_target']):.2f}%")
-                if alert_info.get('dpc_below_active') and alert_info.get('dpc_below_target') is not None:
-                    alert_texts.append(f"DPC < -{float(alert_info['dpc_below_target']):.2f}%")
-            
-            if alert_texts:
-                stock_display += f" | Alerts: {'; '.join(alert_texts)}"
-            
-            description_lines.append(stock_display)
-
-        if not description_lines:
-            embed.description = "Could not retrieve information for your tracked stocks."
-        else:
-            embed.description = "\n".join(description_lines)
-            
-        return embed
-
 class Stocks(commands.Cog):
-    def __init__(self, bot: commands.Bot, db_manager: DataManager) -> None:
+    def __init__(self, bot):
         self.bot = bot
-        self.db_manager = db_manager
-        self.unique_stocks_queue: typing.List[str] = []
+        self.db_manager = bot.db_manager # Get the DataManager instance from the bot
+        self.unique_stocks_queue = []
         self.current_queue_index = 0
-        self.check_stock_alerts.start()
-        self.check_currency_rates.start()
-        self.popular_stocks = [
-            # Tech Giants
-            "AAPL", "MSFT", "GOOG", "AMZN", "NVDA", "META", "TSLA", "AVGO", "CSCO", "ADBE", "CRM", "AMD", "NFLX", "INTC", "ORCL", "IBM", "QCOM", "TXN", "NOW", "INTU", "AMAT", "UBER", "SONY", "SAP", "ASML", "TSM",
-            # Financials
-            "JPM", "V", "MA", "BAC", "WFC", "MS", "GS", "AXP", "C", "BLK", "SPGI", "CB", "MMC", "PGR", "SCHW", "RY", "TD", "HDB", "HSBC", "UBS",
-            # Healthcare
-            "LLY", "UNH", "JNJ", "MRK", "ABBV", "TMO", "NVO", "AZN", "NVS", "PFE", "AMGN", "ISRG", "SYK", "ELV", "GILD", "VRTX", "REGN", "ZTS", "BMY", "DHR",
-            # Consumer
-            "AMZN", "TSLA", "WMT", "PG", "HD", "COST", "KO", "PEP", "MCD", "DIS", "NKE", "PM", "LOW", "SBUX", "TGT", "TJX", "UL", "BUD", "TM", "HMC",
-            # Industrial/Energy/Materials
-            "XOM", "CVX", "SHEL", "TTE", "BP", "CAT", "GE", "HON", "UNP", "UPS", "DE", "LMT", "RTX", "BA", "MMM", "LIN", "RIO", "BHP",
-            # ETFs
-            "SPY", "VOO", "QQQ", "IWM", "DIA", "VTI", "VEA", "VWO", "GLD", "SLV",
-            # Polish Top 20 (WIG20 approx)
-            "PKN.WA", "PKO.WA", "PEO.WA", "DNP.WA", "LPP.WA", "PZU.WA", "ALE.WA", "KGH.WA", "SPL.WA", "CDR.WA", 
-            "CPS.WA", "PGE.WA", "KRU.WA", "ALR.WA", "OPL.WA", "JSW.WA", "ACP.WA", "KTY.WA", "MBK.WA", "LWB.WA"
-        ]
+        self.check_stock_alerts.start() # Start the background task
 
-    async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False, view=None):
-        kwargs = {}
-        if content is not None: kwargs['content'] = content
-        if embed is not None: kwargs['embed'] = embed
-        if embeds is not None: kwargs['embeds'] = embeds
-        if view is not None: kwargs['view'] = view
-        
-        if ctx.interaction:
-            kwargs['ephemeral'] = ephemeral
-            kwargs['wait'] = wait
-            return await ctx.interaction.followup.send(**kwargs)
-        else:
-            return await ctx.send(**kwargs)
-
-    def cog_unload(self) -> None:
-        self.check_stock_alerts.cancel()
-        self.check_currency_rates.cancel()
+    def cog_unload(self):
+        self.check_stock_alerts.cancel() # Ensure the task is cancelled on cog unload
 
     @commands.Cog.listener()
-    async def on_ready(self) -> None:
+    async def on_ready(self):
         print("Stocks Cog is ready.")
-        logger.info("Stocks Cog is ready. Monitoring tasks (Alerts, Currency) started.")
-
-    async def stock_symbol_autocomplete(self, interaction: discord.Interaction, current: str) -> typing.List[discord.app_commands.Choice[str]]:
-        """
-        Autocomplete for general stock symbols (popular + tracked).
-        """
-        user_id = interaction.user.id
-        tracked_stocks = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
-        tracked_symbols = [s['symbol'] for s in tracked_stocks]
-        
-        all_candidates = sorted(list(set(tracked_symbols + self.popular_stocks)))
-        current_upper = current.upper()
-        
-        if not current:
-             return [discord.app_commands.Choice(name=s, value=s) for s in all_candidates[:25]]
-        
-        filtered = [s for s in all_candidates if current_upper in s]
-        return [discord.app_commands.Choice(name=s, value=s) for s in filtered[:25]]
-
-    async def tracked_stock_symbol_autocomplete(self, interaction: discord.Interaction, current: str) -> typing.List[discord.app_commands.Choice[str]]:
-        """
-        Autocomplete strictly for stocks the user is currently tracking.
-        """
-        user_id = interaction.user.id
-        tracked_stocks = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
-        tracked_symbols = sorted([s['symbol'] for s in tracked_stocks])
-        
-        current_upper = current.upper()
-        
-        if not current:
-             return [discord.app_commands.Choice(name=s, value=s) for s in tracked_symbols[:25]]
-        
-        filtered = [s for s in tracked_symbols if current_upper in s]
-        return [discord.app_commands.Choice(name=s, value=s) for s in filtered[:25]]
-
-    @tasks.loop(hours=CURRENCY_UPDATE_INTERVAL_HOURS)
-    async def check_currency_rates(self) -> None:
-        """
-        Periodic task to update currency exchange rates.
-        """
-        if not self.db_manager:
-            logger.error("StocksCog: DataManager not available. Cannot update currency rates.")
-            return
-
-        logger.info("Updating currency exchange rates...")
-        
-        # Pairs to update: Convert TO USD
-        pairs_to_update = [
-            ("EUR", "USD"),
-            ("GBP", "USD"),
-            ("PLN", "USD"),
-            ("CAD", "USD"),
-            ("JPY", "USD")
-        ]
-        
-        for from_curr, to_curr in pairs_to_update:
-            rate = await self.bot.loop.run_in_executor(
-                None, 
-                alpha_vantage_client.get_currency_exchange_rate, 
-                from_curr, 
-                to_curr
-            )
-            
-            if rate:
-                pair_key = f"{from_curr}/{to_curr}"
-                await self.bot.loop.run_in_executor(
-                    None,
-                    self.db_manager.update_currency_rate,
-                    pair_key,
-                    rate
-                )
-                logger.info(f"Updated rate for {pair_key}: {rate}")
-                
-                # Also store inverse rate for convenience (e.g. USD/PLN)
-                if rate > 0:
-                    inverse_pair_key = f"{to_curr}/{from_curr}"
-                    inverse_rate = 1.0 / rate
-                    await self.bot.loop.run_in_executor(
-                        None,
-                        self.db_manager.update_currency_rate,
-                        inverse_pair_key,
-                        inverse_rate
-                    )
-            else:
-                logger.warning(f"Failed to fetch rate for {from_curr}/{to_curr}")
-            
-            # Respect API limits (5 calls/min usually for free tier, though currency might be different)
-            await asyncio.sleep(15)
-
-    @check_currency_rates.before_loop
-    async def before_check_currency_rates(self) -> None:
-        await self.bot.wait_until_ready()
-        logger.info("Currency update task waiting for bot to be ready...")
+        logger.info("Stocks Cog is ready and stock alert monitoring task is running.")
 
     @tasks.loop(minutes=STOCK_CHECK_INTERVAL_MINUTES)
-    async def check_stock_alerts(self) -> None:
+    async def check_stock_alerts(self):
         if not self.db_manager:
             logger.error("StocksCog: DataManager (db_manager) not available. Cannot check stock alerts.")
             return
 
         logger.info("Stock alert check task running...")
-        all_user_alerts_map = await self.bot.loop.run_in_executor(None, self.db_manager.get_all_active_alerts_for_monitoring)
+        all_user_alerts_map = await self.bot.loop.run_in_executor(None, self.db_manager.get_all_active_alerts_for_monitoring) # Returns dict {user_id: {symbol: alert_details}}
 
         if not all_user_alerts_map:
             logger.info("No active stock alerts to monitor.")
             return
 
+        # Extract all unique symbols from the map
         all_symbols_with_alerts = set()
         for user_id_str, stock_alerts_dict in all_user_alerts_map.items():
             for symbol_str in stock_alerts_dict.keys():
@@ -297,16 +68,18 @@ class Stocks(commands.Cog):
         
         latest_unique_symbols = sorted(list(all_symbols_with_alerts))
 
+
         if not latest_unique_symbols:
             logger.info("No unique symbols from active alerts.")
             self.unique_stocks_queue = []
             self.current_queue_index = 0
             return
 
+        # Update queue if the set of unique symbols has changed
         if set(latest_unique_symbols) != set(self.unique_stocks_queue):
             logger.info(f"Unique stock list changed. Old: {self.unique_stocks_queue}, New: {latest_unique_symbols}")
             self.unique_stocks_queue = latest_unique_symbols
-            self.current_queue_index = 0
+            self.current_queue_index = 0 # Reset index if list changes
 
         if not self.unique_stocks_queue:
             logger.info("Stock monitoring queue is empty after update.")
@@ -320,41 +93,31 @@ class Stocks(commands.Cog):
 
         self.current_queue_index = (self.current_queue_index + 1) % len(self.unique_stocks_queue)
         
-        await asyncio.sleep(0.5)
-        
-        # Primary: Yahoo Finance
-        normalized_symbol = yahoo_finance_client.normalize_symbol(symbol_to_check)
-        price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, normalized_symbol)
-        
-        if not price_data:
-             # Fallback
-             price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol_to_check)
+        await asyncio.sleep(2) # Small delay
+        price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol_to_check)
 
-        if not price_data or "error" in price_data or "05. price" not in price_data:
+        if not price_data or "error" in price_data or "05. price" not in price_data or "08. previous close" not in price_data:
             error_msg = price_data.get("message", "Unknown API error or invalid/incomplete data") if isinstance(price_data, dict) else "No data received"
             logger.error(f"Could not fetch complete price data for {symbol_to_check} during alert check: {error_msg}")
+            if isinstance(price_data, dict) and price_data.get("error") == "api_limit":
+                logger.warning(f"Alpha Vantage API limit reached while checking {symbol_to_check}. Task will retry next cycle.")
             return
 
         try:
             current_price = float(price_data['05. price'])
-            previous_close_price = 0
-            if '08. previous close' in price_data:
-                 previous_close_price = float(price_data['08. previous close'])
-            elif '05. price' in price_data and '09. change' in price_data:
-                 change = float(price_data['09. change'])
-                 previous_close_price = current_price - change
-            
+            previous_close_price = float(price_data['08. previous close'])
             logger.info(f"Data for {symbol_to_check}: Current Price: {current_price}, Previous Close: {previous_close_price}")
         except (ValueError, TypeError) as e:
             logger.error(f"Could not parse price/previous close for {symbol_to_check}. Data: {price_data}. Error: {e}")
             return
 
+        # Iterate through users who have alerts for this specific symbol_to_check
         for user_id_str, user_specific_alerts_dict in all_user_alerts_map.items():
             if symbol_to_check not in user_specific_alerts_dict:
-                continue
+                continue # This user doesn't have an alert for the current symbol
 
-            alert_details = user_specific_alerts_dict[symbol_to_check]
-            user_id_int = int(user_id_str)
+            alert_details = user_specific_alerts_dict[symbol_to_check] # This is the dict of alert conditions
+            user_id_int = int(user_id_str) # Convert string user_id to int
             
             discord_user_obj = await self.bot.fetch_user(user_id_int)
             if not discord_user_obj:
@@ -364,19 +127,23 @@ class Stocks(commands.Cog):
             triggered_message = None
             deactivate_direction = None
 
+            # --- Price Target Checks ---
+            # alert_details keys are like 'target_above', 'active_above', etc.
             if alert_details.get('active_above') and alert_details.get('target_above') is not None:
-                if current_price > float(alert_details['target_above']):
+                if current_price > float(alert_details['target_above']): # Ensure comparison with float
                     triggered_message = f"📈 **Price Alert!** {symbol_to_check} has risen above your target of ${float(alert_details['target_above']):.2f}. Current price: ${current_price:.2f}"
                     deactivate_direction = "above"
             
             if not triggered_message and alert_details.get('active_below') and alert_details.get('target_below') is not None:
-                if current_price < float(alert_details['target_below']):
+                if current_price < float(alert_details['target_below']): # Ensure comparison with float
                     triggered_message = f"📉 **Price Alert!** {symbol_to_check} has fallen below your target of ${float(alert_details['target_below']):.2f}. Current price: ${current_price:.2f}"
                     deactivate_direction = "below"
 
+            # --- Daily Percentage Change (DPC) Target Checks ---
             if not triggered_message and previous_close_price != 0:
                 percentage_change = ((current_price - previous_close_price) / previous_close_price) * 100
-                
+                logger.info(f"DPC calc for {symbol_to_check} (User {user_id_int}): Current: {current_price}, Prev Close: {previous_close_price}, Change: {percentage_change:.2f}%")
+
                 if alert_details.get('dpc_above_active') and alert_details.get('dpc_above_target') is not None:
                     if percentage_change > float(alert_details['dpc_above_target']):
                         triggered_message = f"📈 **DPC Alert!** {symbol_to_check} is up +{percentage_change:.2f}% today (currently ${current_price:.2f}), meeting your +{float(alert_details['dpc_above_target']):.2f}% target."
@@ -386,7 +153,9 @@ class Stocks(commands.Cog):
                     if percentage_change < 0 and abs(percentage_change) > float(alert_details['dpc_below_target']):
                          triggered_message = f"📉 **DPC Alert!** {symbol_to_check} is down {percentage_change:.2f}% today (currently ${current_price:.2f}), meeting your -{float(alert_details['dpc_below_target']):.2f}% target."
                          deactivate_direction = "dpc_below"
-            
+            elif not triggered_message and previous_close_price == 0:
+                logger.warning(f"Cannot calculate DPC for {symbol_to_check} as previous_close_price is 0.")
+
             if triggered_message and deactivate_direction:
                 try:
                     await discord_user_obj.send(triggered_message)
@@ -400,99 +169,135 @@ class Stocks(commands.Cog):
         logger.info(f"Finished alert check for {symbol_to_check}.")
 
     @check_stock_alerts.before_loop
-    async def before_check_stock_alerts(self) -> None:
+    async def before_check_stock_alerts(self):
         await self.bot.wait_until_ready()
         logger.info("Stock alert monitoring task is waiting for bot to be ready...")
 
-    @commands.hybrid_command(name="stock_price", description="Get current price (Supports US, Global 100, Polish WIG20).")
+    @commands.hybrid_command(name="stock_price", description="Get the current price of a stock.")
     @discord.app_commands.describe(symbol="The stock symbol (e.g., AAPL, MSFT, LPP.WA)")
-    @discord.app_commands.autocomplete(symbol=stock_symbol_autocomplete)
-    async def stock_price(self, ctx: commands.Context, *, symbol: str) -> None:
+    async def stock_price(self, ctx: commands.Context, *, symbol: str):
         """
         Fetches and displays the current price and other relevant information for a given stock symbol.
-        Supports US stocks, Global 100 companies, and top Polish stocks (add .WA for Polish).
-        Using Yahoo Finance as primary source for better limits and data.
+        Supports both US stocks (Alpha Vantage) and international stocks like Polish stocks (Yahoo Finance).
+
+        Usage examples:
+        `!stock_price AAPL`
+        `/stock_price symbol:TSLA`
+        `/stock_price symbol:LPP` (Polish stock, auto-converted to LPP.WA)
+        `/stock_price symbol:LPP.WA` (Polish stock, explicit format)
         """
         await ctx.defer(ephemeral=True)
         
         logger.info(f"[STOCK_PRICE_DEBUG] Command received for symbol: {symbol}")
         upper_symbol = symbol.upper()
         
-        # Normalize for Yahoo Finance (e.g., remove .US)
-        normalized_symbol = yahoo_finance_client.normalize_symbol(upper_symbol)
+        # First try Alpha Vantage (for US stocks)
+        logger.info(f"[STOCK_PRICE_DEBUG] Attempting Alpha Vantage for {upper_symbol}")
+        price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, upper_symbol)
+        data_source = "Alpha Vantage"
+        logger.info(f"[STOCK_PRICE_DEBUG] Alpha Vantage raw response for {upper_symbol}: {price_data}")
 
-        logger.info(f"[STOCK_PRICE_DEBUG] Attempting Yahoo Finance for {upper_symbol} (Normalized: {normalized_symbol})")
-        price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, normalized_symbol)
-        data_source = "Yahoo Finance"
-
+        # If Alpha Vantage fails or has API limits, try Yahoo Finance as fallback
         if not price_data or "error" in price_data:
-             logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance failed for {normalized_symbol}. Falling back to Alpha Vantage with original symbol {upper_symbol}.")
-             av_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, upper_symbol)
-             if av_data and "error" not in av_data:
-                 price_data = av_data
-                 data_source = "Alpha Vantage"
+            if price_data and price_data.get("error") == "api_limit":
+                logger.info(f"[STOCK_PRICE_DEBUG] Alpha Vantage API limit for {upper_symbol}. Falling back to Yahoo.")
+            else:
+                logger.info(f"[STOCK_PRICE_DEBUG] Alpha Vantage failed for {upper_symbol} (Data: {price_data}). Falling back to Yahoo.")
+            
+            # Try Yahoo Finance
+            logger.info(f"[STOCK_PRICE_DEBUG] Attempting Yahoo Finance for {upper_symbol} (normalized to {yahoo_finance_client.normalize_symbol(upper_symbol)})")
+            price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, upper_symbol)
+            data_source = "Yahoo Finance"
+            logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance raw response for {yahoo_finance_client.normalize_symbol(upper_symbol)}: {price_data}")
+            
+            # If Yahoo Finance also fails, we're out of options
+            if not price_data:
+                logger.info(f"[STOCK_PRICE_DEBUG] Yahoo Finance also failed for {yahoo_finance_client.normalize_symbol(upper_symbol)}. No more APIs to try.")
         
+        # Check if we have valid data from any source
         if not price_data:
+            logger.error(f"[STOCK_PRICE_DEBUG] All APIs failed for {upper_symbol}.")
             embed = discord.Embed(
                 title="❌ Stock Not Found",
-                description=f"Could not retrieve data for **{upper_symbol}** from Yahoo Finance or Alpha Vantage.\n\n" +
+                description=f"Could not retrieve data for **{upper_symbol}** from Alpha Vantage or Yahoo Finance.\n\n" +
                            f"Please check the symbol and try again.\n\n" +
                            f"💡 **Tip**: For Polish stocks, try adding `.WA` suffix (e.g., `{upper_symbol}.WA`)",
                 color=discord.Color.red()
             )
-            await self.send_response(ctx,embed=embed)
+            await ctx.followup.send(embed=embed)
             return
 
-        if price_data:
-            if "error" in price_data:
-                 await self.send_response(ctx,f"Error fetching data for {upper_symbol}: {price_data.get('message')}")
-            elif "05. price" in price_data:
-                stock_symbol_from_api = price_data.get('01. symbol', upper_symbol)
+        if price_data: # This block now processes data from AV or YF
+            if "error" in price_data: # This error is now from the *second* attempt if AV failed
+                error_type = price_data["error"]
+                error_message = price_data.get("message", "An unspecified error occurred.")
+                logger.error(f"[STOCK_PRICE_DEBUG] Final data source ({data_source}) reported error for {upper_symbol}: Type: {error_type}, Msg: {error_message}")
+                if error_type == "api_limit":
+                    await ctx.followup.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
+                elif error_type == "config_error":
+                    print(f"Stock price configuration error for {upper_symbol}: {error_message}") # Log server-side
+                    await ctx.followup.send(f"Could not retrieve price for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.")
+                elif error_type == "api_error":
+                    await ctx.followup.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
+                else: # Unknown error type in dictionary
+                    print(f"Stock price: Unknown error type '{error_type}' for {upper_symbol}: {error_message}")
+                    await ctx.followup.send(f"Error fetching data for {upper_symbol}. An unexpected error occurred with the data provider.")
+            elif "01. symbol" in price_data and "05. price" in price_data: # Success from either AV or YF
+                logger.info(f"[STOCK_PRICE_DEBUG] Successfully processed data for {upper_symbol} from {data_source}.")
+                stock_symbol_from_api = price_data['01. symbol']
                 
+                # Get currency from the API response, default to USD for Alpha Vantage
                 currency = price_data.get('currency', 'USD')
-                currency_symbols = {'USD': '$', 'PLN': 'zł', 'EUR': '€', 'GBP': '£', 'CAD': 'C$', 'JPY': '¥'}
+                
+                # Determine currency symbol for display
+                currency_symbols = {
+                    'USD': '$',
+                    'PLN': 'zł',
+                    'EUR': '€',
+                    'GBP': '£',
+                    'CAD': 'C$',
+                    'JPY': '¥'
+                }
                 currency_symbol = currency_symbols.get(currency, currency)
                 
+                # Helper to safely get and format numbers
                 def get_formatted_value(key, prefix="", suffix="", is_numeric=True, is_currency=False, is_volume=False):
                     value = price_data.get(key)
-                    if value is None or value == "" or value == "N/A":
+                    if value is None or value == "":
                         return "N/A"
                     try:
                         if is_numeric:
-                            num_value = float(str(value).rstrip('%'))
+                            num_value = float(value.rstrip('%')) # Remove % for change percent
                             if is_currency:
                                 return f"{num_value:,.2f} {currency_symbol}" if currency == 'PLN' else f"{currency_symbol}{num_value:,.2f}"
                             elif is_volume:
                                 return f"{prefix}{int(num_value):,}{suffix}"
-                            if key == '09. change':
+                            # For change and change percent, format based on original string
+                            if key == '09. change': # Retain sign
                                 return f"{value}"
-                            if key == '10. change percent':
+                            if key == '10. change percent': # Retain sign and %
                                 return f"{value}"
-                            return f"{prefix}{num_value:,.2f}{suffix}"
-                        return f"{prefix}{value}{suffix}"
+                            return f"{prefix}{num_value:,.2f}{suffix}" # Default numeric formatting
+                        return f"{prefix}{value}{suffix}" # Non-numeric
                     except ValueError:
-                        return "N/A"
-                
+                        return "N/A" # Should not happen if API is consistent
+
                 price = get_formatted_value('05. price', is_currency=True)
+                change_val_str = price_data.get('09. change', '0') # Default to '0' for float conversion
+                change_percent_val_str = price_data.get('10. change percent', '0%') # Default to '0%' for float conversion
+                
                 change_display = get_formatted_value('09. change')
                 change_percent_display = get_formatted_value('10. change percent')
 
                 day_high = get_formatted_value('03. high', is_currency=True)
                 day_low = get_formatted_value('04. low', is_currency=True)
                 volume = get_formatted_value('06. volume', is_volume=True)
-                
-                # Extended fundamentals (Yahoo Finance)
-                market_cap = get_formatted_value('marketCap', is_volume=True, prefix="$") if currency == 'USD' else get_formatted_value('marketCap', is_volume=True)
-                pe_ratio = get_formatted_value('trailingPE', is_numeric=True)
-                eps = get_formatted_value('epsTrailingTwelveMonths', is_numeric=True)
-                year_high = get_formatted_value('fiftyTwoWeekHigh', is_currency=True)
-                year_low = get_formatted_value('fiftyTwoWeekLow', is_currency=True)
 
-                embed_color = discord.Color.light_grey()
-                trend_emoji = "📊"
+                # Determine embed color and trend emoji
+                embed_color = discord.Color.light_grey() # Default color
+                trend_emoji = "📊" # Default emoji
 
                 try:
-                    change_val_str = price_data.get('09. change', '0')
                     change_float = float(change_val_str)
                     if change_float > 0:
                         embed_color = discord.Color.green()
@@ -501,11 +306,9 @@ class Stocks(commands.Cog):
                         embed_color = discord.Color.red()
                         trend_emoji = "📉"
                 except ValueError:
-                    pass
+                    pass # Keep default color and emoji if change is N/A or not a number
 
                 embed = discord.Embed(title=f"{trend_emoji} Stock Info for {stock_symbol_from_api}", color=embed_color)
-                if price_data.get('longName'):
-                    embed.description = f"**{price_data.get('longName')}**"
                 
                 embed.add_field(name="💰 Price", value=price, inline=True)
                 embed.add_field(name="↕️ Change", value=f"{change_display}", inline=True)
@@ -515,44 +318,47 @@ class Stocks(commands.Cog):
                 embed.add_field(name="🔽 Day's Low", value=day_low, inline=True)
                 embed.add_field(name="📊 Volume", value=volume, inline=True)
                 
-                if data_source == "Yahoo Finance":
-                    embed.add_field(name="🗓️ 52-Week High", value=year_high, inline=True)
-                    embed.add_field(name="🗓️ 52-Week Low", value=year_low, inline=True)
-                    embed.add_field(name="🏦 Market Cap", value=market_cap, inline=True)
-                    embed.add_field(name="📉 P/E Ratio", value=pe_ratio, inline=True)
-                    embed.add_field(name="💵 EPS (TTM)", value=eps, inline=True)
-                else:
-                    embed.add_field(name="🗓️ 52-Week High", value="N/A", inline=True)
-                    embed.add_field(name="🗓️ 52-Week Low", value="N/A", inline=True)
-                    embed.add_field(name="🏦 Market Cap", value="N/A", inline=True)
+                embed.add_field(name="🗓️ 52-Week High", value="N/A", inline=True)
+                embed.add_field(name="🗓️ 52-Week Low", value="N/A", inline=True)
+                embed.add_field(name="🏦 Market Cap", value="N/A", inline=True)
                 
+                # Add exchange info for international stocks
                 if currency != 'USD' and 'exchange' in price_data:
                     embed.add_field(name="🏢 Exchange", value=price_data['exchange'], inline=True)
                 
                 embed.set_footer(text=f"Data provided by {data_source}")
                 await ctx.send(embed=embed)
-            else:
+            else: # price_data is a dictionary, but not a known error type and not a success structure
+                logger.error(f"[STOCK_PRICE_DEBUG] Unexpected data structure for {upper_symbol} from {data_source}: {price_data}")
+                print(f"Stock price: Unexpected data structure for {symbol.upper()}: {price_data}")
                 await ctx.send(f"Error fetching data for {symbol.upper()}. Unexpected data format received from the provider.")
+        else: # price_data is None (e.g., network issue, client-side timeout before API response) - This implies BOTH AV and YF returned None
+            logger.error(f"[STOCK_PRICE_DEBUG] Both Alpha Vantage and Yahoo Finance returned None for {upper_symbol}.")
+            await ctx.send(f"Error fetching data for {symbol.upper()}. Could not connect to the data provider or the symbol is invalid.")
 
 
-    @commands.hybrid_command(name="track_stock", description="Track a stock (US, Global, Polish) for portfolio/alerts.")
+    @commands.hybrid_command(name="track_stock", description="Track a stock symbol, optionally with quantity and purchase price.")
     @discord.app_commands.describe(
-        symbol="The stock symbol to track (e.g., AAPL, MSFT, LPP.WA)",
+        symbol="The stock symbol to track (e.g., AAPL, MSFT)",
         quantity="Number of shares (e.g., 10.5)",
-        purchase_price="Price per share at purchase (e.g., 150.75)",
-        currency="Currency code (e.g., USD, PLN, EUR, GBP)"
+        purchase_price="Price per share at purchase (e.g., 150.75)"
     )
-    @discord.app_commands.autocomplete(symbol=stock_symbol_autocomplete)
-    async def track_stock(self, ctx: commands.Context, symbol: str, quantity: typing.Optional[float] = None, purchase_price: typing.Optional[float] = None, currency: typing.Optional[str] = None) -> None:
+    async def track_stock(self, ctx: commands.Context, symbol: str, quantity: typing.Optional[float] = None, purchase_price: typing.Optional[float] = None):
         """
         Allows a user to start tracking a stock symbol.
-        Supports US, Global, and Polish stocks.
-        Optionally, users can provide quantity, purchase price, and currency for portfolio tracking.
+        Optionally, users can provide quantity and purchase price for portfolio tracking.
+        If a stock is already tracked and new quantity/price are provided, they will be updated.
+
+        Usage examples:
+        `!track_stock GOOG`
+        `/track_stock symbol:AMZN`
+        `!track_stock AAPL quantity=10 purchase_price=150.00`
+        `/track_stock symbol:TSLA quantity:5 purchase_price:700.25`
         """
         upper_symbol = symbol.upper()
         user_id = ctx.author.id
-        upper_currency = currency.upper() if currency else None
 
+        # Validate quantity and purchase_price: if one is provided, the other must also be.
         if (quantity is not None and purchase_price is None) or \
            (quantity is None and purchase_price is not None):
             await ctx.send("If providing portfolio details, both `quantity` and `purchase_price` must be specified.", ephemeral=True)
@@ -567,58 +373,142 @@ class Stocks(commands.Cog):
 
         await ctx.defer(ephemeral=True)
         
-        success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tracked_stock, user_id, upper_symbol, quantity, purchase_price, upper_currency)
+        # Attempt to add/update the stock
+        # The self.db_manager.add_tracked_stock now handles the logic of adding vs updating
+        # and whether portfolio data is new, updated, or absent.
+        success = await self.bot.loop.run_in_executor(None, self.db_manager.add_tracked_stock, user_id, upper_symbol, quantity, purchase_price)
 
         if success:
             if quantity is not None and purchase_price is not None:
-                currency_msg = f" {upper_currency}" if upper_currency else ""
-                await ctx.send(f"Successfully tracking {upper_symbol} with {quantity} shares at ${purchase_price:,.2f}{currency_msg} each. Portfolio data updated.", ephemeral=True)
+                await ctx.send(f"Successfully tracking {upper_symbol} with {quantity} shares at ${purchase_price:,.2f} each. Portfolio data updated.", ephemeral=True)
             else:
-                tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
+                # Check if it was already tracked with portfolio data that's being kept, or just simple tracking
+                tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id) # Returns list of dicts
                 existing_stock_info = next((s for s in tracked_stocks_list if s['symbol'] == upper_symbol), None)
                 if existing_stock_info and existing_stock_info.get('quantity') is not None:
                      await ctx.send(f"Successfully tracking {upper_symbol}. Existing portfolio data (Quantity: {existing_stock_info['quantity']}, Price: ${existing_stock_info.get('purchase_price', 0):,.2f}) is maintained.", ephemeral=True)
                 else:
                     await ctx.send(f"Successfully started tracking {upper_symbol} (no portfolio data provided/updated).", ephemeral=True)
         else:
+            # This 'else' from db_manager.add_tracked_stock usually means a DB operation failure
+            # or if quantity/price was partially provided for a new stock.
             await ctx.send(f"Could not track {upper_symbol}. This might be due to invalid quantity/price format for a new stock, or a database error.", ephemeral=True)
 
     @commands.hybrid_command(name="untrack_stock", description="Stop tracking a stock symbol.")
     @discord.app_commands.describe(symbol="The stock symbol to untrack (e.g., AAPL, MSFT)")
-    @discord.app_commands.autocomplete(symbol=tracked_stock_symbol_autocomplete)
-    async def untrack_stock(self, ctx: commands.Context, *, symbol: str) -> None:
+    async def untrack_stock(self, ctx: commands.Context, *, symbol: str):
         """
         Allows a user to stop tracking a stock symbol.
+
+        Usage examples:
+        `!untrack_stock MSFT`
+        `/untrack_stock symbol:NVDA`
         """
         await ctx.defer(ephemeral=True)
         
         upper_symbol = symbol.upper()
         user_id = ctx.author.id
-        if await self.bot.loop.run_in_executor(None, self.db_manager.remove_tracked_stock, user_id, upper_symbol):
+        if await self.bot.loop.run_in_executor(None, self.db_manager.remove_tracked_stock, user_id, upper_symbol): # Returns True on successful commit
             await ctx.send(f"Successfully stopped tracking {upper_symbol}.", ephemeral=True)
         else:
+            # This now implies a DB operation failure, as "not found" doesn't make the DB operation fail.
+            # To check if it was found, we'd query before deleting.
             await ctx.send(f"Could not untrack {upper_symbol}. It might not be in your list or a database error occurred.", ephemeral=True)
 
     @commands.hybrid_command(name="my_tracked_stocks", description="Lists your tracked stock symbols.")
-    async def my_tracked_stocks(self, ctx: commands.Context) -> None:
+    async def my_tracked_stocks(self, ctx: commands.Context):
         """
         Lists all stock symbols you are currently tracking, along with their current prices.
+        Note: Due to API rate limits, fetching prices for many stocks may take some time.
+
+        Usage examples:
+        `!my_tracked_stocks`
+        `/my_tracked_stocks`
         """
         await ctx.defer(ephemeral=True)
         
         user_id = ctx.author.id
-        tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
+        tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id) # Returns list of dicts
 
         if not tracked_stocks_list:
             await ctx.send("You are not tracking any stocks. Use `/track_stock <symbol>` to add some!", ephemeral=True)
             return
 
-        # Warning about rate limits removed as we are using Yahoo Finance primarily
-        if len(tracked_stocks_list) > 10:
-             await ctx.send(f"You have {len(tracked_stocks_list)} tracked stocks. Fetching prices...", ephemeral=True)
+        embed = discord.Embed(title=f"📊 Your Tracked Stocks ({len(tracked_stocks_list)})", color=discord.Color.purple())
+        embed.set_footer(text="Data provided by Alpha Vantage. Prices may be delayed. Alerts shown are active.")
+        
+        description_lines = []
+        api_call_count = 0
+        max_calls_for_prices = 3
 
-        view = MyStocksPaginatorView(user_id=user_id, items=tracked_stocks_list, bot_instance=self.bot, db_manager=self.db_manager)
-        await view.start(ctx, ephemeral=True)
+        if len(tracked_stocks_list) > max_calls_for_prices:
+             await ctx.send(f"Displaying basic info for {len(tracked_stocks_list)} stocks. For current prices of more than {max_calls_for_prices} stocks, please use `/stock_price <symbol>` individually to manage API rate limits.", ephemeral=True)
+
+        for i, stock_item in enumerate(tracked_stocks_list): # stock_item is a dict
+            symbol_upper = stock_item['symbol'].upper()
+            stock_display = f"**{symbol_upper}**:"
+            
+            # Portfolio info if available
+            quantity = stock_item.get('quantity')
+            purchase_price = stock_item.get('purchase_price')
+            if quantity is not None and purchase_price is not None:
+                stock_display += f" ({quantity} @ ${purchase_price:,.2f})"
+            
+            if i < max_calls_for_prices:
+                if api_call_count > 0:
+                    await asyncio.sleep(13)
+                
+                price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol_upper)
+                api_call_count += 1
+
+                if price_data:
+                    if "error" in price_data:
+                        error_type = price_data["error"]
+                        error_message = price_data.get("message", "Unknown error")
+                        if error_type == "api_limit": stock_display += f" ⚠️ Price: API limit."
+                        else: stock_display += f" ❌ Price: N/A"
+                    elif "01. symbol" in price_data and "05. price" in price_data:
+                        raw_price = price_data.get('05. price')
+                        raw_change = price_data.get('09. change', '0')
+                        try:
+                            price_val = float(raw_price)
+                            price_display_val = f"${price_val:,.2f}"
+                        except (ValueError, TypeError): price_display_val = "N/A"
+                        try:
+                            change_val_float = float(raw_change)
+                            trend_emoji = "📈 " if change_val_float > 0 else "📉 " if change_val_float < 0 else ""
+                        except (ValueError, TypeError): trend_emoji = ""
+                        stock_display += f" 💰 {price_display_val} {trend_emoji}"
+                    else: stock_display += " ❌ Price: N/A (Format)"
+                else: stock_display += " ❌ Price: N/A (Fetch)"
+            elif i == max_calls_for_prices:
+                stock_display += " (Price check skipped)"
+
+            alert_info = await self.bot.loop.run_in_executor(None, self.db_manager.get_stock_alert, user_id, symbol_upper)
+            alert_texts = []
+            if alert_info:
+                if alert_info.get('active_above') and alert_info.get('target_above') is not None:
+                    alert_texts.append(f"Price > ${float(alert_info['target_above']):.2f}")
+                if alert_info.get('active_below') and alert_info.get('target_below') is not None:
+                    alert_texts.append(f"Price < ${float(alert_info['target_below']):.2f}")
+                if alert_info.get('dpc_above_active') and alert_info.get('dpc_above_target') is not None:
+                    alert_texts.append(f"DPC > +{float(alert_info['dpc_above_target']):.2f}%")
+                if alert_info.get('dpc_below_active') and alert_info.get('dpc_below_target') is not None:
+                    alert_texts.append(f"DPC < -{float(alert_info['dpc_below_target']):.2f}%")
+            
+            if alert_texts:
+                stock_display += f" | Alerts: {'; '.join(alert_texts)}"
+            else:
+                stock_display += " | No active alerts."
+            
+            description_lines.append(stock_display)
+
+        if not description_lines:
+            embed.description = "Could not retrieve information for your tracked stocks."
+        else:
+            embed.description = "\n".join(description_lines)
+            
+        await ctx.send(embed=embed, ephemeral=True)
 
     @commands.hybrid_command(name="stock_alert", description="Set, update, or clear a price alert for a tracked stock.")
     @discord.app_commands.describe(
@@ -634,15 +524,21 @@ class Stocks(commands.Cog):
         dpc_above_target='dpc_above',
         dpc_below_target='dpc_below'
     )
-    @discord.app_commands.autocomplete(symbol=tracked_stock_symbol_autocomplete)
     async def stock_alert(self, ctx: commands.Context,
                           symbol: str,
                           above_target: typing.Optional[str] = None,
                           below_target: typing.Optional[str] = None,
                           dpc_above_target: typing.Optional[str] = None,
-                          dpc_below_target: typing.Optional[str] = None) -> None:
+                          dpc_below_target: typing.Optional[str] = None):
         """
         Sets, updates, or clears price and daily percentage change (DPC) alerts for a tracked stock.
+
+        Usage examples:
+        `/stock_alert symbol:AAPL above:150.50`
+        `/stock_alert symbol:MSFT dpc_above:5` (for +5% change)
+        `/stock_alert symbol:GOOG below:2400 dpc_below:2.5` (for -2.5% change)
+        `/stock_alert symbol:TSLA above:clear dpc_above:clear`
+        `!stock_alert AAPL above=150.50 dpc_above=5`
         """
         await ctx.defer(ephemeral=True)
         
@@ -682,7 +578,7 @@ class Stocks(commands.Cog):
         
         action_summary = []
 
-        def parse_percentage(value_str: str, param_name: str) -> typing.Optional[typing.Union[float, str]]:
+        def parse_percentage(value_str: str, param_name: str) -> typing.Optional[typing.Union[float, str]]: # Added Union for "clear_marker"
             if value_str is None: return None
             value_str_lower = value_str.lower()
             if value_str_lower == 'clear':
@@ -695,7 +591,7 @@ class Stocks(commands.Cog):
             except ValueError:
                 raise ValueError(f"Invalid format for {param_name}")
 
-        def parse_price(value_str: str, param_name: str) -> typing.Optional[typing.Union[float, str]]:
+        def parse_price(value_str: str, param_name: str) -> typing.Optional[typing.Union[float, str]]: # Added Union
             if value_str is None: return None
             value_str_lower = value_str.lower()
             if value_str_lower == 'clear':
@@ -742,6 +638,7 @@ class Stocks(commands.Cog):
         final_above = target_above_val if target_above_val is not None else (None if clear_above_flag else (float(current_alert.get('target_above')) if current_alert.get('target_above') is not None else None))
         final_below = target_below_val if target_below_val is not None else (None if clear_below_flag else (float(current_alert.get('target_below')) if current_alert.get('target_below') is not None else None))
 
+
         if final_above is not None and final_below is not None and final_above <= final_below:
             await ctx.send(f"Error: 'Above' target (${final_above:.2f}) must be greater than 'Below' target (${final_below:.2f}). Alert not set/updated.", ephemeral=True)
             return
@@ -771,19 +668,22 @@ class Stocks(commands.Cog):
         else:
             await ctx.send(f"No changes made to alerts for {symbol_upper}. Values might be the same as current, or a database error occurred.", ephemeral=True)
 
-    @commands.hybrid_command(name="stock_chart", description="Generate a price chart (1D, 5D, 1M, 1Y, etc).")
+    @commands.hybrid_command(name="stock_chart", description="Generate a price chart for a stock symbol over a timespan.")
     @discord.app_commands.describe(
         symbol="The stock symbol (e.g., AAPL, MSFT)",
         timespan=f"The timespan for the chart. Default '1M'. Options: {', '.join(SUPPORTED_TIMESPAN.keys())}"
     )
-    @discord.app_commands.autocomplete(symbol=stock_symbol_autocomplete)
-    async def stock_chart(self, ctx: commands.Context, symbol: str, timespan: str = "1M") -> None:
+    async def stock_chart(self, ctx: commands.Context, symbol: str, timespan: str = "1M"):
         """
         Generates and displays a stock price chart for a given symbol and timespan.
-        Uses Yahoo Finance for reliable historical data.
+        Usage examples:
+        `!stock_chart AAPL 1M`
+        `/stock_chart symbol:TSLA timespan:6M`
+        `/stock_chart symbol:MSFT timespan:1D`
         """
+        # Normalize symbol for Yahoo Finance compatibility first
         normalized_symbol = yahoo_finance_client.normalize_symbol(symbol.upper())
-        symbol_for_display = symbol.upper()
+        symbol_for_display = symbol.upper() # For messages and chart title
         timespan_upper = timespan.upper()
 
         if timespan_upper not in SUPPORTED_TIMESPAN:
@@ -793,40 +693,60 @@ class Stocks(commands.Cog):
             )
             return
 
-        await ctx.defer(ephemeral=False)
+        await ctx.defer(ephemeral=False) # Acknowledge interaction, as fetching and charting can take time
 
         config = SUPPORTED_TIMESPAN[timespan_upper]
-        api_params = config["params"].copy()
+        api_func = config["func"]
+        api_params = config["params"].copy() # Use a copy to avoid modifying the original dict
         display_label = config["label"]
 
-        logger.info(f"Fetching chart data for {symbol_for_display} (normalized: {normalized_symbol}), timespan {timespan_upper} using Yahoo Finance.")
-        data_source = "Yahoo Finance"
+        logger.info(f"Fetching chart data for {symbol_for_display} (normalized: {normalized_symbol}), timespan {timespan_upper} using Alpha Vantage first.")
+        data_source = "Alpha Vantage" # Default data source
 
+        # Call the appropriate Alpha Vantage function
         if config["is_intraday"]:
-            yahoo_interval = api_params['interval']
-            # Map interval names if needed (client handles most)
-            time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_intraday_time_series, normalized_symbol, yahoo_interval)
-        else:
-            time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, normalized_symbol, api_params['outputsize'])
+            time_series_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_intraday_time_series, symbol_for_display, api_params['interval'], api_params['outputsize'])
+        else: # Daily
+            time_series_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_daily_time_series, symbol_for_display, api_params['outputsize'])
 
+        # Check if Alpha Vantage failed (no data, error dict, or empty list), then try Yahoo Finance
+        alpha_vantage_failed = False
         if not time_series_data:
-            logger.info(f"Yahoo Finance failed/empty for {normalized_symbol}. Trying Alpha Vantage fallback.")
-            data_source = "Alpha Vantage"
-            # Map back params for AV
-            av_params = api_params.copy()
-            # AV uses specific intervals: 1min, 5min, 15min, 30min, 60min
-            # YF client uses similar strings, so map back if needed, but let's use standard AV func
-            if config["is_intraday"]:
-                 # Convert '15m' -> '15min' if needed
-                 interval = api_params['interval'].replace('m', 'min') if 'min' not in api_params['interval'] else api_params['interval']
-                 time_series_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_intraday_time_series, symbol_for_display, interval, api_params['outputsize'])
-            else:
-                 time_series_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_daily_time_series, symbol_for_display, api_params['outputsize'])
+            logger.warning(f"Alpha Vantage: No time series data for {symbol_for_display} ({display_label}).")
+            alpha_vantage_failed = True
+        elif isinstance(time_series_data, dict) and "error" in time_series_data:
+            logger.warning(f"Alpha Vantage: API error for {symbol_for_display} ({display_label}): {time_series_data.get('message')}")
+            alpha_vantage_failed = True
+        elif isinstance(time_series_data, list) and not time_series_data:
+            logger.warning(f"Alpha Vantage: Empty list returned for {symbol_for_display} ({display_label}).")
+            alpha_vantage_failed = True
 
+        if alpha_vantage_failed:
+            logger.info(f"Attempting to fetch chart data for {normalized_symbol} via Yahoo Finance.")
+            data_source = "Yahoo Finance"
+            # outputsize for Yahoo: 'compact' for 3 months, 'full' for max
+            yahoo_outputsize = "compact" if api_params.get('outputsize') == "compact" else "full"
+
+            if config["is_intraday"]:
+                # Map Alpha Vantage interval to approximate Yahoo interval
+                # Yahoo: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
+                # Alpha: 1min, 5min, 15min, 30min, 60min
+                av_interval = api_params['interval']
+                if av_interval == "1min": yahoo_interval = "1m"
+                elif av_interval == "5min": yahoo_interval = "5m"
+                elif av_interval == "15min": yahoo_interval = "15m"
+                elif av_interval == "30min": yahoo_interval = "30m"
+                elif av_interval == "60min": yahoo_interval = "60m" # or 1h
+                else: yahoo_interval = "60m" # Default
+                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_intraday_time_series, normalized_symbol, yahoo_interval) # Yahoo outputsize not really used for intraday
+            else: # Daily
+                time_series_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_daily_time_series, normalized_symbol, yahoo_outputsize)
+        
+        # Post-fetch processing (common for both AV and YF data)
         if not time_series_data:
             await ctx.send(f"Could not retrieve time series data for {symbol_for_display} ({display_label}) from any provider. The symbol might be invalid or there's no data.", ephemeral=True)
             return
-        if isinstance(time_series_data, dict) and "error" in time_series_data:
+        if isinstance(time_series_data, dict) and "error" in time_series_data: # Should only be AV at this point if YF also failed with dict error (unlikely for YF client)
             error_message = time_series_data.get("message", "An unspecified API error occurred.")
             await ctx.send(f"Error fetching chart data for {symbol_for_display} ({display_label}): {error_message}", ephemeral=True)
             return
@@ -835,6 +755,7 @@ class Stocks(commands.Cog):
             await ctx.send(f"No valid time series data points found for {symbol_for_display} ({display_label}) from any provider to generate a chart.", ephemeral=True)
             return
 
+        # For YTD, we need to filter data to be from the start of the current year
         if timespan_upper == "YTD":
             try:
                 from datetime import datetime
@@ -852,6 +773,7 @@ class Stocks(commands.Cog):
                         if dt_obj >= current_year_start:
                             filtered_data.append((ts_str, price))
                     except ValueError:
+                        logger.warning(f"Could not parse timestamp '{ts_str}' for YTD filtering. Skipping.")
                         continue
                 
                 time_series_data = filtered_data
@@ -863,15 +785,16 @@ class Stocks(commands.Cog):
                 await ctx.send(f"An error occurred while processing YTD data for {symbol_for_display}.", ephemeral=True)
                 return
 
-        logger.info(f"Generating chart image for {symbol_for_display} ({display_label}) with {len(time_series_data)} data points.")
-        chart_image = await self.bot.loop.run_in_executor(None, get_stock_chart_image, symbol_for_display, display_label, time_series_data)
 
-        if chart_image:
+        logger.info(f"Generating chart image for {symbol_for_display} ({display_label}) with {len(time_series_data)} data points.")
+        image_bytes = await self.bot.loop.run_in_executor(None, get_stock_chart_image, symbol_for_display, display_label, time_series_data)
+
+        if image_bytes:
+            file = discord.File(image_bytes, filename="chart.png")
             embed = discord.Embed(
                 title=f"📈 Stock Chart for {symbol_for_display} ({display_label})",
                 color=discord.Color.blue()
             )
-            file = discord.File(chart_image, filename="chart.png")
             embed.set_image(url="attachment://chart.png")
             embed.set_footer(text=f"Chart generated using QuickChart.io | Data from {data_source}")
             await ctx.send(file=file, embed=embed)
@@ -880,22 +803,19 @@ class Stocks(commands.Cog):
 
     @commands.hybrid_command(name="stock_news", description="Get recent news for a stock symbol.")
     @discord.app_commands.describe(symbol="The stock symbol (e.g., AAPL, MSFT)")
-    @discord.app_commands.autocomplete(symbol=stock_symbol_autocomplete)
-    async def stock_news(self, ctx: commands.Context, *, symbol: str) -> None:
+    async def stock_news(self, ctx: commands.Context, *, symbol: str):
         """
         Fetches and displays recent news articles for a given stock symbol.
+
+        Usage examples:
+        `!stock_news AAPL`
+        `/stock_news symbol:TSLA`
         """
-        await ctx.defer(ephemeral=True)
+        await ctx.defer(ephemeral=True) # Acknowledge interaction, news fetching can take a moment
         upper_symbol = symbol.upper()
         
-        # Primary: Yahoo Finance
-        news_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_news, upper_symbol, 5)
-        data_source = "Yahoo Finance"
-        
-        if not news_data:
-             # Fallback
-             news_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_news, upper_symbol, 5)
-             data_source = "Alpha Vantage"
+        # Limit to 3-5 articles, client default is 5, so we'll use that.
+        news_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_news, upper_symbol, 5)
 
         if news_data is None:
             await ctx.send(f"📰 No news found for {upper_symbol}, or an error occurred while fetching.", ephemeral=True)
@@ -904,7 +824,16 @@ class Stocks(commands.Cog):
         if isinstance(news_data, dict) and "error" in news_data:
             error_type = news_data["error"]
             error_message = news_data.get("message", "An unspecified error occurred.")
-            await ctx.send(f"Could not retrieve news for {upper_symbol}: {error_message}", ephemeral=True)
+            if error_type == "api_limit":
+                await ctx.send(f"Could not retrieve news for {upper_symbol}: {error_message}", ephemeral=True)
+            elif error_type == "config_error":
+                logger.error(f"Stock news configuration error for {upper_symbol}: {error_message}")
+                await ctx.send(f"Could not retrieve news for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.", ephemeral=True)
+            elif error_type == "api_error":
+                await ctx.send(f"Could not retrieve news for {upper_symbol}: {error_message}", ephemeral=True)
+            else:
+                logger.error(f"Stock news: Unknown error type '{error_type}' for {upper_symbol}: {error_message}")
+                await ctx.send(f"Error fetching news for {upper_symbol}. An unexpected error occurred with the data provider.", ephemeral=True)
             return
 
         if not isinstance(news_data, list) or not news_data:
@@ -915,10 +844,10 @@ class Stocks(commands.Cog):
             title=f"📰 Recent News for {upper_symbol}",
             color=discord.Color.blue()
         )
-        embed.set_footer(text=f"News provided by {data_source}. Summaries may be truncated.")
+        embed.set_footer(text="News provided by Alpha Vantage. Summaries may be truncated.")
 
         for i, article in enumerate(news_data):
-            if i >= 5:
+            if i >= 5: # Should be handled by API client limit, but as a safeguard
                 break
 
             title = article.get("title", "No Title")
@@ -927,7 +856,9 @@ class Stocks(commands.Cog):
             time_published = article.get("time_published", "N/A")
             summary = article.get("summary", "No summary available.")
             sentiment_label = article.get("sentiment_label", "N/A")
+            # sentiment_score = article.get("sentiment_score", "N/A") # Not displaying score for brevity
 
+            # Truncate summary if too long for an embed field
             if len(summary) > 250:
                 summary = summary[:247] + "..."
             
@@ -935,55 +866,31 @@ class Stocks(commands.Cog):
             if url:
                 field_title = f"🔗 [{title}]({url})"
             else:
-                field_title = f"{title}"
+                field_title = f"{title}" # No link if URL is missing
 
             field_value = f"**Source:** {source}\n" \
-                          f"**Published:** {time_published}\n"
+                          f"**Published:** {time_published}\n" \
+                          f"**Sentiment:** {sentiment_label}\n" \
+                          f"**Summary:** {summary}"
             
-            if sentiment_label != "N/A":
-                 field_value += f"**Sentiment:** {sentiment_label}\n"
-            
-            field_value += f"**Summary:** {summary}"
-            
-            embed.add_field(name=field_title[:256], value=field_value[:1024], inline=False)
+            embed.add_field(name=field_title[:256], value=field_value[:1024], inline=False) # Ensure field limits
 
-        if not embed.fields:
+        if not embed.fields: # Should not happen if news_data was populated
             await ctx.send(f"📰 No news articles could be formatted for {upper_symbol}.", ephemeral=True)
             return
             
-        await ctx.send(embed=embed, ephemeral=False)
-
-    async def get_rate_async(self, from_curr, to_curr):
-        if from_curr == to_curr: return 1.0
-        pair = f"{from_curr}/{to_curr}"
-        
-        # Try DB first (run in executor because sqlite is blocking)
-        rate = await self.bot.loop.run_in_executor(None, self.db_manager.get_currency_rate, pair)
-        if rate: return rate
-        
-        # Try inverse from DB
-        inv_pair = f"{to_curr}/{from_curr}"
-        inv_rate = await self.bot.loop.run_in_executor(None, self.db_manager.get_currency_rate, inv_pair)
-        if inv_rate: return 1.0 / inv_rate
-
-        # Fetch from API (Alpha Vantage)
-        rate = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_currency_exchange_rate, from_curr, to_curr)
-        if rate:
-             await self.bot.loop.run_in_executor(None, self.db_manager.update_currency_rate, pair, rate)
-             # Store inverse too
-             if rate > 0:
-                 inv_pair = f"{to_curr}/{from_curr}"
-                 inv_rate = 1.0 / rate
-                 await self.bot.loop.run_in_executor(None, self.db_manager.update_currency_rate, inv_pair, inv_rate)
-             return rate
-        
-        return None
+        await ctx.send(embed=embed, ephemeral=False) # Send publicly if successful
 
     @commands.hybrid_command(name="my_portfolio", description="View your stock portfolio performance.")
-    async def my_portfolio(self, ctx: commands.Context) -> None:
+    async def my_portfolio(self, ctx: commands.Context):
         """
         Displays your stock portfolio, including total value, overall gain/loss,
         and performance of individual holdings.
+        Requires stocks to be tracked with quantity and purchase price.
+
+        Usage examples:
+        `!my_portfolio`
+        `/my_portfolio`
         """
         await ctx.defer(ephemeral=True)
         
@@ -1004,123 +911,101 @@ class Stocks(commands.Cog):
             return
 
         embed = discord.Embed(title="💰 Your Stock Portfolio", color=discord.Color.gold())
-        embed.set_footer(text="Data provided by Yahoo Finance. Prices may be delayed.")
+        embed.set_footer(text="Data provided by Alpha Vantage. Prices may be delayed.")
 
-        # We will normalize all totals to USD for consistency in the summary
-        overall_cost_basis_usd = 0.0
-        overall_market_value_usd = 0.0
-        
-        # Track which holdings are successfully included in totals
-        fully_calculated_count = 0
-        warnings = []
+        overall_cost_basis = 0
+        overall_market_value = 0
+        api_call_count = 0
+        individual_holdings_details = [] # Store list of dicts
 
-        status_msg = None
-        if len(portfolio_stocks) > 5:
-            status_msg = await ctx.send(f"Fetching current prices for {len(portfolio_stocks)} holdings...", ephemeral=True)
-
-        individual_holdings_details = []
+        # Message to inform user about potential delay
+        status_msg = None # Initialize status_msg
+        if len(portfolio_stocks) > 1: # Only show if fetching multiple prices
+            status_msg = await ctx.send(f"Fetching current prices for {len(portfolio_stocks)} holdings... this may take a moment due to API rate limits.", ephemeral=True)
 
         for stock_data in portfolio_stocks:
             symbol = stock_data["symbol"]
             quantity = stock_data["quantity"]
             purchase_price = stock_data["purchase_price"]
 
-            # Normalize symbol for Yahoo
-            normalized_symbol = yahoo_finance_client.normalize_symbol(symbol)
+            if api_call_count > 0:
+                await asyncio.sleep(13) # Alpha Vantage: ~5 calls/min, so ~12s interval + buffer
 
-            # Primary: Yahoo Finance
-            current_price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, normalized_symbol)
-            data_source = "Yahoo Finance"
+            # Try Alpha Vantage first, then fallback to Yahoo Finance (like stock_price command)
+            current_price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol)
+            data_source = "Alpha Vantage"
+            api_call_count += 1
 
+            # If Alpha Vantage fails, try Yahoo Finance as fallback
             if not current_price_data or "error" in current_price_data:
-                current_price_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, symbol)
-                data_source = "Alpha Vantage"
+                if current_price_data and current_price_data.get("error") == "api_limit":
+                    logger.info(f"Portfolio: Alpha Vantage API limit for {symbol}. Falling back to Yahoo.")
+                else:
+                    logger.info(f"Portfolio: Alpha Vantage failed for {symbol}. Falling back to Yahoo.")
+                
+                current_price_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, symbol)
+                data_source = "Yahoo Finance"
 
             current_price = None
-            api_currency = "USD"
+            currency = "USD"  # Default currency
             api_error_for_stock = False
 
             if current_price_data and "05. price" in current_price_data:
                 try:
                     current_price = float(current_price_data["05. price"])
-                    api_currency = current_price_data.get('currency', 'USD')
+                    currency = current_price_data.get('currency', 'USD')  # Get actual currency
                 except (ValueError, TypeError):
                     logger.error(f"Portfolio: Could not parse current price for {symbol}. Data: {current_price_data}")
                     api_error_for_stock = True
             else:
+                error_info = "Unknown API error"
+                if isinstance(current_price_data, dict) and "error" in current_price_data:
+                    error_info = current_price_data.get("message", current_price_data["error"])
+                elif current_price_data is None:
+                    error_info = "No data received (possible network issue or invalid symbol)"
+                logger.warning(f"Portfolio: Could not fetch price for {symbol}. Info: {error_info}")
                 api_error_for_stock = True
 
-            user_currency = stock_data.get("currency")
-            cost_basis_currency = user_currency if user_currency else api_currency
-            market_value_currency = api_currency
-
-            currency_symbols = {'USD': '$', 'PLN': 'zł', 'EUR': '€', 'GBP': '£', 'CAD': 'C$', 'JPY': '¥'}
-            cost_basis_symbol = currency_symbols.get(cost_basis_currency, cost_basis_currency)
-            market_value_symbol = currency_symbols.get(market_value_currency, market_value_currency)
+            # Currency symbol mapping
+            currency_symbols = {
+                'USD': '$',
+                'PLN': 'zł',
+                'EUR': '€',
+                'GBP': '£',
+                'CAD': 'C$',
+                'JPY': '¥'
+            }
+            currency_symbol = currency_symbols.get(currency, currency)
 
             cost_basis = quantity * purchase_price
-            market_value = 0.0
-            gain_loss = 0.0
+            market_value = 0.0 # Ensure float
+            gain_loss = 0.0 # Ensure float
             gain_loss_pct_str = "N/A"
 
-            # Determine Rates to USD asynchronously
-            cost_basis_usd_rate = await self.get_rate_async(cost_basis_currency, "USD")
-            market_value_usd_rate = await self.get_rate_async(market_value_currency, "USD")
+            overall_cost_basis += cost_basis
 
-            include_in_totals = True
-
-            if cost_basis_usd_rate is None:
-                include_in_totals = False
-                if cost_basis_currency != "USD":
-                     warnings.append(f"⚠️ Could not convert cost basis for {symbol} ({cost_basis_currency}) to USD.")
-
-            if not api_error_for_stock:
+            if current_price is not None and not api_error_for_stock:
                 market_value = quantity * current_price
-                if market_value_usd_rate is None:
-                    include_in_totals = False
-                    if market_value_currency != "USD":
-                        warnings.append(f"⚠️ Could not convert market value for {symbol} ({market_value_currency}) to USD.")
-            else:
-                include_in_totals = False # Price missing, can't calc market value, exclude from totals
-            
-            if include_in_totals and not api_error_for_stock:
-                overall_cost_basis_usd += cost_basis * cost_basis_usd_rate
-                overall_market_value_usd += market_value * market_value_usd_rate
-                fully_calculated_count += 1
-
-            # Individual Gain/Loss
-            conversion_rate_for_calc = None
-            if cost_basis_currency == market_value_currency:
-                conversion_rate_for_calc = 1.0
-            elif cost_basis_usd_rate and market_value_usd_rate:
-                 conversion_rate_for_calc = cost_basis_usd_rate / market_value_usd_rate
-            
-            if not api_error_for_stock and conversion_rate_for_calc:
-                converted_cost_basis = cost_basis * conversion_rate_for_calc
-                gain_loss = market_value - converted_cost_basis
-                if converted_cost_basis != 0:
-                    gain_loss_pct = (gain_loss / converted_cost_basis) * 100
+                overall_market_value += market_value
+                gain_loss = market_value - cost_basis
+                if cost_basis != 0:
+                    gain_loss_pct = (gain_loss / cost_basis) * 100
                     gain_loss_pct_str = f"{gain_loss_pct:+.2f}%"
                 else:
-                    gain_loss_pct_str = "N/A (zero cost)"
+                    gain_loss_pct_str = "N/A (zero cost basis)"
             elif api_error_for_stock:
                 market_value = "N/A (API Error)"
                 gain_loss = "N/A"
                 gain_loss_pct_str = "N/A"
                 current_price = "N/A (API Error)"
-            else:
-                 gain_loss = "N/A (Rate Missing)"
-                 gain_loss_pct_str = "N/A"
 
             individual_holdings_details.append({
                 "symbol": symbol,
                 "quantity": quantity,
                 "purchase_price": purchase_price,
                 "current_price": current_price,
-                "cost_basis_currency": cost_basis_currency,
-                "market_value_currency": market_value_currency,
-                "cost_basis_symbol": cost_basis_symbol,
-                "market_value_symbol": market_value_symbol,
+                "currency": currency,
+                "currency_symbol": currency_symbol,
                 "cost_basis": cost_basis,
                 "market_value": market_value,
                 "gain_loss": gain_loss,
@@ -1128,39 +1013,56 @@ class Stocks(commands.Cog):
                 "data_source": data_source
             })
 
-        overall_gain_loss_usd = overall_market_value_usd - overall_cost_basis_usd
+        overall_gain_loss = overall_market_value - overall_cost_basis
         overall_gain_loss_pct_str = "N/A"
-        if overall_cost_basis_usd != 0:
-            overall_gain_loss_pct = (overall_gain_loss_usd / overall_cost_basis_usd) * 100
+        if overall_cost_basis != 0 and isinstance(overall_market_value, (int, float)) and overall_market_value > 0 : # Check if market_value is numeric
+            overall_gain_loss_pct = (overall_gain_loss / overall_cost_basis) * 100
             overall_gain_loss_pct_str = f"{overall_gain_loss_pct:+.2f}%"
-        elif overall_cost_basis_usd == 0 and overall_market_value_usd > 0:
+        elif overall_cost_basis == 0 and isinstance(overall_market_value, (int, float)) and overall_market_value > 0:
              overall_gain_loss_pct_str = "+∞%"
+        elif overall_cost_basis == 0 and isinstance(overall_market_value, (int, float)) and overall_market_value == 0:
+             overall_gain_loss_pct_str = "N/A"
+        # If overall_market_value is a string (due to API error for all stocks), it remains "N/A"
 
         summary_color = discord.Color.default()
-        if overall_gain_loss_usd > 0: summary_color = discord.Color.green()
-        elif overall_gain_loss_usd < 0: summary_color = discord.Color.red()
+        if isinstance(overall_gain_loss, (int,float)): # Check if numeric before comparison
+            if overall_gain_loss > 0: summary_color = discord.Color.green()
+            elif overall_gain_loss < 0: summary_color = discord.Color.red()
 
         embed.color = summary_color
 
-        overall_market_value_display = f"${overall_market_value_usd:,.2f}"
-        cost_basis_display = f"${overall_cost_basis_usd:,.2f}"
-        overall_gain_loss_display = f"${overall_gain_loss_usd:,.2f}"
+        # Check if all stocks use the same currency for cleaner summary display
+        currencies_used = set(item.get('currency', 'USD') for item in individual_holdings_details if isinstance(item.get('current_price'), (int, float)))
+        mixed_currencies = len(currencies_used) > 1
         
-        summary_val = (
-            f"**Total Market Value:** {overall_market_value_display}\n"
-            f"**Total Cost Basis:** {cost_basis_display}\n"
-            f"**Total Gain/Loss:** {overall_gain_loss_display} ({overall_gain_loss_pct_str})"
-        )
-        
-        if fully_calculated_count < len(portfolio_stocks):
-             summary_val += f"\n\n⚠️ *Totals include only {fully_calculated_count}/{len(portfolio_stocks)} holdings due to missing data (price/currency).*"
-
-        if warnings:
-            summary_val += "\n" + "\n".join(list(set(warnings))[:3])
+        if mixed_currencies:
+            # Mixed currencies - show totals in respective currencies or USD equivalent note
+            overall_market_value_display = f"${overall_market_value:,.2f}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
+            overall_gain_loss_display = f"${overall_gain_loss:,.2f}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
+            currency_note = " (mixed currencies, totals approximate)"
+        else:
+            # Single currency - use appropriate symbol
+            single_currency = list(currencies_used)[0] if currencies_used else 'USD'
+            currency_symbols = {'USD': '$', 'PLN': 'zł', 'EUR': '€', 'GBP': '£', 'CAD': 'C$', 'JPY': '¥'}
+            summary_currency_symbol = currency_symbols.get(single_currency, single_currency)
+            
+            if single_currency == 'PLN':
+                overall_market_value_display = f"{overall_market_value:,.2f} {summary_currency_symbol}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
+                overall_gain_loss_display = f"{overall_gain_loss:,.2f} {summary_currency_symbol}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
+                cost_basis_display = f"{overall_cost_basis:,.2f} {summary_currency_symbol}"
+            else:
+                overall_market_value_display = f"{summary_currency_symbol}{overall_market_value:,.2f}" if isinstance(overall_market_value, (int, float)) else str(overall_market_value)
+                overall_gain_loss_display = f"{summary_currency_symbol}{overall_gain_loss:,.2f}" if isinstance(overall_gain_loss, (int, float)) else str(overall_gain_loss)
+                cost_basis_display = f"{summary_currency_symbol}{overall_cost_basis:,.2f}"
+            currency_note = ""
 
         embed.add_field(
-            name="📈 Overall Portfolio Summary (USD)",
-            value=summary_val,
+            name="📈 Overall Portfolio Summary",
+            value=(
+                f"**Total Market Value:** {overall_market_value_display}{currency_note}\n"
+                f"**Total Cost Basis:** {cost_basis_display if not mixed_currencies else f'${overall_cost_basis:,.2f}'}\n"
+                f"**Total Gain/Loss:** {overall_gain_loss_display} ({overall_gain_loss_pct_str})"
+            ),
             inline=False
         )
 
@@ -1168,39 +1070,41 @@ class Stocks(commands.Cog):
         for item in individual_holdings_details:
             symbol_header = f"--- **{item['symbol']}** ---"
             
-            cost_symbol = item.get('cost_basis_symbol', '$')
-            market_symbol = item.get('market_value_symbol', '$')
+            # Use the correct currency for each stock
+            currency_symbol = item.get('currency_symbol', '$')
             
+            # Format prices with appropriate currency
             if isinstance(item['current_price'], (int, float)):
-                if item.get('market_value_currency') == 'PLN':
-                    current_price_display = f"{item['current_price']:,.2f} {market_symbol}"
+                if item.get('currency') == 'PLN':
+                    current_price_display = f"{item['current_price']:,.2f} {currency_symbol}"
                 else:
-                    current_price_display = f"{market_symbol}{item['current_price']:,.2f}"
+                    current_price_display = f"{currency_symbol}{item['current_price']:,.2f}"
             else:
                 current_price_display = str(item['current_price'])
             
             if isinstance(item['market_value'], (int, float)):
-                if item.get('market_value_currency') == 'PLN':
-                    market_value_display = f"{item['market_value']:,.2f} {market_symbol}"
+                if item.get('currency') == 'PLN':
+                    market_value_display = f"{item['market_value']:,.2f} {currency_symbol}"
                 else:
-                    market_value_display = f"{market_symbol}{item['market_value']:,.2f}"
+                    market_value_display = f"{currency_symbol}{item['market_value']:,.2f}"
             else:
                 market_value_display = str(item['market_value'])
             
             if isinstance(item['gain_loss'], (int, float)):
-                if item.get('market_value_currency') == 'PLN':
-                    gain_loss_display_val = f"{item['gain_loss']:+,.2f} {market_symbol}"
+                if item.get('currency') == 'PLN':
+                    gain_loss_display_val = f"{item['gain_loss']:+,.2f} {currency_symbol}"
                 else:
-                    gain_loss_display_val = f"{market_symbol}{item['gain_loss']:+,.2f}"
+                    gain_loss_display_val = f"{currency_symbol}{item['gain_loss']:+,.2f}"
             else:
                 gain_loss_display_val = str(item['gain_loss'])
 
-            if item.get('cost_basis_currency') == 'PLN':
-                purchase_price_display = f"{item['purchase_price']:,.2f} {cost_symbol}"
-                cost_basis_display = f"{item['cost_basis']:,.2f} {cost_symbol}"
+            # Format purchase price and cost basis (these are stored in original currency)
+            if item.get('currency') == 'PLN':
+                purchase_price_display = f"{item['purchase_price']:,.2f} {currency_symbol}"
+                cost_basis_display = f"{item['cost_basis']:,.2f} {currency_symbol}"
             else:
-                purchase_price_display = f"{cost_symbol}{item['purchase_price']:,.2f}"
-                cost_basis_display = f"{cost_symbol}{item['cost_basis']:,.2f}"
+                purchase_price_display = f"{currency_symbol}{item['purchase_price']:,.2f}"
+                cost_basis_display = f"{currency_symbol}{item['cost_basis']:,.2f}"
 
             gain_loss_emoji = ""
             if isinstance(item['gain_loss'], (int, float)):
@@ -1222,7 +1126,7 @@ class Stocks(commands.Cog):
             field_count = 0
             for part_idx, part in enumerate(holdings_text_parts):
                 field_name = "Individual Holdings"
-                if field_count > 0 :
+                if field_count > 0 : # Check if previous field was also "Individual Holdings"
                     field_name = "Individual Holdings (Continued)"
 
                 if len(current_field_value) + len(part) + 2 > 1024:
@@ -1235,7 +1139,7 @@ class Stocks(commands.Cog):
                     else:
                         current_field_value = part
             
-            if current_field_value:
+            if current_field_value: # Add the last part
                 field_name = "Individual Holdings"
                 if field_count > 0:
                     field_name = "Individual Holdings (Continued)"
@@ -1243,7 +1147,7 @@ class Stocks(commands.Cog):
         else:
             embed.add_field(name="Individual Holdings", value="No holdings data to display.", inline=False)
 
-        if status_msg:
+        if status_msg: # Check if status_msg was defined
             try:
                 await status_msg.delete()
             except discord.NotFound:
@@ -1251,6 +1155,7 @@ class Stocks(commands.Cog):
             except discord.HTTPException as e:
                 logger.warning(f"Could not delete portfolio status message: {e}")
 
+        # Add footer indicating data sources
         data_sources_used = set(item.get('data_source', 'Alpha Vantage') for item in individual_holdings_details)
         if len(data_sources_used) > 1:
             footer_text = f"Data provided by {' & '.join(sorted(data_sources_used))}. Prices may be delayed."
@@ -1262,10 +1167,10 @@ class Stocks(commands.Cog):
 
     @commands.hybrid_command(name="stock_debug", description="Debug stock API connections for a symbol.")
     @discord.app_commands.describe(symbol="The stock symbol to debug (e.g., LPP, AAPL)")
-    @discord.app_commands.autocomplete(symbol=stock_symbol_autocomplete)
-    async def stock_debug(self, ctx: commands.Context, *, symbol: str) -> None:
+    async def stock_debug(self, ctx: commands.Context, *, symbol: str):
         """
         Debug command to test both Alpha Vantage and Yahoo Finance APIs for a symbol.
+        This helps diagnose issues with stock price lookups.
         """
         if not await self._is_admin_or_owner(ctx):
             await ctx.send("This command is restricted to bot administrators.", ephemeral=True)
@@ -1275,6 +1180,7 @@ class Stocks(commands.Cog):
         
         embed = discord.Embed(title=f"🔧 Stock API Debug for {upper_symbol}", color=discord.Color.blue())
         
+        # Test Alpha Vantage
         av_result = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_price, upper_symbol)
         
         if av_result is None:
@@ -1288,6 +1194,7 @@ class Stocks(commands.Cog):
         
         embed.add_field(name="🔍 Alpha Vantage Test", value=av_status, inline=False)
         
+        # Test Yahoo Finance
         normalized_symbol = yahoo_finance_client.normalize_symbol(upper_symbol)
         yf_result = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, normalized_symbol)
         
@@ -1304,6 +1211,7 @@ class Stocks(commands.Cog):
         
         embed.add_field(name=f"🔍 Yahoo Finance Test ({upper_symbol} → {normalized_symbol})", value=yf_status, inline=False)
         
+        # Overall recommendation
         if (av_result and "01. symbol" in av_result) or (yf_result and "01. symbol" in yf_result):
             recommendation = "✅ At least one API is working - stock_price command should succeed"
         else:
@@ -1314,38 +1222,50 @@ class Stocks(commands.Cog):
         
         await ctx.send(embed=embed, ephemeral=True)
     
-    async def _is_admin_or_owner(self, ctx: commands.Context) -> bool:
+    async def _is_admin_or_owner(self, ctx) -> bool:
+        """Check if user is bot owner or has admin permissions"""
+        # Check if user is bot owner
         app_info = await self.bot.application_info()
         if ctx.author.id == app_info.owner.id:
             return True
         
+        # Check if user has admin permissions in the guild
         if hasattr(ctx.author, 'guild_permissions') and ctx.author.guild_permissions.administrator:
             return True
             
         return False
 
     @commands.command(name="stock_alert_set", aliases=["alert_set"])
-    async def stock_alert_set(self, ctx: commands.Context, symbol: str, direction: str, target: float) -> None:
+    async def stock_alert_set(self, ctx: commands.Context, symbol: str, direction: str, target: float):
         """
         Simple command to set a stock price alert.
+        
+        Usage:
+        !stock_alert_set ASML below 700
+        !stock_alert_set AAPL above 150
+        !alert_set TSLA below 200
         """
         user_id = ctx.author.id
         symbol_upper = symbol.upper()
         direction_lower = direction.lower()
         
+        # Check if stock is tracked
         tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
         if not any(s['symbol'] == symbol_upper for s in tracked_stocks_list):
             await ctx.send(f"❌ You are not tracking {symbol_upper}. Please use `!track_stock {symbol_upper}` first.")
             return
             
+        # Validate direction
         if direction_lower not in ['above', 'below']:
             await ctx.send(f"❌ Direction must be 'above' or 'below', not '{direction}'.")
             return
             
+        # Validate target price
         if target <= 0:
             await ctx.send(f"❌ Target price must be positive, not {target}.")
             return
             
+        # Set the alert
         try:
             if direction_lower == 'above':
                 success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
@@ -1359,7 +1279,7 @@ class Stocks(commands.Cog):
                     await ctx.send(f"✅ Alert set for {symbol_upper}: notify when price goes **above ${target:.2f}**")
                 else:
                     await ctx.send(f"❌ Failed to set alert for {symbol_upper}. It might already be set to this value.")
-            else:
+            else:  # below
                 success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=None, target_below=target,
@@ -1376,19 +1296,26 @@ class Stocks(commands.Cog):
             await ctx.send(f"❌ Error setting alert: {str(e)}")
 
     @commands.command(name="stock_alert_clear", aliases=["alert_clear"])
-    async def stock_alert_clear(self, ctx: commands.Context, symbol: str, direction: str = "all") -> None:
+    async def stock_alert_clear(self, ctx: commands.Context, symbol: str, direction: str = "all"):
         """
         Clear stock alerts.
+        
+        Usage:
+        !stock_alert_clear ASML below
+        !stock_alert_clear AAPL above  
+        !stock_alert_clear TSLA all
         """
         user_id = ctx.author.id
         symbol_upper = symbol.upper()
         direction_lower = direction.lower()
         
+        # Check if stock is tracked
         tracked_stocks_list = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
         if not any(s['symbol'] == symbol_upper for s in tracked_stocks_list):
             await ctx.send(f"❌ You are not tracking {symbol_upper}.")
             return
             
+        # Validate direction
         if direction_lower not in ['above', 'below', 'all']:
             await ctx.send(f"❌ Direction must be 'above', 'below', or 'all', not '{direction}'.")
             return
@@ -1418,7 +1345,7 @@ class Stocks(commands.Cog):
                     await ctx.send(f"✅ 'Above' alert cleared for {symbol_upper}")
                 else:
                     await ctx.send(f"❌ Failed to clear 'above' alert for {symbol_upper}")
-            else:
+            else:  # below
                 success = await self.bot.loop.run_in_executor(None, self.db_manager.add_stock_alert,
                     user_id, symbol_upper,
                     target_above=None, target_below=None,
@@ -1434,6 +1361,6 @@ class Stocks(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error clearing alert: {str(e)}")
 
-async def setup(bot: commands.Bot) -> None:
-    await bot.add_cog(Stocks(bot, db_manager=bot.db_manager))
-    print("Stocks Cog has been loaded and monitoring tasks initialized.")
+async def setup(bot):
+    await bot.add_cog(Stocks(bot))
+    print("Stocks Cog has been loaded and stock alert task initialized.")

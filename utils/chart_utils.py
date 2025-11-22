@@ -14,6 +14,19 @@ def _create_chart_config(symbol: str, timespan_label: str, data_points: list):
     """
     if not data_points:
         return None
+    
+    # Auto-downsample if too many points to prevent payload issues
+    # QuickChart can handle thousands, but for a simple static image, 500 is plenty of resolution
+    # and keeps payload small.
+    MAX_POINTS = 500
+    if len(data_points) > MAX_POINTS:
+        step = len(data_points) // MAX_POINTS + 1
+        # Keep the last point (most recent) always
+        downsampled_points = data_points[::step]
+        if data_points[-1] not in downsampled_points:
+            downsampled_points.append(data_points[-1])
+        data_points = downsampled_points
+        # print(f"Downsampled chart data for {symbol} from {len(data_points) * step} to {len(data_points)} points.")
 
     labels = []
     for dp in data_points:
@@ -128,7 +141,9 @@ def get_stock_chart_image(symbol: str, timespan_label: str, data_points: list, c
         if response.status_code == 200:
             return io.BytesIO(response.content)
         else:
-            print(f"QuickChart error: {response.status_code} {response.text}")
+            # Try to avoid printing binary data if it is one
+            error_snippet = response.text[:200] if len(response.text) < 1000 else "Response too long/binary"
+            print(f"QuickChart error: {response.status_code}. Partial Response: {error_snippet}")
             return None
 
     except Exception as e:
