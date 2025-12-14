@@ -151,7 +151,15 @@ class BooksCog(commands.Cog, name="Books"):
             if wait:
                 return await ctx.interaction.followup.send(**kwargs, wait=True)
             return await ctx.interaction.followup.send(**kwargs)
-        return await ctx.send(content=content, embed=embed, view=view)
+        # `ctx.send(..., view=None)` raises TypeError; only pass `view` when it's a real View.
+        kwargs = {}
+        if content is not None:
+            kwargs["content"] = content
+        if embed is not None:
+            kwargs["embed"] = embed
+        if view is not None:
+            kwargs["view"] = view
+        return await ctx.send(**kwargs)
 
     async def author_autocomplete(self, interaction: discord.Interaction, current: str) -> List[discord.app_commands.Choice[str]]:
         if not current or len(current.strip()) < 2:

@@ -221,14 +221,17 @@ class TVShows(commands.Cog):
             else:
                 return await ctx.interaction.followup.send(content, ephemeral=ephemeral, wait=wait, view=view_arg)
         else:
-            if embeds:
-                return await ctx.send(content=content, embeds=embeds, view=view)
-            elif content and embed:
-                return await ctx.send(content=content, embed=embed, view=view)
-            elif embed:
-                return await ctx.send(embed=embed, view=view)
-            else:
-                return await ctx.send(content, view=view)
+            # `ctx.send(..., view=None)` raises TypeError; only pass `view` when it's a real View.
+            kwargs = {}
+            if content is not None:
+                kwargs["content"] = content
+            if embed is not None:
+                kwargs["embed"] = embed
+            if embeds is not None:
+                kwargs["embeds"] = embeds
+            if view is not None:
+                kwargs["view"] = view
+            return await ctx.send(**kwargs)
 
     def cog_unload(self):
         logger.info("TVShows Cog: Unloading and cancelling check_new_episodes task.")
