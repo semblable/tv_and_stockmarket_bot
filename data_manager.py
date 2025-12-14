@@ -1345,6 +1345,20 @@ class DataManager:
                 p = max(0.0, min(100.0, p))
                 updates["current_percent"] = p
                 log_entries.append(("percent", float(p)))
+
+                # If total_pages is known, also keep current_page in sync when the user updates by percent.
+                # Do not override an explicit page/pages_delta update in the same call.
+                if page is None and pages_delta is None and "current_page" not in updates:
+                    try:
+                        total_pages = int(item.get("total_pages")) if item.get("total_pages") is not None else None
+                    except (TypeError, ValueError):
+                        total_pages = None
+                    if total_pages is not None and total_pages > 0:
+                        # Round to nearest page; clamp within [0, total_pages]
+                        derived_page = int(round((p / 100.0) * float(total_pages)))
+                        derived_page = max(0, min(int(total_pages), derived_page))
+                        updates["current_page"] = derived_page
+                        log_entries.append(("page", float(derived_page)))
             except (TypeError, ValueError):
                 pass
 
