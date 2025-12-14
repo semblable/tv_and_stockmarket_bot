@@ -193,22 +193,31 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         ephemeral: bool = True,
         wait: bool = False,
     ):
-        if ctx.interaction:
-            kwargs = {"ephemeral": ephemeral}
+        interaction = getattr(ctx, "interaction", None)
+        if interaction:
+            base_kwargs = {}
             if embed is not None:
-                kwargs["embed"] = embed
+                base_kwargs["embed"] = embed
             if content is not None:
-                kwargs["content"] = content
+                base_kwargs["content"] = content
+
+            # If this is the first response, use response.send_message(). If the caller needs
+            # a Message object, fetch it via original_response().
             try:
-                if not ctx.interaction.response.is_done():
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(**base_kwargs, ephemeral=ephemeral)
                     if wait:
-                        return await ctx.interaction.followup.send(**kwargs, wait=True)
-                    return await ctx.interaction.response.send_message(**kwargs)
-            except discord.HTTPException:
+                        try:
+                            return await interaction.original_response()
+                        except discord.HTTPException:
+                            return None
+                    return None
+            except (discord.InteractionResponded, discord.HTTPException):
                 pass
+
             if wait:
-                return await ctx.interaction.followup.send(**kwargs, wait=True)
-            return await ctx.interaction.followup.send(**kwargs)
+                return await interaction.followup.send(**base_kwargs, ephemeral=ephemeral, wait=True)
+            return await interaction.followup.send(**base_kwargs, ephemeral=ephemeral)
 
         kwargs2 = {}
         if content is not None:

@@ -96,17 +96,23 @@ class GamesCog(commands.Cog, name="Games"):
         if view is not None:
             base_kwargs["view"] = view
 
-        if getattr(ctx, "interaction", None):
+        interaction = getattr(ctx, "interaction", None)
+        if interaction:
             try:
-                if not ctx.interaction.response.is_done():
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(**base_kwargs, ephemeral=ephemeral)
                     if wait:
-                        return await ctx.interaction.followup.send(**base_kwargs, ephemeral=ephemeral, wait=True)
-                    return await ctx.interaction.response.send_message(**base_kwargs, ephemeral=ephemeral)
-            except discord.HTTPException:
+                        try:
+                            return await interaction.original_response()
+                        except discord.HTTPException:
+                            return None
+                    return None
+            except (discord.InteractionResponded, discord.HTTPException):
                 pass
+
             if wait:
-                return await ctx.interaction.followup.send(**base_kwargs, ephemeral=ephemeral, wait=True)
-            return await ctx.interaction.followup.send(**base_kwargs, ephemeral=ephemeral)
+                return await interaction.followup.send(**base_kwargs, ephemeral=ephemeral, wait=True)
+            return await interaction.followup.send(**base_kwargs, ephemeral=ephemeral)
 
         return await ctx.send(**base_kwargs)
 
