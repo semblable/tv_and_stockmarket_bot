@@ -230,7 +230,7 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
             lines.append("- **Progress**: (no updates yet)")
         return lines
 
-    @commands.hybrid_group(name="reading", aliases=["read"], fallback="now", description="Track your reading progress (pages / Kindle / audiobook).")
+    @commands.hybrid_group(name="reading", aliases=["read"], description="Track your reading progress (pages / Kindle / audiobook).")
     async def reading_group(self, ctx: commands.Context):
         if ctx.invoked_subcommand is None:
             await self.reading_now(ctx)
