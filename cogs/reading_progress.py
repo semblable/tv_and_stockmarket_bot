@@ -138,52 +138,51 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
             return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, view=view)
         return await ctx.send(content=content, embed=embed, view=view)
 
+    NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
-NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    class BookSelectionView(discord.ui.View):
+        def __init__(self, ctx: commands.Context, results: List[dict], timeout: int = 60):
+            super().__init__(timeout=timeout)
+            self.ctx = ctx
+            self.results = results
+            self.selected_result: Optional[dict] = None
+            self.message: Optional[discord.Message] = None
 
+            for i, _ in enumerate(results[:5]):
+                self.add_item(
+                    ReadingProgressCog.BookSelectionButton(i, ReadingProgressCog.NUMBER_EMOJIS[i])  # type: ignore[attr-defined]
+                )
 
-class BookSelectionView(discord.ui.View):
-    def __init__(self, ctx: commands.Context, results: List[dict], timeout: int = 60):
-        super().__init__(timeout=timeout)
-        self.ctx = ctx
-        self.results = results
-        self.selected_result: Optional[dict] = None
-        self.message: Optional[discord.Message] = None
+        async def interaction_check(self, interaction: discord.Interaction) -> bool:
+            if interaction.user.id != self.ctx.author.id:
+                await interaction.response.send_message("This isn't for you!", ephemeral=True)
+                return False
+            return True
 
-        for i, _ in enumerate(results[:5]):
-            self.add_item(BookSelectionButton(i, NUMBER_EMOJIS[i]))
+        async def on_timeout(self):
+            for child in self.children:
+                child.disabled = True
+            if self.message:
+                try:
+                    await self.message.edit(view=self)
+                except discord.HTTPException:
+                    pass
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("This isn't for you!", ephemeral=True)
-            return False
-        return True
+    class BookSelectionButton(discord.ui.Button):
+        def __init__(self, index: int, emoji: str):
+            super().__init__(
+                style=discord.ButtonStyle.secondary,
+                label=str(index + 1),
+                emoji=emoji,
+                custom_id=f"reading_book_select_{index}",
+            )
+            self.index = index
 
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except discord.HTTPException:
-                pass
-
-
-class BookSelectionButton(discord.ui.Button):
-    def __init__(self, index: int, emoji: str):
-        super().__init__(
-            style=discord.ButtonStyle.secondary,
-            label=str(index + 1),
-            emoji=emoji,
-            custom_id=f"reading_book_select_{index}",
-        )
-        self.index = index
-
-    async def callback(self, interaction: discord.Interaction):
-        view: BookSelectionView = self.view  # type: ignore[assignment]
-        view.selected_result = view.results[self.index]
-        await interaction.response.defer()
-        view.stop()
+        async def callback(self, interaction: discord.Interaction):
+            view: "ReadingProgressCog.BookSelectionView" = self.view  # type: ignore[assignment]
+            view.selected_result = view.results[self.index]
+            await interaction.response.defer()
+            view.stop()
 
     async def _is_user_in_dnd(self, user_id: int) -> bool:
         """
@@ -338,10 +337,10 @@ class BookSelectionButton(discord.ui.Button):
                         a = r.get("author") or "Unknown author"
                         y = r.get("first_publish_year")
                         y_s = f" ({y})" if isinstance(y, int) else ""
-                        lines.append(f"{NUMBER_EMOJIS[i]} **{t}** — *{a}*{y_s}")
+                        lines.append(f"{self.NUMBER_EMOJIS[i]} **{t}** — *{a}*{y_s}")
                     embed_pick.description = "\n".join(lines)
 
-                    view = BookSelectionView(ctx, display)
+                    view = self.BookSelectionView(ctx, display)
                     msg = await self._send(ctx, embed=embed_pick, ephemeral=not is_dm, view=view, wait=True)
                     view.message = msg
                     await view.wait()
@@ -558,9 +557,15 @@ class BookSelectionButton(discord.ui.Button):
             # One-line summary: prefer pages/percent/audio
             summary = prog[0].replace("- **", "").replace("**", "")
             marker = "👉 " if current_id is not None and int(it.get("id") or -1) == int(current_id) else ""
-            lines.append(f"- {marker}**#{it.get('id')}**: **{title}**{author} ({status}) — {summary}")
+            links: List[str] = []
+            if isinstance(it.get("ol_work_id"), str) and it["ol_work_id"].strip():
+                links.append(f"[OL]({openlibrary_client.work_url(it['ol_work_id'].strip())})")
+            if isinstance(it.get("cover_url"), str) and it["cover_url"].strip():
+                links.append(f"[🖼️]({it['cover_url'].strip()})")
+            links_s = f" {' '.join(links)}" if links else ""
+            lines.append(f"- {marker}**#{it.get('id')}**: **{title}**{author} ({status}) — {summary}{links_s}")
         embed.description = "\n".join(lines)
-        embed.set_footer(text="Tip: /reading switch <id> changes current.")
+        embed.set_footer(text="Tip: /reading switch_to lets you pick from autocomplete.")
         await self._send(ctx, embed=embed, ephemeral=not is_dm)
 
     @reading_group.command(name="switch", description="Switch your current reading item to a different active entry.")
@@ -581,6 +586,58 @@ class BookSelectionButton(discord.ui.Button):
 
         await self.bot.loop.run_in_executor(None, self.db_manager.set_current_reading_item_id, ctx.author.id, int(item_id))
         await self.reading_now(ctx)
+
+    async def active_reading_item_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[discord.app_commands.Choice[str]]:
+        """
+        Autocomplete helper for /reading switch_to.
+        Returns Choice(value=item_id_as_str, name="Title — Author (#id)").
+        """
+        if not self.db_manager:
+            return []
+        try:
+            uid = interaction.user.id
+        except Exception:
+            return []
+
+        try:
+            items = await self.bot.loop.run_in_executor(None, self.db_manager.list_reading_items, uid, ["reading", "paused"], 25)
+        except Exception:
+            return []
+
+        q = (current or "").strip().lower()
+        choices: List[discord.app_commands.Choice[str]] = []
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            try:
+                item_id = int(it.get("id"))
+            except Exception:
+                continue
+            title = str(it.get("title") or "Untitled")
+            author = str(it.get("author") or "").strip()
+            label = f"{title}" + (f" — {author}" if author else "") + f" (#{item_id})"
+            if q and (q not in title.lower()) and (q not in author.lower()) and (q not in label.lower()):
+                continue
+            choices.append(discord.app_commands.Choice(name=label[:100], value=str(item_id)))
+        return choices[:25]
+
+    @reading_group.command(name="switch_to", description="Switch your current reading item (autocomplete).")
+    @discord.app_commands.describe(item="Pick one of your active reading items")
+    @discord.app_commands.autocomplete(item=active_reading_item_autocomplete)
+    async def reading_switch_to(self, ctx: commands.Context, item: str):
+        is_dm = self._is_dm_ctx(ctx)
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self._send(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+        try:
+            item_id = int(str(item).strip())
+        except Exception:
+            await self._send(ctx, "Pick an item from the autocomplete list.", ephemeral=not is_dm)
+            return
+        await self.reading_switch(ctx, item_id)
 
     @reading_group.command(name="history", description="Show recent progress updates for your current item.")
     async def reading_history(self, ctx: commands.Context, limit: int = 10):
