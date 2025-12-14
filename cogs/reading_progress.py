@@ -149,6 +149,54 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
 
     NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
+    @staticmethod
+    def _normalize_lang_pref(raw: Optional[str]) -> Optional[str]:
+        """
+        Normalize a user language input into an Open Library language code (usually 3-letter).
+        Examples: "en"/"english" -> "eng", "es"/"spanish" -> "spa", "any" -> None.
+        """
+        if not raw or not isinstance(raw, str):
+            return None
+        t = raw.strip().lower()
+        if not t or t in {"any", "all", "*", "everything"}:
+            return None
+        mapping = {
+            "en": "eng",
+            "eng": "eng",
+            "english": "eng",
+            "es": "spa",
+            "spa": "spa",
+            "spanish": "spa",
+            "fr": "fre",
+            "fra": "fre",
+            "fre": "fre",
+            "french": "fre",
+            "de": "ger",
+            "deu": "ger",
+            "ger": "ger",
+            "german": "ger",
+            "it": "ita",
+            "ita": "ita",
+            "italian": "ita",
+            "pt": "por",
+            "por": "por",
+            "portuguese": "por",
+        }
+        return mapping.get(t, t if len(t) in (2, 3) else None)
+
+    @staticmethod
+    def _ol_popularity_score(r: dict) -> int:
+        """
+        Best-effort popularity score based on Open Library search fields.
+        """
+        def gi(k: str) -> int:
+            v = r.get(k)
+            try:
+                return int(v) if v is not None else 0
+            except (TypeError, ValueError):
+                return 0
+        return gi("want_to_read_count") + gi("currently_reading_count") + gi("already_read_count") + gi("ratings_count")
+
     class BookSelectionView(discord.ui.View):
         def __init__(self, ctx: commands.Context, results: List[dict], timeout: int = 60):
             super().__init__(timeout=timeout)
@@ -305,11 +353,13 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
             await self.reading_now(ctx)
 
     @reading_group.command(name="start", description="Start tracking a new book/audiobook and set it as current.")
+    @discord.app_commands.describe(language="Preferred language for the auto-match (e.g. en, es, any). Default prefers English.")
     async def reading_start(
         self,
         ctx: commands.Context,
         title: str,
         author: Optional[str] = None,
+        language: Optional[str] = None,
         format: Optional[str] = None,
         total_pages: Optional[int] = None,
         total_audio: Optional[str] = None,
@@ -322,6 +372,8 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
 
         # --- Open Library autofill (title/author/pages + cover) ---
         chosen: Optional[dict] = None
+        lang_code = self._normalize_lang_pref(language)
+        preferred_lang = "eng" if lang_code is None else lang_code
         query = (title or "").strip()
         if isinstance(author, str) and author.strip():
             query = f"{query} {author.strip()}".strip()
@@ -335,6 +387,33 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
                 results = []
 
             if results:
+                # Prefer English by default; if user provided a language, prefer that.
+                # Also prefer more "popular" entries (reads/ratings) and more editions.
+                def lang_match(r: dict) -> int:
+                    langs = r.get("languages") or []
+                    if not preferred_lang:
+                        return 0
+                    try:
+                        return 1 if preferred_lang in [str(x).lower() for x in langs] else 0
+                    except Exception:
+                        return 0
+
+                if lang_code is not None:
+                    filtered = [r for r in results if lang_match(r)]
+                    if filtered:
+                        results = filtered
+
+                results = sorted(
+                    results,
+                    key=lambda r: (
+                        lang_match(r),
+                        self._ol_popularity_score(r),
+                        int(r.get("edition_count") or 0),
+                        1 if r.get("cover_url") else 0,
+                    ),
+                    reverse=True,
+                )
+
                 if len(results) == 1:
                     chosen = results[0]
                 else:
@@ -346,8 +425,20 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
                         a = r.get("author") or "Unknown author"
                         y = r.get("first_publish_year")
                         y_s = f" ({y})" if isinstance(y, int) else ""
-                        lines.append(f"{self.NUMBER_EMOJIS[i]} **{t}** — *{a}*{y_s}")
+                        langs = r.get("languages") or []
+                        lang_tag = ""
+                        if isinstance(langs, list) and langs:
+                            try:
+                                # show up to 2 language codes
+                                shown = [str(x).upper() for x in langs[:2] if isinstance(x, str)]
+                                if shown:
+                                    lang_tag = f" [{', '.join(shown)}]"
+                            except Exception:
+                                pass
+                        lines.append(f"{self.NUMBER_EMOJIS[i]} **{t}** — *{a}*{y_s}{lang_tag}")
                     embed_pick.description = "\n".join(lines)
+                    if lang_code is None:
+                        embed_pick.set_footer(text="Tip: default prefers English. Use /reading start ... language:es (or language:any).")
 
                     view = self.BookSelectionView(ctx, display)
                     msg = await self._send(ctx, embed=embed_pick, ephemeral=not is_dm, view=view, wait=True)

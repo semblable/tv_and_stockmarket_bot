@@ -162,7 +162,9 @@ def search_books(query: str, *, limit: int = 10, timeout_s: float = 10.0) -> Lis
     Returns list of dicts:
       {
         'work_id', 'title', 'author', 'first_publish_year',
-        'cover_id', 'cover_url', 'edition_id', 'isbn', 'pages_median'
+        'cover_id', 'cover_url', 'edition_id', 'isbn', 'pages_median',
+        'languages', 'edition_count',
+        'ratings_count', 'want_to_read_count', 'currently_reading_count', 'already_read_count'
       }
     """
     if not query or not isinstance(query, str) or len(query.strip()) < 2:
@@ -184,6 +186,12 @@ def search_books(query: str, *, limit: int = 10, timeout_s: float = 10.0) -> Lis
                 "edition_key",
                 "isbn",
                 "number_of_pages_median",
+                "language",
+                "edition_count",
+                "ratings_count",
+                "want_to_read_count",
+                "currently_reading_count",
+                "already_read_count",
             ]
         ),
     }
@@ -247,6 +255,26 @@ def search_books(query: str, *, limit: int = 10, timeout_s: float = 10.0) -> Lis
         except (TypeError, ValueError):
             pages_median_i = None
 
+        # language is usually a list of 3-letter codes (e.g., ["eng", "spa"])
+        langs_raw = doc.get("language")
+        languages: List[str] = []
+        if isinstance(langs_raw, list):
+            languages = [str(x).strip().lower() for x in langs_raw if isinstance(x, str) and x.strip()]
+        elif isinstance(langs_raw, str) and langs_raw.strip():
+            languages = [langs_raw.strip().lower()]
+
+        def _to_int(val: Any) -> Optional[int]:
+            try:
+                return int(val) if val is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        edition_count = _to_int(doc.get("edition_count"))
+        ratings_count = _to_int(doc.get("ratings_count"))
+        want_to_read_count = _to_int(doc.get("want_to_read_count"))
+        currently_reading_count = _to_int(doc.get("currently_reading_count"))
+        already_read_count = _to_int(doc.get("already_read_count"))
+
         out.append(
             {
                 "work_id": wid,
@@ -258,6 +286,12 @@ def search_books(query: str, *, limit: int = 10, timeout_s: float = 10.0) -> Lis
                 "edition_id": edition_id,
                 "isbn": isbn,
                 "pages_median": pages_median_i,
+                "languages": languages,
+                "edition_count": edition_count,
+                "ratings_count": ratings_count,
+                "want_to_read_count": want_to_read_count,
+                "currently_reading_count": currently_reading_count,
+                "already_read_count": already_read_count,
             }
         )
 
