@@ -131,8 +131,6 @@ class BooksCog(commands.Cog, name="Books"):
     async def send_response(self, ctx: commands.Context, content: Optional[str] = None, *, embed: Optional[discord.Embed] = None, ephemeral: bool = True, view: Optional[discord.ui.View] = None, wait: bool = False):
         if ctx.interaction:
             kwargs = {"ephemeral": ephemeral}
-            if wait:
-                kwargs["wait"] = wait
             if view is not None:
                 kwargs["view"] = view
             if embed is not None:
@@ -143,9 +141,15 @@ class BooksCog(commands.Cog, name="Books"):
             # If we haven't responded/deferred yet, use the initial response.
             try:
                 if not ctx.interaction.response.is_done():
+                    # discord.py's initial InteractionResponse.send_message does not support wait=.
+                    # If the caller needs a message object (wait=True), they must use followups.
+                    if wait:
+                        return await ctx.interaction.followup.send(**kwargs, wait=True)
                     return await ctx.interaction.response.send_message(**kwargs)
             except discord.HTTPException:
                 pass
+            if wait:
+                return await ctx.interaction.followup.send(**kwargs, wait=True)
             return await ctx.interaction.followup.send(**kwargs)
         return await ctx.send(content=content, embed=embed, view=view)
 
@@ -312,7 +316,7 @@ class BooksCog(commands.Cog, name="Books"):
 
         ok = await self.bot.loop.run_in_executor(None, self.db_manager.remove_book_author_subscription, guild_id, user_id, author_id)
         if not ok:
-            await self.send_response(ctx, "Database error while removing that subscription.", ephemeral=not is_dm)
+            await self.send_response(ctx, "You don’t seem to be subscribed to that author (or the database couldn’t remove it). Use `/my_book_authors` to see your current list.", ephemeral=not is_dm)
             return
         await self.send_response(ctx, f"✅ Unsubscribed from **{author_id}**.", ephemeral=not is_dm)
 

@@ -182,14 +182,14 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
         # Remove fill and complex options for fallback
         chart_config["data"]["datasets"][0]["fill"] = False
         if "title" in chart_config["options"]["plugins"]:
-            chart_config["options"]["plugins"]["title"]["display"] = False # Save space
-        
+            chart_config["options"]["plugins"]["title"]["display"] = False  # Save space
+
         if "callback" in chart_config["options"]["scales"]["y"]["ticks"]:
-            del chart_config["options"]["scales"]["y"]["ticks"]["callback"] # remove function for GET
-        
+            del chart_config["options"]["scales"]["y"]["ticks"]["callback"]  # remove function for GET
+
         encoded_config = urllib.parse.quote(json.dumps(chart_config, separators=(',', ':')))
         url = f"{QUICKCHART_BASE_URL}?c={encoded_config}&w={chart_width}&h={chart_height}&bkg=white"
-        
+
         if len(url) < 2048:
             return url
         else:
@@ -198,4 +198,92 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
 
     except Exception as e:
         print(f"Error in generate_stock_chart_url: {e}")
+        return None
+
+
+def _create_weekly_reading_chart_config(title: str, labels: list, values: list, *, unit: str):
+    """
+    Creates a simple bar chart config for weekly reading stats.
+    """
+    if not labels or not values or len(labels) != len(values):
+        return None
+
+    # Downsample defensively (should not happen for weekly charts)
+    if len(labels) > 31:
+        labels = labels[-31:]
+        values = values[-31:]
+
+    max_v = 0
+    try:
+        max_v = max(float(v) for v in values if v is not None)
+    except Exception:
+        max_v = 0
+
+    suggested_max = None
+    if max_v > 0:
+        suggested_max = max_v * 1.15
+
+    return {
+        "type": "bar",
+        "data": {
+            "labels": labels,
+            "datasets": [
+                {
+                    "label": unit,
+                    "data": values,
+                    "backgroundColor": "rgba(54, 162, 235, 0.35)",
+                    "borderColor": "rgba(54, 162, 235, 1)",
+                    "borderWidth": 2,
+                    "borderRadius": 6,
+                }
+            ],
+        },
+        "options": {
+            "responsive": True,
+            "plugins": {
+                "title": {"display": True, "text": title, "font": {"size": 18}},
+                "legend": {"display": False},
+            },
+            "scales": {
+                "x": {"grid": {"display": False}},
+                "y": {
+                    "beginAtZero": True,
+                    "grid": {"color": "rgba(0, 0, 0, 0.05)"},
+                    **({"suggestedMax": suggested_max} if suggested_max else {}),
+                },
+            },
+        },
+    }
+
+
+def get_weekly_reading_chart_image(
+    title: str,
+    labels: list,
+    values: list,
+    *,
+    unit: str,
+    chart_width: int = 800,
+    chart_height: int = 450,
+):
+    """
+    Generates a weekly reading bar chart image and returns it as bytes (io.BytesIO).
+    Uses QuickChart.io POST endpoint to retrieve the image directly.
+    """
+    chart_config = _create_weekly_reading_chart_config(title, labels, values, unit=unit)
+    if not chart_config:
+        return None
+
+    try:
+        post_payload = {
+            "chart": chart_config,
+            "width": chart_width,
+            "height": chart_height,
+            "backgroundColor": "white",
+            "format": "png",
+        }
+        response = requests.post(QUICKCHART_BASE_URL, json=post_payload, timeout=30)
+        if response.status_code == 200:
+            return io.BytesIO(response.content)
+        return None
+    except Exception:
         return None
