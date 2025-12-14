@@ -324,6 +324,44 @@ class DataManager:
         """
         create_table_if_not_exists("book_author_user_seen_works", create_book_author_user_seen_works_sql)
 
+        # --- Reading Progress / Books ---
+        # A "reading item" is a user-specific book/audiobook entry with current progress.
+        create_reading_items_sql = """
+        CREATE TABLE IF NOT EXISTS reading_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            author TEXT,
+            format TEXT, -- e.g. paper|ebook|kindle|audio (free-form)
+            status TEXT NOT NULL DEFAULT 'reading', -- reading|paused|finished|abandoned
+            total_pages INTEGER,
+            total_audio_seconds INTEGER,
+            current_page INTEGER,
+            current_kindle_location INTEGER,
+            current_percent REAL,
+            current_audio_seconds INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            finished_at TIMESTAMP,
+            last_update_at TIMESTAMP
+        )
+        """
+        create_table_if_not_exists("reading_items", create_reading_items_sql)
+
+        # Each progress update is logged for history/stats.
+        create_reading_updates_sql = """
+        CREATE TABLE IF NOT EXISTS reading_updates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
+            kind TEXT NOT NULL, -- page|kindle_loc|percent|audio_seconds
+            value REAL,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        create_table_if_not_exists("reading_updates", create_reading_updates_sql)
+
         logger.info("Database initialization check complete.")
 
     # --- TV Show Subscriptions ---
@@ -1017,6 +1055,272 @@ class DataManager:
                     cur.close()
             except Exception:
                 pass
+
+    # --- Reading Progress ---
+    def create_reading_item(
+        self,
+        user_id: int,
+        title: str,
+        author: Optional[str] = None,
+        format: Optional[str] = None,
+        total_pages: Optional[int] = None,
+        total_audio_seconds: Optional[int] = None,
+    ) -> Optional[int]:
+        """
+        Creates a new reading item and returns its ID.
+        """
+        if not title or not str(title).strip():
+            return None
+        query = """
+        INSERT INTO reading_items
+            (user_id, title, author, format, total_pages, total_audio_seconds, status)
+        VALUES
+            (:user_id, :title, :author, :format, :total_pages, :total_audio_seconds, 'reading')
+        """
+        params = {
+            "user_id": str(user_id),
+            "title": title.strip(),
+            "author": author.strip() if isinstance(author, str) and author.strip() else None,
+            "format": format.strip() if isinstance(format, str) and format.strip() else None,
+            "total_pages": int(total_pages) if total_pages is not None else None,
+            "total_audio_seconds": int(total_audio_seconds) if total_audio_seconds is not None else None,
+        }
+        conn = self._get_connection()
+        cur = None
+        try:
+            cur = conn.cursor()
+            cur.execute(query, params)
+            conn.commit()
+            return int(cur.lastrowid)
+        except sqlite3.Error as e:
+            logger.error(f"create_reading_item failed: {e}")
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            return None
+        finally:
+            try:
+                if cur:
+                    cur.close()
+            except Exception:
+                pass
+
+    def get_reading_item(self, user_id: int, item_id: int) -> Optional[Dict[str, Any]]:
+        query = """
+        SELECT *
+        FROM reading_items
+        WHERE user_id = :user_id AND id = :item_id
+        """
+        row = self._execute_query(query, {"user_id": str(user_id), "item_id": int(item_id)}, fetch_one=True)
+        return row if isinstance(row, dict) else None
+
+    def list_reading_items(
+        self,
+        user_id: int,
+        statuses: Optional[List[str]] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        statuses = statuses or ["reading", "paused"]
+        placeholders = ", ".join([f":s{i}" for i in range(len(statuses))]) if statuses else "'reading'"
+        query = f"""
+        SELECT *
+        FROM reading_items
+        WHERE user_id = :user_id AND status IN ({placeholders})
+        ORDER BY COALESCE(last_update_at, created_at) DESC, id DESC
+        LIMIT :limit
+        """
+        params: Dict[str, Any] = {"user_id": str(user_id), "limit": int(limit)}
+        for i, s in enumerate(statuses):
+            params[f"s{i}"] = s
+        rows = self._execute_query(query, params, fetch_all=True)
+        return rows if isinstance(rows, list) else []
+
+    def set_current_reading_item_id(self, user_id: int, item_id: Optional[int]) -> bool:
+        """
+        Persists the user's current reading item id in user_preferences.
+        """
+        if item_id is None:
+            return self.delete_user_preference(user_id, "reading_current_item_id")
+        return self.set_user_preference(user_id, "reading_current_item_id", int(item_id))
+
+    def get_current_reading_item_id(self, user_id: int) -> Optional[int]:
+        item_id = self.get_user_preference(user_id, "reading_current_item_id", None)
+        if item_id is None:
+            return None
+        try:
+            return int(item_id)
+        except (TypeError, ValueError):
+            return None
+
+    def get_current_reading_item(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Returns the current reading item (preference-backed). Falls back to latest active.
+        """
+        preferred_id = self.get_current_reading_item_id(user_id)
+        if preferred_id is not None:
+            item = self.get_reading_item(user_id, preferred_id)
+            if item:
+                return item
+
+        # fallback: most recently updated active item
+        items = self.list_reading_items(user_id, statuses=["reading", "paused"], limit=1)
+        return items[0] if items else None
+
+    def _insert_reading_update(
+        self,
+        user_id: int,
+        item_id: int,
+        kind: str,
+        value: Optional[float] = None,
+        note: Optional[str] = None,
+    ) -> bool:
+        query = """
+        INSERT INTO reading_updates (item_id, user_id, kind, value, note)
+        VALUES (:item_id, :user_id, :kind, :value, :note)
+        """
+        params = {
+            "item_id": int(item_id),
+            "user_id": str(user_id),
+            "kind": kind,
+            "value": value,
+            "note": note.strip() if isinstance(note, str) and note.strip() else None,
+        }
+        return bool(self._execute_query(query, params, commit=True))
+
+    def update_reading_progress(
+        self,
+        user_id: int,
+        item_id: int,
+        *,
+        page: Optional[int] = None,
+        pages_delta: Optional[int] = None,
+        kindle_loc: Optional[int] = None,
+        percent: Optional[float] = None,
+        audio_seconds: Optional[int] = None,
+        audio_delta_seconds: Optional[int] = None,
+        note: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Applies progress updates to the reading_items row and logs them into reading_updates.
+        Returns the updated item dict, or None on failure.
+        """
+        item = self.get_reading_item(user_id, item_id)
+        if not item:
+            return None
+
+        updates: Dict[str, Any] = {}
+        log_entries: List[tuple[str, Optional[float]]] = []
+
+        if pages_delta is not None:
+            try:
+                current = int(item.get("current_page") or 0)
+                page = current + int(pages_delta)
+            except (TypeError, ValueError):
+                page = None
+
+        if audio_delta_seconds is not None:
+            try:
+                current = int(item.get("current_audio_seconds") or 0)
+                audio_seconds = current + int(audio_delta_seconds)
+            except (TypeError, ValueError):
+                audio_seconds = None
+
+        if page is not None:
+            try:
+                page_i = max(0, int(page))
+                updates["current_page"] = page_i
+                log_entries.append(("page", float(page_i)))
+            except (TypeError, ValueError):
+                pass
+
+        if kindle_loc is not None:
+            try:
+                kl = max(0, int(kindle_loc))
+                updates["current_kindle_location"] = kl
+                log_entries.append(("kindle_loc", float(kl)))
+            except (TypeError, ValueError):
+                pass
+
+        if percent is not None:
+            try:
+                p = float(percent)
+                # treat values like 0.42 as 42%
+                if 0.0 <= p <= 1.0:
+                    p *= 100.0
+                p = max(0.0, min(100.0, p))
+                updates["current_percent"] = p
+                log_entries.append(("percent", float(p)))
+            except (TypeError, ValueError):
+                pass
+
+        if audio_seconds is not None:
+            try:
+                a = max(0, int(audio_seconds))
+                updates["current_audio_seconds"] = a
+                log_entries.append(("audio_seconds", float(a)))
+            except (TypeError, ValueError):
+                pass
+
+        if not updates and not (isinstance(note, str) and note.strip()):
+            return item
+
+        # Update item row (best-effort; note-only updates should still touch last_update_at)
+        set_parts = []
+        params: Dict[str, Any] = {"user_id": str(user_id), "item_id": int(item_id)}
+        for k, v in updates.items():
+            set_parts.append(f"{k} = :{k}")
+            params[k] = v
+
+        set_parts.append("last_update_at = CURRENT_TIMESTAMP")
+        # If user updates progress on an item, assume it's active again
+        if item.get("status") in ("paused", "abandoned"):
+            set_parts.append("status = 'reading'")
+
+        query = f"""
+        UPDATE reading_items
+        SET {", ".join(set_parts)}
+        WHERE user_id = :user_id AND id = :item_id
+        """
+        ok = self._execute_query(query, params, commit=True)
+        if not ok:
+            return None
+
+        # Log updates
+        for kind, value in log_entries:
+            self._insert_reading_update(user_id, item_id, kind, value=value, note=note)
+
+        # Note-only entry
+        if not log_entries and isinstance(note, str) and note.strip():
+            self._insert_reading_update(user_id, item_id, "note", value=None, note=note)
+
+        return self.get_reading_item(user_id, item_id)
+
+    def finish_reading_item(self, user_id: int, item_id: int) -> bool:
+        query = """
+        UPDATE reading_items
+        SET status = 'finished',
+            finished_at = CURRENT_TIMESTAMP,
+            last_update_at = CURRENT_TIMESTAMP
+        WHERE user_id = :user_id AND id = :item_id
+        """
+        params = {"user_id": str(user_id), "item_id": int(item_id)}
+        ok = self._execute_query(query, params, commit=True)
+        if ok:
+            self._insert_reading_update(user_id, item_id, "finished", value=1.0, note=None)
+        return bool(ok)
+
+    def list_reading_updates(self, user_id: int, item_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+        query = """
+        SELECT id, item_id, kind, value, note, created_at
+        FROM reading_updates
+        WHERE user_id = :user_id AND item_id = :item_id
+        ORDER BY id DESC
+        LIMIT :limit
+        """
+        params = {"user_id": str(user_id), "item_id": int(item_id), "limit": int(limit)}
+        rows = self._execute_query(query, params, fetch_all=True)
+        return rows if isinstance(rows, list) else []
 
 # Example Usage (for testing)
 if __name__ == "__main__":
