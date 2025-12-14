@@ -209,8 +209,13 @@ class BooksCog(commands.Cog, name="Books"):
         # If autocomplete was used, `author` is the author_id. If not, search.
         selected: Optional[dict] = None
         if isinstance(author, str) and author.upper().startswith("OL") and author.upper().endswith("A"):
-            # Best effort: resolve name via search if needed (optional).
-            selected = {"author_id": author.upper(), "name": author.upper()}
+            # Autocomplete passes author_id only; resolve display name via author endpoint.
+            aid = author.upper()
+            try:
+                resolved_name = await self.bot.loop.run_in_executor(None, partial(openlibrary_client.get_author_name, aid))
+            except Exception:
+                resolved_name = None
+            selected = {"author_id": aid, "name": resolved_name or aid}
         else:
             try:
                 results = await self.bot.loop.run_in_executor(None, partial(openlibrary_client.search_authors, author, limit=10))
@@ -327,13 +332,41 @@ class BooksCog(commands.Cog, name="Books"):
 
         embed = discord.Embed(title="📚 Your Author Subscriptions", color=discord.Color.green())
         lines: List[str] = []
+        # Best-effort: backfill missing/placeholder author_name values.
+        fixed_any = False
         for s in subs[:40]:
-            name = s.get("author_name") or s.get("author_id")
             aid = s.get("author_id")
-            lines.append(f"- **{name}** (`{aid}`)")
+            stored_name = s.get("author_name")
+
+            display_name = stored_name if isinstance(stored_name, str) and stored_name.strip() else None
+            if not display_name and isinstance(aid, str) and aid:
+                # If older rows stored author_id as author_name, treat that as missing.
+                if isinstance(stored_name, str) and stored_name.strip().upper() == aid.upper():
+                    display_name = None
+
+                if display_name is None:
+                    try:
+                        resolved = await self.bot.loop.run_in_executor(None, partial(openlibrary_client.get_author_name, aid))
+                    except Exception:
+                        resolved = None
+                    if resolved:
+                        display_name = resolved
+                        try:
+                            ok = await self.bot.loop.run_in_executor(
+                                None, self.db_manager.update_book_author_subscription_name, guild_id, ctx.author.id, aid, resolved
+                            )
+                            if ok:
+                                fixed_any = True
+                        except Exception:
+                            pass
+
+            display_name = display_name or (aid if isinstance(aid, str) else "Unknown")
+            lines.append(f"- **{display_name}** (`{aid}`)")
         if len(subs) > 40:
             lines.append(f"\n…and {len(subs) - 40} more.")
         embed.description = "\n".join(lines)
+        if fixed_any:
+            embed.set_footer(text="Some author names were refreshed from Open Library.")
         await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
 
     @tasks.loop(hours=6)
