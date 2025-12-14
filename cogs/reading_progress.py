@@ -10,6 +10,7 @@ from typing import Optional, List
 import discord
 from discord.ext import commands, tasks
 
+from api_clients import openlibrary_client
 from utils.chart_utils import get_weekly_reading_chart_image
 
 logger = logging.getLogger(__name__)
@@ -113,16 +114,76 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
         except discord.InteractionResponded:
             pass
 
-    async def _send(self, ctx: commands.Context, content: Optional[str] = None, *, embed: Optional[discord.Embed] = None, ephemeral: bool = True):
+    async def _send(
+        self,
+        ctx: commands.Context,
+        content: Optional[str] = None,
+        *,
+        embed: Optional[discord.Embed] = None,
+        ephemeral: bool = True,
+        view: Optional[discord.ui.View] = None,
+        wait: bool = False,
+    ):
         if getattr(ctx, "interaction", None):
             # If not responded/deferred yet, use initial response.
             try:
                 if not ctx.interaction.response.is_done():
-                    return await ctx.interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+                    if wait:
+                        return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, view=view, wait=True)
+                    return await ctx.interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral, view=view)
             except discord.HTTPException:
                 pass
-            return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
-        return await ctx.send(content=content, embed=embed)
+            if wait:
+                return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, view=view, wait=True)
+            return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, view=view)
+        return await ctx.send(content=content, embed=embed, view=view)
+
+
+NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+
+
+class BookSelectionView(discord.ui.View):
+    def __init__(self, ctx: commands.Context, results: List[dict], timeout: int = 60):
+        super().__init__(timeout=timeout)
+        self.ctx = ctx
+        self.results = results
+        self.selected_result: Optional[dict] = None
+        self.message: Optional[discord.Message] = None
+
+        for i, _ in enumerate(results[:5]):
+            self.add_item(BookSelectionButton(i, NUMBER_EMOJIS[i]))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("This isn't for you!", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
+class BookSelectionButton(discord.ui.Button):
+    def __init__(self, index: int, emoji: str):
+        super().__init__(
+            style=discord.ButtonStyle.secondary,
+            label=str(index + 1),
+            emoji=emoji,
+            custom_id=f"reading_book_select_{index}",
+        )
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction):
+        view: BookSelectionView = self.view  # type: ignore[assignment]
+        view.selected_result = view.results[self.index]
+        await interaction.response.defer()
+        view.stop()
 
     async def _is_user_in_dnd(self, user_id: int) -> bool:
         """
@@ -251,6 +312,66 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
             await self._send(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
+        # --- Open Library autofill (title/author/pages + cover) ---
+        chosen: Optional[dict] = None
+        query = (title or "").strip()
+        if isinstance(author, str) and author.strip():
+            query = f"{query} {author.strip()}".strip()
+
+        if len(query) >= 2:
+            try:
+                results = await self.bot.loop.run_in_executor(None, lambda: openlibrary_client.search_books(query, limit=10))
+            except (openlibrary_client.OpenLibraryConnectionError, openlibrary_client.OpenLibraryAPIError):
+                results = []
+            except Exception:
+                results = []
+
+            if results:
+                if len(results) == 1:
+                    chosen = results[0]
+                else:
+                    display = results[:5]
+                    embed_pick = discord.Embed(title="📚 Which book is this?", color=discord.Color.blurple())
+                    lines: List[str] = []
+                    for i, r in enumerate(display):
+                        t = r.get("title") or "Untitled"
+                        a = r.get("author") or "Unknown author"
+                        y = r.get("first_publish_year")
+                        y_s = f" ({y})" if isinstance(y, int) else ""
+                        lines.append(f"{NUMBER_EMOJIS[i]} **{t}** — *{a}*{y_s}")
+                    embed_pick.description = "\n".join(lines)
+
+                    view = BookSelectionView(ctx, display)
+                    msg = await self._send(ctx, embed=embed_pick, ephemeral=not is_dm, view=view, wait=True)
+                    view.message = msg
+                    await view.wait()
+                    chosen = view.selected_result
+
+                    if chosen is None:
+                        await self._send(ctx, "Selection cancelled or timed out.", ephemeral=not is_dm)
+                        return
+
+        # Apply autofill if we have a chosen OL match.
+        ol_work_id = None
+        ol_edition_id = None
+        cover_url = None
+        if chosen:
+            try:
+                if isinstance(chosen.get("title"), str) and chosen["title"].strip():
+                    title = chosen["title"].strip()
+                if (not author) and isinstance(chosen.get("author"), str) and chosen["author"].strip():
+                    author = chosen["author"].strip()
+                if total_pages is None and isinstance(chosen.get("pages_median"), int) and chosen["pages_median"] > 0:
+                    total_pages = int(chosen["pages_median"])
+                if isinstance(chosen.get("work_id"), str):
+                    ol_work_id = chosen["work_id"]
+                if isinstance(chosen.get("edition_id"), str):
+                    ol_edition_id = chosen["edition_id"]
+                if isinstance(chosen.get("cover_url"), str):
+                    cover_url = chosen["cover_url"]
+            except Exception:
+                pass
+
         total_audio_seconds = _parse_duration_to_seconds(total_audio) if total_audio else None
         item_id = await self.bot.loop.run_in_executor(
             None,
@@ -258,6 +379,9 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
             ctx.author.id,
             title,
             author,
+            ol_work_id,
+            ol_edition_id,
+            cover_url,
             format,
             total_pages,
             total_audio_seconds,
@@ -273,12 +397,16 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
         embed.add_field(name="Title", value=item.get("title", title), inline=False)
         if item.get("author"):
             embed.add_field(name="Author", value=item["author"], inline=True)
+        if item.get("ol_work_id"):
+            embed.add_field(name="Open Library", value=f"[Open page]({openlibrary_client.work_url(item['ol_work_id'])})", inline=True)
         if item.get("format"):
             embed.add_field(name="Format", value=item["format"], inline=True)
         if item.get("total_pages"):
             embed.add_field(name="Total pages", value=str(item["total_pages"]), inline=True)
         if item.get("total_audio_seconds"):
             embed.add_field(name="Total audio", value=_format_seconds(item["total_audio_seconds"]), inline=True)
+        if isinstance(item.get("cover_url"), str) and item["cover_url"].strip():
+            embed.set_thumbnail(url=item["cover_url"].strip())
         embed.set_footer(text="Use /reading update to log progress.")
         await self._send(ctx, embed=embed, ephemeral=not is_dm)
 
@@ -300,7 +428,11 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
         embed.add_field(name="Status", value=str(item.get("status", "reading")), inline=True)
         if item.get("format"):
             embed.add_field(name="Format", value=str(item["format"]), inline=True)
+        if item.get("ol_work_id"):
+            embed.add_field(name="Open Library", value=f"[Open page]({openlibrary_client.work_url(item['ol_work_id'])})", inline=True)
         embed.add_field(name="Progress", value="\n".join(self._progress_lines(item)), inline=False)
+        if isinstance(item.get("cover_url"), str) and item["cover_url"].strip():
+            embed.set_thumbnail(url=item["cover_url"].strip())
         await self._send(ctx, embed=embed, ephemeral=not is_dm)
 
     @reading_group.command(name="update", description="Update progress (pages / kindle loc / percent / audiobook).")

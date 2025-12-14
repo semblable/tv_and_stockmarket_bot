@@ -40,3 +40,38 @@ def test_get_author_works_success(mock_get):
     assert works[0]["title"] == "Test Book"
 
 
+@patch("api_clients.openlibrary_client.requests.get")
+def test_search_books_success(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "docs": [
+            {
+                "key": "/works/OL82563W",
+                "title": "Dune",
+                "author_name": ["Frank Herbert"],
+                "first_publish_year": 1965,
+                "cover_i": 123,
+                "edition_key": ["OL1M"],
+                "isbn": ["9780441013593"],
+                "number_of_pages_median": 412,
+            },
+            {"key": "/works/OL1X", "title": "Bad Work"},  # invalid id
+        ]
+    }
+    mock_get.return_value = mock_response
+
+    results = openlibrary_client.search_books("dune", limit=5)
+    assert len(results) == 1
+    r = results[0]
+    assert r["work_id"] == "OL82563W"
+    assert r["title"] == "Dune"
+    assert r["author"] == "Frank Herbert"
+    assert r["first_publish_year"] == 1965
+    assert r["cover_id"] == 123
+    assert isinstance(r["cover_url"], str) and "covers.openlibrary.org" in r["cover_url"]
+    assert r["edition_id"] == "OL1M"
+    assert r["isbn"] == "9780441013593"
+    assert r["pages_median"] == 412
+
+

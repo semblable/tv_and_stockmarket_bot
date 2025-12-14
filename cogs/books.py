@@ -403,7 +403,9 @@ class BooksCog(commands.Cog, name="Books"):
                         break
                 author_name = author_name or author_id
 
-                works = await self.bot.loop.run_in_executor(None, partial(openlibrary_client.get_author_works, author_id, limit=25))
+                works = await self.bot.loop.run_in_executor(
+                    None, partial(openlibrary_client.get_author_works, author_id, limit=25)
+                )
                 work_items = [w for w in works if isinstance(w, dict) and isinstance(w.get("work_id"), str)]
                 if not work_items:
                     await asyncio.sleep(0.15)
@@ -471,6 +473,14 @@ class BooksCog(commands.Cog, name="Books"):
                             break
 
                 await asyncio.sleep(0.25)
+            except openlibrary_client.OpenLibraryConnectionError as e:
+                # Open Library is occasionally slow/unreachable. Don't spam tracebacks; just skip.
+                logger.warning(f"BooksCog: Open Library connection issue for author {author_id}: {e}")
+                await asyncio.sleep(0.5)
+            except openlibrary_client.OpenLibraryAPIError as e:
+                # Non-200 / non-JSON responses etc.
+                logger.warning(f"BooksCog: Open Library API error for author {author_id}: {e}")
+                await asyncio.sleep(0.5)
             except Exception as e:
                 logger.error(f"BooksCog: error checking author {author_id}: {e}", exc_info=True)
                 await asyncio.sleep(0.25)

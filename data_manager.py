@@ -336,6 +336,9 @@ class DataManager:
             user_id TEXT NOT NULL,
             title TEXT NOT NULL,
             author TEXT,
+            ol_work_id TEXT,
+            ol_edition_id TEXT,
+            cover_url TEXT,
             format TEXT, -- e.g. paper|ebook|kindle|audio (free-form)
             status TEXT NOT NULL DEFAULT 'reading', -- reading|paused|finished|abandoned
             total_pages INTEGER,
@@ -351,6 +354,22 @@ class DataManager:
         )
         """
         create_table_if_not_exists("reading_items", create_reading_items_sql)
+
+        # reading_items schema migration for older DBs (ADD COLUMN is cheap/safe).
+        try:
+            cols = self._execute_query("PRAGMA table_info(reading_items);", fetch_all=True) or []
+            col_names = {c.get("name") for c in cols if isinstance(c, dict) and isinstance(c.get("name"), str)}
+            if "ol_work_id" not in col_names:
+                self._execute_query("ALTER TABLE reading_items ADD COLUMN ol_work_id TEXT;", commit=True)
+                logger.info("Column 'ol_work_id' added to reading_items.")
+            if "ol_edition_id" not in col_names:
+                self._execute_query("ALTER TABLE reading_items ADD COLUMN ol_edition_id TEXT;", commit=True)
+                logger.info("Column 'ol_edition_id' added to reading_items.")
+            if "cover_url" not in col_names:
+                self._execute_query("ALTER TABLE reading_items ADD COLUMN cover_url TEXT;", commit=True)
+                logger.info("Column 'cover_url' added to reading_items.")
+        except Exception as e:
+            logger.error(f"Failed to ensure reading_items columns exist: {e}")
 
         # Each progress update is logged for history/stats.
         create_reading_updates_sql = """
@@ -1120,6 +1139,9 @@ class DataManager:
         user_id: int,
         title: str,
         author: Optional[str] = None,
+        ol_work_id: Optional[str] = None,
+        ol_edition_id: Optional[str] = None,
+        cover_url: Optional[str] = None,
         format: Optional[str] = None,
         total_pages: Optional[int] = None,
         total_audio_seconds: Optional[int] = None,
@@ -1131,14 +1153,17 @@ class DataManager:
             return None
         query = """
         INSERT INTO reading_items
-            (user_id, title, author, format, total_pages, total_audio_seconds, status)
+            (user_id, title, author, ol_work_id, ol_edition_id, cover_url, format, total_pages, total_audio_seconds, status)
         VALUES
-            (:user_id, :title, :author, :format, :total_pages, :total_audio_seconds, 'reading')
+            (:user_id, :title, :author, :ol_work_id, :ol_edition_id, :cover_url, :format, :total_pages, :total_audio_seconds, 'reading')
         """
         params = {
             "user_id": str(user_id),
             "title": title.strip(),
             "author": author.strip() if isinstance(author, str) and author.strip() else None,
+            "ol_work_id": ol_work_id.strip() if isinstance(ol_work_id, str) and ol_work_id.strip() else None,
+            "ol_edition_id": ol_edition_id.strip() if isinstance(ol_edition_id, str) and ol_edition_id.strip() else None,
+            "cover_url": cover_url.strip() if isinstance(cover_url, str) and cover_url.strip() else None,
             "format": format.strip() if isinstance(format, str) and format.strip() else None,
             "total_pages": int(total_pages) if total_pages is not None else None,
             "total_audio_seconds": int(total_audio_seconds) if total_audio_seconds is not None else None,
