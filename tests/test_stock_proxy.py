@@ -42,3 +42,4 @@ def test_get_intraday_data_success(mock_get_intraday, client):
     assert len(rv.json['data']) == 1
     assert rv.json['interval'] == '60min'
 
+

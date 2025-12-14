@@ -6,7 +6,7 @@ from api_clients import tmdb_client, tvmaze_client
 from api_clients.tmdb_client import TMDBError, TMDBConnectionError, TMDBAPIError
 from api_clients.tvmaze_client import TVMazeError, TVMazeConnectionError, TVMazeAPIError
 from data_manager import DataManager
-from datetime import datetime, date, timedelta, time
+from datetime import datetime, date, timedelta, time, timezone
 import requests
 import asyncio
 import logging
@@ -157,6 +157,56 @@ class TVShows(commands.Cog):
         self.db_manager = db_manager
         logger.info("TVShows Cog: Initializing and starting check_new_episodes task.")
         self.check_new_episodes.start()
+
+    @staticmethod
+    def _parse_tvmaze_airstamp_to_utc(airstamp: typing.Optional[str]) -> typing.Optional[datetime]:
+        """
+        TVMaze episodes include `airstamp` (ISO-8601 with offset). We use this to avoid
+        notifying at a fixed time (date-only) and instead notify when the episode actually releases.
+        """
+        if not airstamp or not isinstance(airstamp, str):
+            return None
+        try:
+            # TVMaze typically returns "+00:00", but guard for "Z" too.
+            normalized = airstamp.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(normalized)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    @classmethod
+    def _get_episode_release_dt_utc(cls, ep: dict) -> typing.Optional[datetime]:
+        if not ep or not isinstance(ep, dict):
+            return None
+        dt = cls._parse_tvmaze_airstamp_to_utc(ep.get("airstamp"))
+        if dt:
+            return dt
+        # Fallback: TVMaze can have airdate without airstamp for TBA episodes. Date-only is not precise;
+        # we treat it as "unknown time" and avoid using it for exact release gating.
+        return None
+
+    @staticmethod
+    def _format_air_datetime_for_embed(ep: dict) -> str:
+        """
+        Prefer a precise UTC datetime if present; otherwise fall back to date string.
+        """
+        if isinstance(ep, dict):
+            dt_str = ep.get("air_datetime_utc")
+            if isinstance(dt_str, str):
+                try:
+                    dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    dt_utc = dt.astimezone(timezone.utc)
+                    return dt_utc.strftime("%Y-%m-%d %H:%M UTC")
+                except Exception:
+                    pass
+            air_date = ep.get("air_date")
+            if isinstance(air_date, str) and air_date:
+                return air_date
+        return "Unknown"
 
     async def send_response(self, ctx, content=None, embed=None, embeds=None, ephemeral=True, wait=False, view=None):
         """Helper method to send responses that work with both slash commands and prefix commands"""
@@ -1013,7 +1063,9 @@ class TVShows(commands.Cog):
             print("No active TV subscriptions to check.")
             return
 
-        today = date.today()
+        now_utc = datetime.now(timezone.utc)
+        today_utc = now_utc.date()
+        window_start_utc = now_utc - timedelta(days=7)
 
         for user_id_str, user_subs in all_subscriptions.items():
             try:
@@ -1089,22 +1141,35 @@ class TVShows(commands.Cog):
                             # Check if we should fetch the full episode list
                             # We fetch if there's indication of recent activity to catch batch releases
                             if 'nextepisode' in embedded and embedded['nextepisode']:
-                                n_air_date = embedded['nextepisode'].get('airdate')
-                                if n_air_date:
-                                    try:
-                                        n_date = datetime.strptime(n_air_date, '%Y-%m-%d').date()
-                                        if n_date == today:
-                                            check_full_list = True
-                                    except ValueError: pass
+                                n_release_dt = self._get_episode_release_dt_utc(embedded['nextepisode'])
+                                if n_release_dt:
+                                    # If the next episode is within the next 24h, it's worth fetching the full list
+                                    if now_utc <= n_release_dt <= (now_utc + timedelta(hours=24)):
+                                        check_full_list = True
+                                else:
+                                    n_air_date = embedded['nextepisode'].get('airdate')
+                                    if n_air_date:
+                                        try:
+                                            n_date = datetime.strptime(n_air_date, '%Y-%m-%d').date()
+                                            if n_date == today_utc:
+                                                check_full_list = True
+                                        except ValueError:
+                                            pass
 
                             if not check_full_list and 'previousepisode' in embedded and embedded['previousepisode']:
-                                p_air_date = embedded['previousepisode'].get('airdate')
-                                if p_air_date:
-                                    try:
-                                        p_date = datetime.strptime(p_air_date, '%Y-%m-%d').date()
-                                        if (today - timedelta(days=7)) <= p_date <= today:
-                                            check_full_list = True
-                                    except ValueError: pass
+                                p_release_dt = self._get_episode_release_dt_utc(embedded['previousepisode'])
+                                if p_release_dt:
+                                    if window_start_utc <= p_release_dt <= now_utc:
+                                        check_full_list = True
+                                else:
+                                    p_air_date = embedded['previousepisode'].get('airdate')
+                                    if p_air_date:
+                                        try:
+                                            p_date = datetime.strptime(p_air_date, '%Y-%m-%d').date()
+                                            if (today_utc - timedelta(days=7)) <= p_date <= today_utc:
+                                                check_full_list = True
+                                        except ValueError:
+                                            pass
                             
                             potential_episodes = []
                             if check_full_list:
@@ -1126,14 +1191,20 @@ class TVShows(commands.Cog):
                                 try:
                                     air_date_obj = datetime.strptime(air_date_str, '%Y-%m-%d').date()
                                     
-                                    # Logic: Notify if aired today or in the past 7 days (if missed)
-                                    # AND check if it's "today" specifically for timely notification
-                                    
+                                    # Notify only once the episode has actually released.
+                                    # Prefer TVMaze `airstamp` (precise) over `airdate` (date-only).
+                                    release_dt_utc = self._get_episode_release_dt_utc(ep)
+
                                     should_check = False
-                                    if air_date_obj == today:
-                                        should_check = True
-                                    elif (today - timedelta(days=7)) <= air_date_obj <= today:
-                                        should_check = True
+                                    if release_dt_utc:
+                                        if window_start_utc <= release_dt_utc <= now_utc:
+                                            should_check = True
+                                    else:
+                                        # Fallback for missing airstamp: keep a small "missed" window,
+                                        # but avoid notifying for future dates.
+                                        if (today_utc - timedelta(days=7)) <= air_date_obj <= today_utc:
+                                            # Still date-only, but better than notifying for future.
+                                            should_check = True
                                     
                                     if should_check:
                                         # Check if notified (using episode ID or Season/Episode number for robustness)
@@ -1153,12 +1224,14 @@ class TVShows(commands.Cog):
 
                                         if not already_notified:
                                             if not any(e['id'] == ep_id for e in episodes_to_notify):
+                                                air_datetime_utc = release_dt_utc.isoformat().replace("+00:00", "Z") if release_dt_utc else None
                                                 normalized_ep = {
                                                     'id': ep_id,
                                                     'name': ep.get('name', 'TBA'),
                                                     'season_number': ep.get('season', 0),
                                                     'episode_number': ep.get('number', 0),
                                                     'air_date': air_date_str,
+                                                    'air_datetime_utc': air_datetime_utc,
                                                     'vote_average': ep.get('rating', {}).get('average'),
                                                     'source': 'TVMaze'
                                                 }
@@ -1181,39 +1254,13 @@ class TVShows(commands.Cog):
                         
                         actual_show_name_display = show_details_tmdb.get('name', show_name_stored)
 
-                        next_ep = show_details_tmdb.get('next_episode_to_air')
-                        if next_ep and next_ep.get('air_date') and next_ep.get('id'):
-                            try:
-                                next_air_date_obj = datetime.strptime(next_ep['air_date'], '%Y-%m-%d').date()
-                                if next_air_date_obj <= today:
-                                    already_notified = await self.bot.loop.run_in_executor(
-                                        None, 
-                                        self.db_manager.has_user_been_notified_for_episode, 
-                                        user_id, 
-                                        show_id, 
-                                        next_ep.get('id')
-                                    )
-
-                                    if not already_notified:
-                                        # Robustness check: Check by season/episode number too
-                                        ep_season = next_ep.get('season_number', 0)
-                                        ep_num = next_ep.get('episode_number', 0)
-                                        already_notified_by_num = await self.bot.loop.run_in_executor(
-                                            None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
-                                        )
-                                        if already_notified_by_num:
-                                            already_notified = True
-
-                                    if not already_notified:
-                                        next_ep['source'] = 'TMDB'
-                                        episodes_to_notify.append(next_ep)
-                            except ValueError: pass
-                        
+                        # NOTE: We intentionally do NOT notify based on TMDB `next_episode_to_air` because it is date-only
+                        # and tends to cause premature "new episode" alerts earlier in the day.
                         last_aired_ep = show_details_tmdb.get('last_episode_to_air')
                         if last_aired_ep and last_aired_ep.get('air_date') and last_aired_ep.get('id'):
                             try:
                                 last_aired_date_obj = datetime.strptime(last_aired_ep['air_date'], '%Y-%m-%d').date()
-                                if (today - timedelta(days=7)) <= last_aired_date_obj <= today:
+                                if (today_utc - timedelta(days=7)) <= last_aired_date_obj <= today_utc:
                                     already_notified = await self.bot.loop.run_in_executor(
                                         None, 
                                         self.db_manager.has_user_been_notified_for_episode, 
@@ -1266,7 +1313,7 @@ class TVShows(commands.Cog):
                             ep_name = ep.get('name', 'TBA')
                             ep_season = ep.get('season_number', 0)
                             ep_num = ep.get('episode_number', 0)
-                            ep_air_date = ep.get('air_date', 'Unknown')
+                            ep_air_date = self._format_air_datetime_for_embed(ep)
                             
                             embed.add_field(
                                 name=f"S{ep_season:02d}E{ep_num:02d}",
@@ -1285,7 +1332,7 @@ class TVShows(commands.Cog):
                         ep_name = ep.get('name', 'Episode Name TBA')
                         ep_season = ep.get('season_number', 'S?')
                         ep_num = ep.get('episode_number', 'E?')
-                        ep_air_date_str = ep.get('air_date', 'Unknown Air Date')
+                        ep_air_date_str = self._format_air_datetime_for_embed(ep)
                         source = ep.get('source', 'Unknown')
                         
                         embed = discord.Embed(
@@ -1293,7 +1340,7 @@ class TVShows(commands.Cog):
                             description=f"**S{ep_season:02d}E{ep_num:02d} - \"{ep_name}\"** has aired!",
                             color=discord.Color.green()
                         )
-                        embed.add_field(name="Air Date", value=ep_air_date_str, inline=True)
+                        embed.add_field(name="Release", value=ep_air_date_str, inline=True)
                         
                         vote_avg = ep.get('vote_average')
                         if vote_avg and isinstance(vote_avg, (int, float)) and vote_avg > 0:
@@ -1337,7 +1384,17 @@ class TVShows(commands.Cog):
                     # Update last notified episode detail (mostly for display in pagination)
                     # We should prefer to store TMDB-compatible structure if possible, or just generic.
                     # The paginator uses this to display "Last Notified: ...".
-                    most_recent_episode = max(episodes_to_notify, key=lambda ep: ep.get('air_date', '1900-01-01'))
+                    def _last_notified_sort_key(ep: dict) -> str:
+                        if isinstance(ep, dict):
+                            dt = ep.get("air_datetime_utc")
+                            if isinstance(dt, str) and dt:
+                                return dt
+                            d = ep.get("air_date")
+                            if isinstance(d, str) and d:
+                                return d
+                        return "1900-01-01"
+
+                    most_recent_episode = max(episodes_to_notify, key=_last_notified_sort_key)
                     await self.bot.loop.run_in_executor(None, self.db_manager.update_last_notified_episode_details, user_id, show_id, most_recent_episode)
                     logger.info(f"Updated last notified episode for user {user_id}, show {show_id}.")
 
