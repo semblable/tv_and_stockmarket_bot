@@ -41,6 +41,7 @@ INITIAL_EXTENSIONS = [
     "cogs.settings",
     "cogs.movies", # Added the new Movies Cog#
     "cogs.gemini", # New Gemini AI Cog
+    "cogs.books",  # New Books (author subscriptions)
     # "cogs.help" # Not loaded as a cog, but assigned directly
 ]
 

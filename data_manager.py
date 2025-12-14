@@ -288,6 +288,30 @@ class DataManager:
         """
         create_table_if_not_exists("weather_schedules", create_weather_schedules_sql)
 
+        # --- Book Author Subscriptions ---
+        create_book_author_subscriptions_sql = """
+        CREATE TABLE IF NOT EXISTS book_author_subscriptions (
+            guild_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            author_id TEXT NOT NULL,
+            author_name TEXT,
+            channel_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (guild_id, user_id, author_id)
+        )
+        """
+        create_table_if_not_exists("book_author_subscriptions", create_book_author_subscriptions_sql)
+
+        create_book_author_seen_works_sql = """
+        CREATE TABLE IF NOT EXISTS book_author_seen_works (
+            author_id TEXT NOT NULL,
+            work_id TEXT NOT NULL,
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (author_id, work_id)
+        )
+        """
+        create_table_if_not_exists("book_author_seen_works", create_book_author_seen_works_sql)
+
         logger.info("Database initialization check complete.")
 
     # --- TV Show Subscriptions ---
@@ -811,6 +835,107 @@ class DataManager:
                 logger.info("SQLite database connection closed.")
             except sqlite3.Error as e:
                 logger.error(f"Error closing SQLite database connection: {e}")
+
+    # --- Book Author Subscriptions ---
+    def add_book_author_subscription(
+        self,
+        guild_id: int,
+        user_id: int,
+        author_id: str,
+        author_name: Optional[str] = None,
+        channel_id: Optional[int] = None,
+    ) -> bool:
+        query = """
+        INSERT OR IGNORE INTO book_author_subscriptions
+            (guild_id, user_id, author_id, author_name, channel_id)
+        VALUES (:guild_id, :user_id, :author_id, :author_name, :channel_id)
+        """
+        params = {
+            "guild_id": str(guild_id),
+            "user_id": str(user_id),
+            "author_id": author_id,
+            "author_name": author_name,
+            "channel_id": str(channel_id) if channel_id is not None else None,
+        }
+        return self._execute_query(query, params, commit=True)
+
+    def remove_book_author_subscription(self, guild_id: int, user_id: int, author_id: str) -> bool:
+        query = """
+        DELETE FROM book_author_subscriptions
+        WHERE guild_id = :guild_id AND user_id = :user_id AND author_id = :author_id
+        """
+        params = {"guild_id": str(guild_id), "user_id": str(user_id), "author_id": author_id}
+        return self._execute_query(query, params, commit=True)
+
+    def get_user_book_author_subscriptions(self, guild_id: int, user_id: int) -> List[Dict[str, Any]]:
+        query = """
+        SELECT author_id, author_name, channel_id, created_at
+        FROM book_author_subscriptions
+        WHERE guild_id = :guild_id AND user_id = :user_id
+        ORDER BY author_name COLLATE NOCASE
+        """
+        params = {"guild_id": str(guild_id), "user_id": str(user_id)}
+        return self._execute_query(query, params, fetch_all=True)
+
+    def get_all_book_author_subscriptions(self) -> List[Dict[str, Any]]:
+        query = """
+        SELECT guild_id, user_id, author_id, author_name, channel_id, created_at
+        FROM book_author_subscriptions
+        """
+        return self._execute_query(query, fetch_all=True)
+
+    def get_book_author_subscriptions_for_author(self, author_id: str) -> List[Dict[str, Any]]:
+        query = """
+        SELECT guild_id, user_id, author_id, author_name, channel_id
+        FROM book_author_subscriptions
+        WHERE author_id = :author_id
+        """
+        return self._execute_query(query, {"author_id": author_id}, fetch_all=True)
+
+    def get_seen_work_ids_for_author(self, author_id: str) -> List[str]:
+        query = "SELECT work_id FROM book_author_seen_works WHERE author_id = :author_id"
+        rows = self._execute_query(query, {"author_id": author_id}, fetch_all=True)
+        out: List[str] = []
+        for r in rows:
+            wid = r.get("work_id")
+            if isinstance(wid, str):
+                out.append(wid)
+        return out
+
+    def mark_author_work_seen(self, author_id: str, work_id: str) -> bool:
+        query = """
+        INSERT OR IGNORE INTO book_author_seen_works (author_id, work_id)
+        VALUES (:author_id, :work_id)
+        """
+        return self._execute_query(query, {"author_id": author_id, "work_id": work_id}, commit=True)
+
+    def mark_author_works_seen(self, author_id: str, work_ids: List[str]) -> bool:
+        """
+        Best-effort bulk insert. Returns True if the operation completes.
+        """
+        if not work_ids:
+            return True
+        conn = self._get_connection()
+        try:
+            cur = conn.cursor()
+            cur.executemany(
+                "INSERT OR IGNORE INTO book_author_seen_works (author_id, work_id) VALUES (?, ?)",
+                [(author_id, wid) for wid in work_ids],
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Bulk mark_author_works_seen failed: {e}")
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            return False
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
 
 # Example Usage (for testing)
 if __name__ == "__main__":

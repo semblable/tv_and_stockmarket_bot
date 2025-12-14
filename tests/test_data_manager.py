@@ -81,3 +81,28 @@ def test_tv_subscriptions(db_manager):
     success = db_manager.remove_tv_show_subscription(user_id, show_id)
     assert success is True
     assert len(db_manager.get_user_tv_subscriptions(user_id)) == 0
+
+
+def test_book_author_subscriptions(db_manager):
+    guild_id = 111
+    user_id = 222
+    author_id = "OL23919A"
+    author_name = "Agatha Christie"
+
+    ok = db_manager.add_book_author_subscription(guild_id, user_id, author_id, author_name, None)
+    assert ok is True
+
+    subs = db_manager.get_user_book_author_subscriptions(guild_id, user_id)
+    assert len(subs) == 1
+    assert subs[0]["author_id"] == author_id
+    assert subs[0]["author_name"] == author_name
+
+    ok = db_manager.mark_author_work_seen(author_id, "OL82563W")
+    assert ok is True
+    seen = db_manager.get_seen_work_ids_for_author(author_id)
+    assert "OL82563W" in seen
+
+    ok = db_manager.remove_book_author_subscription(guild_id, user_id, author_id)
+    assert ok is True
+    subs2 = db_manager.get_user_book_author_subscriptions(guild_id, user_id)
+    assert len(subs2) == 0
