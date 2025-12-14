@@ -330,47 +330,47 @@ class BooksCog(commands.Cog, name="Books"):
                     embed.set_footer(text="Source: Open Library")
 
                     any_sent = False
-                        try:
-                            for uid in user_ids:
-                                # Respect existing DND settings (same semantics as Movies).
-                                try:
-                                    dnd_enabled = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, uid, "dnd_enabled", False)
-                                    if dnd_enabled:
-                                        dnd_start_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, uid, "dnd_start_time", "00:00")
-                                        dnd_end_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, uid, "dnd_end_time", "00:00")
-                                        # Lazy import to keep file tidy
-                                        from datetime import datetime, time
+                    try:
+                        for uid in user_ids:
+                            # Respect existing DND settings (same semantics as Movies).
+                            try:
+                                dnd_enabled = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, uid, "dnd_enabled", False)
+                                if dnd_enabled:
+                                    dnd_start_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, uid, "dnd_start_time", "00:00")
+                                    dnd_end_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, uid, "dnd_end_time", "00:00")
+                                    # Lazy import to keep file tidy
+                                    from datetime import datetime, time
 
-                                        try:
-                                            dnd_start_time_obj = datetime.strptime(dnd_start_str, "%H:%M").time()
-                                            dnd_end_time_obj = datetime.strptime(dnd_end_str, "%H:%M").time()
-                                        except ValueError:
-                                            dnd_start_time_obj = time(0, 0)
-                                            dnd_end_time_obj = time(0, 0)
+                                    try:
+                                        dnd_start_time_obj = datetime.strptime(dnd_start_str, "%H:%M").time()
+                                        dnd_end_time_obj = datetime.strptime(dnd_end_str, "%H:%M").time()
+                                    except ValueError:
+                                        dnd_start_time_obj = time(0, 0)
+                                        dnd_end_time_obj = time(0, 0)
 
-                                        now_t = datetime.now().time()
-                                        is_dnd = False
-                                        if dnd_start_time_obj <= dnd_end_time_obj:
-                                            if dnd_start_time_obj <= now_t <= dnd_end_time_obj:
-                                                is_dnd = True
-                                        else:
-                                            if now_t >= dnd_start_time_obj or now_t <= dnd_end_time_obj:
-                                                is_dnd = True
-                                        if is_dnd:
-                                            continue
-                                except Exception:
-                                    # If prefs fail, don't block sending.
-                                    pass
+                                    now_t = datetime.now().time()
+                                    is_dnd = False
+                                    if dnd_start_time_obj <= dnd_end_time_obj:
+                                        if dnd_start_time_obj <= now_t <= dnd_end_time_obj:
+                                            is_dnd = True
+                                    else:
+                                        if now_t >= dnd_start_time_obj or now_t <= dnd_end_time_obj:
+                                            is_dnd = True
+                                    if is_dnd:
+                                        continue
+                            except Exception:
+                                # If prefs fail, don't block sending.
+                                pass
 
-                                user = await self.bot.fetch_user(uid)
-                                if not user:
-                                    continue
-                                await user.send(embed=embed)
-                                any_sent = True
-                        except discord.Forbidden:
-                            logger.warning("BooksCog: Forbidden sending DM (user blocked bot or DMs disabled).")
-                        except discord.HTTPException as e:
-                            logger.warning(f"BooksCog: HTTP error sending DM: {e}")
+                            user = await self.bot.fetch_user(uid)
+                            if not user:
+                                continue
+                            await user.send(embed=embed)
+                            any_sent = True
+                    except discord.Forbidden:
+                        logger.warning("BooksCog: Forbidden sending DM (user blocked bot or DMs disabled).")
+                    except discord.HTTPException as e:
+                        logger.warning(f"BooksCog: HTTP error sending DM: {e}")
 
                     if any_sent:
                         await self.bot.loop.run_in_executor(None, self.db_manager.mark_author_work_seen, author_id, work_id)
