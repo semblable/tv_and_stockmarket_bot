@@ -93,6 +93,16 @@ class BooksCog(commands.Cog, name="Books"):
         except discord.HTTPException:
             pass
 
+    @staticmethod
+    def _scope_guild_id_from_ctx(ctx: commands.Context) -> int:
+        """
+        Returns a stable "scope guild id" used by the DB layer.
+
+        - In a server: actual guild id
+        - In DMs: 0 (personal/global scope)
+        """
+        return ctx.guild.id if ctx.guild else 0
+
     async def _is_user_in_dnd(self, user_id: int) -> bool:
         """
         Best-effort DND check. If preferences cannot be loaded/parsed, treat as not in DND.
@@ -162,10 +172,8 @@ class BooksCog(commands.Cog, name="Books"):
         return choices
 
     async def user_author_subscription_autocomplete(self, interaction: discord.Interaction, current: str) -> List[discord.app_commands.Choice[str]]:
-        if not interaction.guild:
-            return []
         user_id = interaction.user.id
-        guild_id = interaction.guild.id
+        guild_id = interaction.guild.id if interaction.guild else 0
         try:
             subs = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_book_author_subscriptions, guild_id, user_id)
         except Exception:
@@ -189,15 +197,13 @@ class BooksCog(commands.Cog, name="Books"):
     @discord.app_commands.describe(author="Author to subscribe to (searches Open Library)")
     @discord.app_commands.autocomplete(author=author_autocomplete)
     async def book_author_subscribe(self, ctx: commands.Context, author: str):
-        await self._defer_if_interaction(ctx, ephemeral=True)
-        if not ctx.guild:
-            await self.send_response(ctx, "This command can only be used in a server (not DMs).", ephemeral=True)
-            return
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
         if not self.db_manager:
-            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
-        guild_id = ctx.guild.id
+        guild_id = self._scope_guild_id_from_ctx(ctx)
         user_id = ctx.author.id
 
         # If autocomplete was used, `author` is the author_id. If not, search.
@@ -209,18 +215,18 @@ class BooksCog(commands.Cog, name="Books"):
             try:
                 results = await self.bot.loop.run_in_executor(None, partial(openlibrary_client.search_authors, author, limit=10))
             except openlibrary_client.OpenLibraryConnectionError:
-                await self.send_response(ctx, "Could not reach Open Library. Please try again later.", ephemeral=True)
+                await self.send_response(ctx, "Could not reach Open Library. Please try again later.", ephemeral=not is_dm)
                 return
             except openlibrary_client.OpenLibraryAPIError:
-                await self.send_response(ctx, "Open Library returned an error. Please try again later.", ephemeral=True)
+                await self.send_response(ctx, "Open Library returned an error. Please try again later.", ephemeral=not is_dm)
                 return
             except Exception as e:
                 logger.error(f"BooksCog: author search failed for '{author}': {e}")
-                await self.send_response(ctx, "Unexpected error while searching for that author.", ephemeral=True)
+                await self.send_response(ctx, "Unexpected error while searching for that author.", ephemeral=not is_dm)
                 return
 
             if not results:
-                await self.send_response(ctx, f"No authors found for '{author}'. Try a different spelling.", ephemeral=True)
+                await self.send_response(ctx, f"No authors found for '{author}'. Try a different spelling.", ephemeral=not is_dm)
                 return
 
             if len(results) == 1:
@@ -247,7 +253,13 @@ class BooksCog(commands.Cog, name="Books"):
 
                     view = AuthorSelectionView(ctx, display_results)
                     if ctx.interaction:
-                        msg = await ctx.interaction.followup.send(content="Multiple authors found. Pick one:", embeds=embeds, ephemeral=True, view=view, wait=True)
+                        msg = await ctx.interaction.followup.send(
+                            content="Multiple authors found. Pick one:",
+                            embeds=embeds,
+                            ephemeral=not is_dm,
+                            view=view,
+                            wait=True,
+                        )
                         view.message = msg
                     else:
                         msg = await ctx.send(content="Multiple authors found. Pick one:", embeds=embeds, view=view)
@@ -257,7 +269,7 @@ class BooksCog(commands.Cog, name="Books"):
                     selected = view.selected_result
 
         if not selected or not isinstance(selected.get("author_id"), str):
-            await self.send_response(ctx, "Selection cancelled or timed out.", ephemeral=True)
+            await self.send_response(ctx, "Selection cancelled or timed out.", ephemeral=not is_dm)
             return
 
         author_id = selected["author_id"]
@@ -274,46 +286,43 @@ class BooksCog(commands.Cog, name="Books"):
 
         ok = await self.bot.loop.run_in_executor(None, self.db_manager.add_book_author_subscription, guild_id, user_id, author_id, author_name, None)
         if not ok:
-            await self.send_response(ctx, "Database error while saving that subscription.", ephemeral=True)
+            await self.send_response(ctx, "Database error while saving that subscription.", ephemeral=not is_dm)
             return
 
-        await self.send_response(ctx, f"✅ Subscribed to **{author_name}**. I’ll DM you when new titles appear.", ephemeral=True)
+        await self.send_response(ctx, f"✅ Subscribed to **{author_name}**. I’ll DM you when new titles appear.", ephemeral=not is_dm)
 
     @commands.hybrid_command(name="book_author_unsubscribe", description="Unsubscribe from an author.")
     @discord.app_commands.describe(author="Author to unsubscribe from")
     @discord.app_commands.autocomplete(author=user_author_subscription_autocomplete)
     async def book_author_unsubscribe(self, ctx: commands.Context, author: str):
-        await self._defer_if_interaction(ctx, ephemeral=True)
-        if not ctx.guild:
-            await self.send_response(ctx, "This command can only be used in a server (not DMs).", ephemeral=True)
-            return
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
         if not self.db_manager:
-            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
-        guild_id = ctx.guild.id
+        guild_id = self._scope_guild_id_from_ctx(ctx)
         user_id = ctx.author.id
         author_id = author.upper().strip()
 
         ok = await self.bot.loop.run_in_executor(None, self.db_manager.remove_book_author_subscription, guild_id, user_id, author_id)
         if not ok:
-            await self.send_response(ctx, "Database error while removing that subscription.", ephemeral=True)
+            await self.send_response(ctx, "Database error while removing that subscription.", ephemeral=not is_dm)
             return
-        await self.send_response(ctx, f"✅ Unsubscribed from **{author_id}**.", ephemeral=True)
+        await self.send_response(ctx, f"✅ Unsubscribed from **{author_id}**.", ephemeral=not is_dm)
 
-    @commands.hybrid_command(name="my_book_authors", description="List your subscribed book authors in this server.")
+    @commands.hybrid_command(name="my_book_authors", description="List your subscribed book authors.")
     async def my_book_authors(self, ctx: commands.Context):
-        await self._defer_if_interaction(ctx, ephemeral=True)
-        if not ctx.guild:
-            await self.send_response(ctx, "This command can only be used in a server (not DMs).", ephemeral=True)
-            return
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
         if not self.db_manager:
-            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=True)
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
-        subs = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_book_author_subscriptions, ctx.guild.id, ctx.author.id)
+        guild_id = self._scope_guild_id_from_ctx(ctx)
+        subs = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_book_author_subscriptions, guild_id, ctx.author.id)
         if not subs:
-            await self.send_response(ctx, "You’re not subscribed to any authors yet. Use `/book_author_subscribe`.", ephemeral=True)
+            await self.send_response(ctx, "You’re not subscribed to any authors yet. Use `/book_author_subscribe`.", ephemeral=not is_dm)
             return
 
         embed = discord.Embed(title="📚 Your Author Subscriptions", color=discord.Color.green())
@@ -325,7 +334,7 @@ class BooksCog(commands.Cog, name="Books"):
         if len(subs) > 40:
             lines.append(f"\n…and {len(subs) - 40} more.")
         embed.description = "\n".join(lines)
-        await self.send_response(ctx, embed=embed, ephemeral=True)
+        await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
 
     @tasks.loop(hours=6)
     async def check_new_books(self):
