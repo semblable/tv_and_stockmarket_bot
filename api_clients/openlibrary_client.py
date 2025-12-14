@@ -161,3 +161,42 @@ def get_author_works(author_id: str, *, limit: int = 50, timeout_s: float = 10.0
     return out
 
 
+def get_author(author_id: str, *, timeout_s: float = 10.0) -> Dict[str, Any]:
+    """
+    Endpoint: https://openlibrary.org/authors/{author_id}.json
+    Returns the raw author JSON dict (at minimum contains 'name' for most authors).
+    """
+    aid = _normalize_author_id(author_id)
+    if not aid:
+        raise ValueError("Invalid author_id")
+
+    url = f"https://openlibrary.org/authors/{aid}.json"
+    headers = {"User-Agent": "tv_and_stockmarket_bot/1.0 (author subscriptions)"}
+
+    try:
+        r = requests.get(url, headers=headers, timeout=timeout_s)
+    except requests.RequestException as e:
+        raise OpenLibraryConnectionError(str(e)) from e
+
+    if r.status_code != 200:
+        raise OpenLibraryAPIError(f"OpenLibrary get_author HTTP {r.status_code}")
+
+    try:
+        data = r.json()
+    except Exception as e:
+        raise OpenLibraryAPIError("OpenLibrary returned non-JSON response") from e
+
+    return data if isinstance(data, dict) else {}
+
+
+def get_author_name(author_id: str, *, timeout_s: float = 10.0) -> Optional[str]:
+    """
+    Convenience wrapper around get_author(). Returns the author 'name' if available.
+    """
+    data = get_author(author_id, timeout_s=timeout_s)
+    nm = data.get("name")
+    if isinstance(nm, str) and nm.strip():
+        return nm.strip()
+    return None
+
+

@@ -879,6 +879,23 @@ class DataManager:
         params = {"guild_id": str(guild_id), "user_id": str(user_id), "author_id": author_id}
         return self._execute_query(query, params, commit=True)
 
+    def update_book_author_subscription_name(self, guild_id: int, user_id: int, author_id: str, author_name: str) -> bool:
+        """
+        Updates the stored author_name for an existing subscription.
+        """
+        query = """
+        UPDATE book_author_subscriptions
+        SET author_name = :author_name
+        WHERE guild_id = :guild_id AND user_id = :user_id AND author_id = :author_id
+        """
+        params = {
+            "author_name": author_name,
+            "guild_id": str(guild_id),
+            "user_id": str(user_id),
+            "author_id": author_id,
+        }
+        return self._execute_query(query, params, commit=True)
+
     def get_user_book_author_subscriptions(self, guild_id: int, user_id: int) -> List[Dict[str, Any]]:
         query = """
         SELECT author_id, author_name, channel_id, created_at
