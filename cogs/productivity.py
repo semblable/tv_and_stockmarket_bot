@@ -411,8 +411,11 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         if not self.db_manager:
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
-        guild_id = _scope_guild_id_from_ctx(ctx)
-        ok = await self.bot.loop.run_in_executor(None, self.db_manager.set_todo_done, guild_id, ctx.author.id, int(todo_id), True)
+        if is_dm and hasattr(self.db_manager, "set_todo_done_any_scope"):
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.set_todo_done_any_scope, ctx.author.id, int(todo_id), True)
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.set_todo_done, guild_id, ctx.author.id, int(todo_id), True)
         if not ok:
             await self.send_response(ctx, "Could not find that to-do (or it’s not yours).", ephemeral=not is_dm)
             return
@@ -426,8 +429,11 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         if not self.db_manager:
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
-        guild_id = _scope_guild_id_from_ctx(ctx)
-        ok = await self.bot.loop.run_in_executor(None, self.db_manager.set_todo_done, guild_id, ctx.author.id, int(todo_id), False)
+        if is_dm and hasattr(self.db_manager, "set_todo_done_any_scope"):
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.set_todo_done_any_scope, ctx.author.id, int(todo_id), False)
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.set_todo_done, guild_id, ctx.author.id, int(todo_id), False)
         if not ok:
             await self.send_response(ctx, "Could not find that to-do (or it’s not yours).", ephemeral=not is_dm)
             return
@@ -441,8 +447,11 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         if not self.db_manager:
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
-        guild_id = _scope_guild_id_from_ctx(ctx)
-        ok = await self.bot.loop.run_in_executor(None, self.db_manager.delete_todo_item, guild_id, ctx.author.id, int(todo_id))
+        if is_dm and hasattr(self.db_manager, "delete_todo_item_any_scope"):
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.delete_todo_item_any_scope, ctx.author.id, int(todo_id))
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.delete_todo_item, guild_id, ctx.author.id, int(todo_id))
         if not ok:
             await self.send_response(ctx, "Could not find that to-do (or it’s not yours).", ephemeral=not is_dm)
             return
@@ -461,13 +470,16 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
         initial_minutes = max(5, min(7 * 24 * 60, int(initial_minutes)))
-        guild_id = _scope_guild_id_from_ctx(ctx)
         next_remind = None
         if enabled:
             next_remind = _sqlite_utc_timestamp(_utc_now() + timedelta(minutes=initial_minutes))
-        ok = await self.bot.loop.run_in_executor(
-            None, self.db_manager.set_todo_reminder, guild_id, ctx.author.id, int(todo_id), enabled, next_remind
-        )
+        if is_dm and hasattr(self.db_manager, "set_todo_reminder_any_scope"):
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.set_todo_reminder_any_scope, ctx.author.id, int(todo_id), enabled, next_remind)
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            ok = await self.bot.loop.run_in_executor(
+                None, self.db_manager.set_todo_reminder, guild_id, ctx.author.id, int(todo_id), enabled, next_remind
+            )
         if not ok:
             await self.send_response(ctx, "Could not update reminders for that to-do (maybe it’s done/doesn’t exist).", ephemeral=not is_dm)
             return
@@ -564,7 +576,15 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             return
 
         guild_id = _scope_guild_id_from_ctx(ctx)
-        habit = await self.bot.loop.run_in_executor(None, self.db_manager.get_habit, guild_id, ctx.author.id, int(habit_id))
+        if is_dm and hasattr(self.db_manager, "get_habit_any_scope"):
+            habit = await self.bot.loop.run_in_executor(None, self.db_manager.get_habit_any_scope, ctx.author.id, int(habit_id))
+            if habit and "guild_id" in habit:
+                try:
+                    guild_id = int(habit.get("guild_id") or 0)
+                except Exception:
+                    guild_id = 0
+        else:
+            habit = await self.bot.loop.run_in_executor(None, self.db_manager.get_habit, guild_id, ctx.author.id, int(habit_id))
         if not habit:
             await self.send_response(ctx, "Could not find that habit (or it’s not yours).", ephemeral=not is_dm)
             return
@@ -585,15 +605,18 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             due_local = _parse_hhmm_local(due_local_str) or dtime(18, 0)
             next_due = _next_due_datetime_cet_to_utc(_utc_now(), days_list, due_local, tz)
 
-        ok = await self.bot.loop.run_in_executor(
-            None,
-            self.db_manager.record_habit_checkin,
-            guild_id,
-            ctx.author.id,
-            int(habit_id),
-            note,
-            _sqlite_utc_timestamp(next_due),
-        )
+        if is_dm and hasattr(self.db_manager, "record_habit_checkin_any_scope"):
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.record_habit_checkin_any_scope, ctx.author.id, int(habit_id), note, _sqlite_utc_timestamp(next_due))
+        else:
+            ok = await self.bot.loop.run_in_executor(
+                None,
+                self.db_manager.record_habit_checkin,
+                guild_id,
+                ctx.author.id,
+                int(habit_id),
+                note,
+                _sqlite_utc_timestamp(next_due),
+            )
         if not ok:
             await self.send_response(ctx, "Could not check in for that habit.", ephemeral=not is_dm)
             return
@@ -608,8 +631,11 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
-        guild_id = _scope_guild_id_from_ctx(ctx)
-        ok = await self.bot.loop.run_in_executor(None, self.db_manager.delete_habit, guild_id, ctx.author.id, int(habit_id))
+        if is_dm and hasattr(self.db_manager, "delete_habit_any_scope"):
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.delete_habit_any_scope, ctx.author.id, int(habit_id))
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.delete_habit, guild_id, ctx.author.id, int(habit_id))
         if not ok:
             await self.send_response(ctx, "Could not find that habit (or it’s not yours).", ephemeral=not is_dm)
             return
@@ -623,10 +649,13 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         if not self.db_manager:
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
-        guild_id = _scope_guild_id_from_ctx(ctx)
-        ok = await self.bot.loop.run_in_executor(
-            None, self.db_manager.set_habit_reminder_enabled, guild_id, ctx.author.id, int(habit_id), enabled
-        )
+        if is_dm and hasattr(self.db_manager, "set_habit_reminder_enabled_any_scope"):
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.set_habit_reminder_enabled_any_scope, ctx.author.id, int(habit_id), enabled)
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            ok = await self.bot.loop.run_in_executor(
+                None, self.db_manager.set_habit_reminder_enabled, guild_id, ctx.author.id, int(habit_id), enabled
+            )
         if not ok:
             await self.send_response(ctx, "Could not update that habit.", ephemeral=not is_dm)
             return
@@ -703,7 +732,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 sent = await self._dm_user(
                     uid,
                     content=f"🔔 To‑do reminder: **#{tid}** — {content}\n"
-                            f"Mark done with `/todo_done {tid}` or disable with `/todo_nag {tid} enabled:false`",
+                            f"Mark done with `/todo_done {tid}` or disable with `/todo_nag {tid} enabled:false` (or run `/todo_nag` and fill the options).",
                 )
                 if not sent:
                     next_rem = _sqlite_utc_timestamp(now + timedelta(hours=12))

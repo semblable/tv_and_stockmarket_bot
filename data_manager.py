@@ -546,6 +546,125 @@ class DataManager:
         rows = self._execute_query(base, params, fetch_all=True)
         return rows if isinstance(rows, list) else []
 
+    def get_todo_item_any_scope(self, user_id: int, todo_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Fetch a todo item by (user_id, id) regardless of guild scope.
+        Useful for DM flows where ctx.guild is None but the item was created in a server.
+        """
+        query = """
+        SELECT id, guild_id, user_id, content, is_done, created_at, done_at, remind_enabled, remind_level, next_remind_at
+        FROM todo_items
+        WHERE user_id = :user_id AND id = :id
+        """
+        row = self._execute_query(query, {"user_id": str(int(user_id)), "id": int(todo_id)}, fetch_one=True)
+        return row if isinstance(row, dict) else None
+
+    def set_todo_done_any_scope(self, user_id: int, todo_id: int, done: bool) -> bool:
+        """
+        Mark a todo as done/undone by (user_id, id) regardless of guild scope.
+        """
+        query = """
+        UPDATE todo_items
+        SET is_done = :done,
+            done_at = CASE WHEN :done = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+            remind_enabled = CASE WHEN :done = 1 THEN 0 ELSE remind_enabled END,
+            remind_level = CASE WHEN :done = 1 THEN 0 ELSE remind_level END,
+            next_remind_at = CASE WHEN :done = 1 THEN NULL ELSE next_remind_at END
+        WHERE user_id = :user_id AND id = :id
+        """
+        params = {"done": 1 if done else 0, "user_id": str(int(user_id)), "id": int(todo_id)}
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                updated = int(cur.rowcount or 0)
+                conn.commit()
+                return updated > 0
+            except sqlite3.Error as e:
+                logger.error(f"set_todo_done_any_scope failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def delete_todo_item_any_scope(self, user_id: int, todo_id: int) -> bool:
+        """
+        Delete a todo by (user_id, id) regardless of guild scope.
+        """
+        query = "DELETE FROM todo_items WHERE user_id = :user_id AND id = :id"
+        params = {"user_id": str(int(user_id)), "id": int(todo_id)}
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                deleted = int(cur.rowcount or 0)
+                conn.commit()
+                return deleted > 0
+            except sqlite3.Error as e:
+                logger.error(f"delete_todo_item_any_scope failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def set_todo_reminder_any_scope(self, user_id: int, todo_id: int, enabled: bool, next_remind_at_utc: Optional[str]) -> bool:
+        """
+        Enable/disable reminders by (user_id, id) regardless of guild scope.
+        """
+        query = """
+        UPDATE todo_items
+        SET remind_enabled = :enabled,
+            remind_level = CASE WHEN :enabled = 1 THEN remind_level ELSE 0 END,
+            next_remind_at = :next_remind_at
+        WHERE user_id = :user_id AND id = :id AND is_done = 0
+        """
+        params = {
+            "enabled": 1 if enabled else 0,
+            "next_remind_at": next_remind_at_utc,
+            "user_id": str(int(user_id)),
+            "id": int(todo_id),
+        }
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                updated = int(cur.rowcount or 0)
+                conn.commit()
+                return updated > 0
+            except sqlite3.Error as e:
+                logger.error(f"set_todo_reminder_any_scope failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
     def set_todo_done(self, guild_id: int, user_id: int, todo_id: int, done: bool) -> bool:
         query = """
         UPDATE todo_items
@@ -759,6 +878,97 @@ class DataManager:
         """
         row = self._execute_query(query, {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "id": int(habit_id)}, fetch_one=True)
         return row if isinstance(row, dict) else None
+
+    def get_habit_any_scope(self, user_id: int, habit_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Fetch a habit by (user_id, id) regardless of guild scope.
+        Useful for DM flows where the habit was created in a server.
+        """
+        query = """
+        SELECT id, guild_id, name, days_of_week, due_time_local, tz_name, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+        FROM habits
+        WHERE user_id = :user_id AND id = :id
+        """
+        row = self._execute_query(query, {"user_id": str(int(user_id)), "id": int(habit_id)}, fetch_one=True)
+        return row if isinstance(row, dict) else None
+
+    def delete_habit_any_scope(self, user_id: int, habit_id: int) -> bool:
+        """
+        Delete a habit by (user_id, id) regardless of guild scope.
+        """
+        query = "DELETE FROM habits WHERE user_id = :user_id AND id = :id"
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, {"user_id": str(int(user_id)), "id": int(habit_id)})
+                deleted = int(cur.rowcount or 0)
+                conn.commit()
+                return deleted > 0
+            except sqlite3.Error as e:
+                logger.error(f"delete_habit_any_scope failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def set_habit_reminder_enabled_any_scope(self, user_id: int, habit_id: int, enabled: bool) -> bool:
+        """
+        Enable/disable reminders by (user_id, id) regardless of guild scope.
+        When disabling, clears next_remind_at and resets remind_level.
+        """
+        query = """
+        UPDATE habits
+        SET remind_enabled = :enabled,
+            remind_level = CASE WHEN :enabled = 1 THEN remind_level ELSE 0 END,
+            next_remind_at = CASE WHEN :enabled = 1 THEN next_remind_at ELSE NULL END
+        WHERE user_id = :user_id AND id = :id
+        """
+        params = {"enabled": 1 if enabled else 0, "user_id": str(int(user_id)), "id": int(habit_id)}
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                updated = int(cur.rowcount or 0)
+                conn.commit()
+                return updated > 0
+            except sqlite3.Error as e:
+                logger.error(f"set_habit_reminder_enabled_any_scope failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def record_habit_checkin_any_scope(self, user_id: int, habit_id: int, note: Optional[str] = None, next_due_at_utc: Optional[str] = None) -> bool:
+        """
+        Record a check-in by (user_id, id) regardless of guild scope.
+        Internally resolves the habit's guild_id to keep history rows consistent.
+        """
+        habit = self.get_habit_any_scope(user_id, habit_id)
+        if not habit:
+            return False
+        try:
+            guild_id = int(habit.get("guild_id") or 0)
+        except Exception:
+            guild_id = 0
+        return self.record_habit_checkin(guild_id, user_id, habit_id, note, next_due_at_utc)
 
     def delete_habit(self, guild_id: int, user_id: int, habit_id: int) -> bool:
         query = "DELETE FROM habits WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id"
