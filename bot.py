@@ -202,6 +202,31 @@ async def ping(ctx: commands.Context, ephemeral_response: bool = False):
     latency_ms = round(bot.latency * 1000)
     await ctx.send(f"Pong! Latency: {latency_ms}ms", ephemeral=ephemeral_response)
 
+# --- Manual Command Sync (for fast iteration / new guilds) ---
+@bot.command(name="sync")
+@commands.guild_only()
+@commands.has_guild_permissions(manage_guild=True)
+async def sync_prefix(ctx: commands.Context):
+    """
+    Force-sync application (slash) commands to the current guild.
+    This works as a PREFIX command: !sync
+    """
+    try:
+        guild_id = ctx.guild.id
+        bot.tree.copy_global_to(guild=discord.Object(id=guild_id))
+        synced = await bot.tree.sync(guild=discord.Object(id=guild_id))
+        await ctx.send(f"✅ Synced {len(synced)} command(s) to this server.")
+        log.info(f"Manual sync: synced {len(synced)} commands to guild {guild_id}")
+    except discord.Forbidden as e:
+        log.error(f"Manual sync forbidden in guild {ctx.guild.id}: {e}")
+        await ctx.send("❌ I don't have permission to sync commands here. Make sure I was invited with `applications.commands` and I have permission to manage the server.", ephemeral=True)
+    except discord.HTTPException as e:
+        log.error(f"Manual sync HTTP error in guild {ctx.guild.id}: {e}")
+        await ctx.send(f"❌ Sync failed due to a Discord API error: {e}", ephemeral=True)
+    except Exception as e:
+        log.error("Manual sync unexpected error:", exc_info=True)
+        await ctx.send(f"❌ Sync failed: {e}", ephemeral=True)
+
 # --- Main Execution ---
 async def main():
     log.info("Async main() function started.")
