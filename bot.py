@@ -44,6 +44,7 @@ INITIAL_EXTENSIONS = [
     "cogs.books",  # New Books (author subscriptions)
     "cogs.reading_progress",  # Reading progress tracking (pages/kindle/audiobook)
     "cogs.games",  # Games tracking + Steam/Wiki lookup (no API keys)
+    "cogs.productivity",  # To-dos + habits + escalating reminders
     # "cogs.help" # Not loaded as a cog, but assigned directly
 ]
 

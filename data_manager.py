@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import threading
+import datetime
 from typing import List, Dict, Any, Optional, Union
 from config import SQLITE_DB_PATH
 
@@ -416,7 +417,525 @@ class DataManager:
         except Exception as e:
             logger.warning(f"Could not create idx_game_items_user_status: {e}")
 
+        # --- Productivity: To-Dos ---
+        create_todo_items_sql = """
+        CREATE TABLE IF NOT EXISTS todo_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id TEXT NOT NULL, -- 0 for DMs / personal scope, else actual guild id
+            user_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            is_done INTEGER NOT NULL DEFAULT 0 CHECK (is_done IN (0,1)),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            done_at TIMESTAMP,
+            remind_enabled INTEGER NOT NULL DEFAULT 0 CHECK (remind_enabled IN (0,1)),
+            remind_level INTEGER NOT NULL DEFAULT 0,
+            next_remind_at TIMESTAMP
+        )
+        """
+        create_table_if_not_exists("todo_items", create_todo_items_sql)
+        try:
+            self._execute_query("CREATE INDEX IF NOT EXISTS idx_todo_items_user_done ON todo_items(user_id, guild_id, is_done, id);", commit=True)
+        except Exception as e:
+            logger.warning(f"Could not create idx_todo_items_user_done: {e}")
+
+        # --- Productivity: Habits ---
+        create_habits_sql = """
+        CREATE TABLE IF NOT EXISTS habits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id TEXT NOT NULL, -- 0 for DMs / personal scope
+            user_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            days_of_week TEXT NOT NULL, -- JSON list of ints: 0=Mon..6=Sun
+            due_time_utc TEXT NOT NULL DEFAULT '18:00', -- HH:MM interpreted as UTC
+            remind_enabled INTEGER NOT NULL DEFAULT 1 CHECK (remind_enabled IN (0,1)),
+            remind_level INTEGER NOT NULL DEFAULT 0,
+            next_due_at TIMESTAMP, -- computed UTC timestamp for next due occurrence
+            next_remind_at TIMESTAMP,
+            last_checkin_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        create_table_if_not_exists("habits", create_habits_sql)
+        try:
+            self._execute_query("CREATE INDEX IF NOT EXISTS idx_habits_user_due ON habits(user_id, guild_id, next_due_at);", commit=True)
+        except Exception as e:
+            logger.warning(f"Could not create idx_habits_user_due: {e}")
+
+        create_habit_checkins_sql = """
+        CREATE TABLE IF NOT EXISTS habit_checkins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            habit_id INTEGER NOT NULL,
+            guild_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            checked_in_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            note TEXT
+        )
+        """
+        create_table_if_not_exists("habit_checkins", create_habit_checkins_sql)
+        try:
+            self._execute_query("CREATE INDEX IF NOT EXISTS idx_habit_checkins_habit ON habit_checkins(habit_id, checked_in_at);", commit=True)
+        except Exception as e:
+            logger.warning(f"Could not create idx_habit_checkins_habit: {e}")
+
         logger.info("Database initialization check complete.")
+
+    # -------------------------
+    # Productivity: To-Dos
+    # -------------------------
+    def create_todo_item(self, guild_id: int, user_id: int, content: str) -> Optional[int]:
+        if not content or not str(content).strip():
+            return None
+        query = """
+        INSERT INTO todo_items (guild_id, user_id, content, is_done, remind_enabled, remind_level, next_remind_at)
+        VALUES (:guild_id, :user_id, :content, 0, 0, 0, NULL)
+        """
+        params = {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "content": str(content).strip()}
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                conn.commit()
+                return int(cur.lastrowid)
+            except sqlite3.Error as e:
+                logger.error(f"create_todo_item failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return None
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def list_todo_items(self, guild_id: int, user_id: int, include_done: bool = False, limit: int = 30) -> List[Dict[str, Any]]:
+        limit = max(1, min(200, int(limit)))
+        base = """
+        SELECT id, content, is_done, created_at, done_at, remind_enabled, remind_level, next_remind_at
+        FROM todo_items
+        WHERE guild_id = :guild_id AND user_id = :user_id
+        """
+        params: Dict[str, Any] = {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "limit": limit}
+        if not include_done:
+            base += " AND is_done = 0"
+        base += " ORDER BY is_done ASC, id DESC LIMIT :limit"
+        rows = self._execute_query(base, params, fetch_all=True)
+        return rows if isinstance(rows, list) else []
+
+    def set_todo_done(self, guild_id: int, user_id: int, todo_id: int, done: bool) -> bool:
+        query = """
+        UPDATE todo_items
+        SET is_done = :done,
+            done_at = CASE WHEN :done = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+            remind_enabled = CASE WHEN :done = 1 THEN 0 ELSE remind_enabled END,
+            remind_level = CASE WHEN :done = 1 THEN 0 ELSE remind_level END,
+            next_remind_at = CASE WHEN :done = 1 THEN NULL ELSE next_remind_at END
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
+        """
+        params = {
+            "done": 1 if done else 0,
+            "guild_id": str(int(guild_id)),
+            "user_id": str(int(user_id)),
+            "id": int(todo_id),
+        }
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                updated = int(cur.rowcount or 0)
+                conn.commit()
+                return updated > 0
+            except sqlite3.Error as e:
+                logger.error(f"set_todo_done failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def delete_todo_item(self, guild_id: int, user_id: int, todo_id: int) -> bool:
+        query = "DELETE FROM todo_items WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id"
+        params = {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "id": int(todo_id)}
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                deleted = int(cur.rowcount or 0)
+                conn.commit()
+                return deleted > 0
+            except sqlite3.Error as e:
+                logger.error(f"delete_todo_item failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def set_todo_reminder(self, guild_id: int, user_id: int, todo_id: int, enabled: bool, next_remind_at_utc: Optional[str]) -> bool:
+        query = """
+        UPDATE todo_items
+        SET remind_enabled = :enabled,
+            remind_level = CASE WHEN :enabled = 1 THEN remind_level ELSE 0 END,
+            next_remind_at = :next_remind_at
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id AND is_done = 0
+        """
+        params = {
+            "enabled": 1 if enabled else 0,
+            "next_remind_at": next_remind_at_utc,
+            "guild_id": str(int(guild_id)),
+            "user_id": str(int(user_id)),
+            "id": int(todo_id),
+        }
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                updated = int(cur.rowcount or 0)
+                conn.commit()
+                return updated > 0
+            except sqlite3.Error as e:
+                logger.error(f"set_todo_reminder failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def bump_todo_reminder(self, guild_id: int, user_id: int, todo_id: int, remind_level: int, next_remind_at_utc: str) -> bool:
+        query = """
+        UPDATE todo_items
+        SET remind_level = :level,
+            next_remind_at = :next_remind_at
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id AND is_done = 0 AND remind_enabled = 1
+        """
+        params = {
+            "level": int(remind_level),
+            "next_remind_at": next_remind_at_utc,
+            "guild_id": str(int(guild_id)),
+            "user_id": str(int(user_id)),
+            "id": int(todo_id),
+        }
+        return bool(self._execute_query(query, params, commit=True))
+
+    def list_due_todo_reminders(self, now_utc: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        limit = max(1, min(500, int(limit)))
+        now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        query = """
+        SELECT id, guild_id, user_id, content, remind_level, next_remind_at
+        FROM todo_items
+        WHERE is_done = 0
+          AND remind_enabled = 1
+          AND next_remind_at IS NOT NULL
+          AND next_remind_at <= :now
+        ORDER BY next_remind_at ASC
+        LIMIT :limit
+        """
+        rows = self._execute_query(query, {"now": now_utc, "limit": limit}, fetch_all=True)
+        return rows if isinstance(rows, list) else []
+
+    # -------------------------
+    # Productivity: Habits
+    # -------------------------
+    def create_habit(
+        self,
+        guild_id: int,
+        user_id: int,
+        name: str,
+        days_of_week: List[int],
+        due_time_utc: str,
+        remind_enabled: bool = True,
+        next_due_at_utc: Optional[str] = None,
+    ) -> Optional[int]:
+        if not name or not str(name).strip():
+            return None
+        try:
+            days_json = json.dumps([int(d) for d in days_of_week])
+        except Exception:
+            days_json = json.dumps([0, 1, 2, 3, 4])
+        query = """
+        INSERT INTO habits (guild_id, user_id, name, days_of_week, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at)
+        VALUES (:guild_id, :user_id, :name, :days, :due_time, :remind_enabled, 0, :next_due_at, NULL)
+        """
+        params = {
+            "guild_id": str(int(guild_id)),
+            "user_id": str(int(user_id)),
+            "name": str(name).strip(),
+            "days": days_json,
+            "due_time": str(due_time_utc).strip(),
+            "remind_enabled": 1 if remind_enabled else 0,
+            "next_due_at": next_due_at_utc,
+        }
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                conn.commit()
+                return int(cur.lastrowid)
+            except sqlite3.Error as e:
+                logger.error(f"create_habit failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return None
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def list_habits(self, guild_id: int, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        limit = max(1, min(200, int(limit)))
+        query = """
+        SELECT id, name, days_of_week, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+        FROM habits
+        WHERE guild_id = :guild_id AND user_id = :user_id
+        ORDER BY id DESC
+        LIMIT :limit
+        """
+        rows = self._execute_query(query, {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "limit": limit}, fetch_all=True)
+        return rows if isinstance(rows, list) else []
+
+    def get_habit(self, guild_id: int, user_id: int, habit_id: int) -> Optional[Dict[str, Any]]:
+        query = """
+        SELECT id, name, days_of_week, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+        FROM habits
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
+        """
+        row = self._execute_query(query, {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "id": int(habit_id)}, fetch_one=True)
+        return row if isinstance(row, dict) else None
+
+    def delete_habit(self, guild_id: int, user_id: int, habit_id: int) -> bool:
+        query = "DELETE FROM habits WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id"
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "id": int(habit_id)})
+                deleted = int(cur.rowcount or 0)
+                conn.commit()
+                return deleted > 0
+            except sqlite3.Error as e:
+                logger.error(f"delete_habit failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def set_habit_schedule_and_due(
+        self,
+        guild_id: int,
+        user_id: int,
+        habit_id: int,
+        *,
+        days_of_week: Optional[List[int]] = None,
+        due_time_utc: Optional[str] = None,
+        next_due_at_utc: Optional[str] = None,
+        remind_enabled: Optional[bool] = None,
+        next_remind_at_utc: Optional[str] = None,
+        remind_level: Optional[int] = None,
+    ) -> bool:
+        set_parts: List[str] = []
+        params: Dict[str, Any] = {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "id": int(habit_id)}
+        if days_of_week is not None:
+            try:
+                params["days"] = json.dumps([int(d) for d in days_of_week])
+            except Exception:
+                params["days"] = json.dumps([0, 1, 2, 3, 4])
+            set_parts.append("days_of_week = :days")
+        if due_time_utc is not None:
+            params["due_time"] = str(due_time_utc).strip()
+            set_parts.append("due_time_utc = :due_time")
+        if next_due_at_utc is not None:
+            params["next_due_at"] = next_due_at_utc
+            set_parts.append("next_due_at = :next_due_at")
+        if remind_enabled is not None:
+            params["remind_enabled"] = 1 if remind_enabled else 0
+            set_parts.append("remind_enabled = :remind_enabled")
+        if next_remind_at_utc is not None:
+            params["next_remind_at"] = next_remind_at_utc
+            set_parts.append("next_remind_at = :next_remind_at")
+        if remind_level is not None:
+            params["remind_level"] = int(remind_level)
+            set_parts.append("remind_level = :remind_level")
+        if not set_parts:
+            return False
+        query = f"""
+        UPDATE habits
+        SET {", ".join(set_parts)}
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
+        """
+        return bool(self._execute_query(query, params, commit=True))
+
+    def record_habit_checkin(
+        self,
+        guild_id: int,
+        user_id: int,
+        habit_id: int,
+        note: Optional[str] = None,
+        next_due_at_utc: Optional[str] = None,
+    ) -> bool:
+        # Insert history row (best-effort) and update habit fields.
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO habit_checkins (habit_id, guild_id, user_id, note)
+                    VALUES (:habit_id, :guild_id, :user_id, :note)
+                    """,
+                    {
+                        "habit_id": int(habit_id),
+                        "guild_id": str(int(guild_id)),
+                        "user_id": str(int(user_id)),
+                        "note": note.strip() if isinstance(note, str) and note.strip() else None,
+                    },
+                )
+                cur.execute(
+                    """
+                    UPDATE habits
+                    SET last_checkin_at = CURRENT_TIMESTAMP,
+                        remind_level = 0,
+                        next_remind_at = NULL,
+                        next_due_at = :next_due_at
+                    WHERE guild_id = :guild_id AND user_id = :user_id AND id = :habit_id
+                    """,
+                    {
+                        "next_due_at": next_due_at_utc,
+                        "guild_id": str(int(guild_id)),
+                        "user_id": str(int(user_id)),
+                        "habit_id": int(habit_id),
+                    },
+                )
+                updated = int(cur.rowcount or 0)
+                conn.commit()
+                return updated > 0
+            except sqlite3.Error as e:
+                logger.error(f"record_habit_checkin failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def list_due_habit_reminders(self, now_utc: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        limit = max(1, min(500, int(limit)))
+        now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        query = """
+        SELECT id, guild_id, user_id, name, remind_level, next_due_at, next_remind_at
+        FROM habits
+        WHERE remind_enabled = 1
+          AND next_due_at IS NOT NULL
+          AND next_due_at <= :now
+          AND (next_remind_at IS NULL OR next_remind_at <= :now)
+        ORDER BY COALESCE(next_remind_at, next_due_at) ASC
+        LIMIT :limit
+        """
+        rows = self._execute_query(query, {"now": now_utc, "limit": limit}, fetch_all=True)
+        return rows if isinstance(rows, list) else []
+
+    def bump_habit_reminder(self, guild_id: int, user_id: int, habit_id: int, remind_level: int, next_remind_at_utc: str) -> bool:
+        query = """
+        UPDATE habits
+        SET remind_level = :level,
+            next_remind_at = :next_remind_at
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id AND remind_enabled = 1
+        """
+        params = {
+            "level": int(remind_level),
+            "next_remind_at": next_remind_at_utc,
+            "guild_id": str(int(guild_id)),
+            "user_id": str(int(user_id)),
+            "id": int(habit_id),
+        }
+        return bool(self._execute_query(query, params, commit=True))
+
+    def set_habit_reminder_enabled(self, guild_id: int, user_id: int, habit_id: int, enabled: bool) -> bool:
+        """
+        Enables/disables reminders. When disabling, clears next_remind_at and resets remind_level.
+        """
+        query = """
+        UPDATE habits
+        SET remind_enabled = :enabled,
+            remind_level = CASE WHEN :enabled = 1 THEN remind_level ELSE 0 END,
+            next_remind_at = CASE WHEN :enabled = 1 THEN next_remind_at ELSE NULL END
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
+        """
+        params = {
+            "enabled": 1 if enabled else 0,
+            "guild_id": str(int(guild_id)),
+            "user_id": str(int(user_id)),
+            "id": int(habit_id),
+        }
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                updated = int(cur.rowcount or 0)
+                conn.commit()
+                return updated > 0
+            except sqlite3.Error as e:
+                logger.error(f"set_habit_reminder_enabled failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
 
     # --- TV Show Subscriptions ---
     def add_tv_show_subscription(self, user_id: int, show_tmdb_id: int, show_name: str, poster_path: str, show_tvmaze_id: Optional[int] = None) -> bool:
