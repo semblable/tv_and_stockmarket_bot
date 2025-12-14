@@ -446,7 +446,9 @@ class DataManager:
             user_id TEXT NOT NULL,
             name TEXT NOT NULL,
             days_of_week TEXT NOT NULL, -- JSON list of ints: 0=Mon..6=Sun
-            due_time_utc TEXT NOT NULL DEFAULT '18:00', -- HH:MM interpreted as UTC
+            due_time_local TEXT NOT NULL DEFAULT '18:00', -- HH:MM interpreted in tz_name
+            tz_name TEXT NOT NULL DEFAULT 'Europe/Warsaw', -- IANA tz (CET/CEST), e.g. Europe/Warsaw
+            due_time_utc TEXT NOT NULL DEFAULT '18:00', -- legacy: previously interpreted as UTC
             remind_enabled INTEGER NOT NULL DEFAULT 1 CHECK (remind_enabled IN (0,1)),
             remind_level INTEGER NOT NULL DEFAULT 0,
             next_due_at TIMESTAMP, -- computed UTC timestamp for next due occurrence
@@ -456,6 +458,24 @@ class DataManager:
         )
         """
         create_table_if_not_exists("habits", create_habits_sql)
+        # Habits schema migration for older DBs (ADD COLUMN is cheap/safe).
+        try:
+            cols = self._execute_query("PRAGMA table_info(habits);", fetch_all=True)
+            if cols and isinstance(cols, list):
+                col_names = [c.get("name") for c in cols if isinstance(c, dict)]
+                if "due_time_local" not in col_names:
+                    # Do NOT add a NOT NULL+DEFAULT here, or we'd overwrite existing habits' times.
+                    self._execute_query("ALTER TABLE habits ADD COLUMN due_time_local TEXT;", commit=True)
+                    # Preserve legacy semantics: copy the old stored value.
+                    self._execute_query("UPDATE habits SET due_time_local = due_time_utc WHERE due_time_local IS NULL;", commit=True)
+                    logger.info("Column 'due_time_local' added successfully to habits.")
+                if "tz_name" not in col_names:
+                    self._execute_query("ALTER TABLE habits ADD COLUMN tz_name TEXT;", commit=True)
+                    # Preserve legacy semantics: old habits were interpreted as UTC.
+                    self._execute_query("UPDATE habits SET tz_name = 'UTC' WHERE tz_name IS NULL;", commit=True)
+                    logger.info("Column 'tz_name' added successfully to habits.")
+        except Exception as e:
+            logger.warning(f"Could not apply habits schema migration (due_time_local/tz_name): {e}")
         try:
             self._execute_query("CREATE INDEX IF NOT EXISTS idx_habits_user_due ON habits(user_id, guild_id, next_due_at);", commit=True)
         except Exception as e:
@@ -670,7 +690,8 @@ class DataManager:
         user_id: int,
         name: str,
         days_of_week: List[int],
-        due_time_utc: str,
+        due_time_local: str,
+        tz_name: str = "Europe/Warsaw",
         remind_enabled: bool = True,
         next_due_at_utc: Optional[str] = None,
     ) -> Optional[int]:
@@ -681,15 +702,18 @@ class DataManager:
         except Exception:
             days_json = json.dumps([0, 1, 2, 3, 4])
         query = """
-        INSERT INTO habits (guild_id, user_id, name, days_of_week, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at)
-        VALUES (:guild_id, :user_id, :name, :days, :due_time, :remind_enabled, 0, :next_due_at, NULL)
+        INSERT INTO habits (guild_id, user_id, name, days_of_week, due_time_local, tz_name, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at)
+        VALUES (:guild_id, :user_id, :name, :days, :due_time_local, :tz_name, :due_time_utc, :remind_enabled, 0, :next_due_at, NULL)
         """
         params = {
             "guild_id": str(int(guild_id)),
             "user_id": str(int(user_id)),
             "name": str(name).strip(),
             "days": days_json,
-            "due_time": str(due_time_utc).strip(),
+            "due_time_local": str(due_time_local).strip(),
+            "tz_name": str(tz_name or "Europe/Warsaw").strip(),
+            # legacy column maintained for backwards compatibility; we store the same HH:MM
+            "due_time_utc": str(due_time_local).strip(),
             "remind_enabled": 1 if remind_enabled else 0,
             "next_due_at": next_due_at_utc,
         }
@@ -718,7 +742,7 @@ class DataManager:
     def list_habits(self, guild_id: int, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
         limit = max(1, min(200, int(limit)))
         query = """
-        SELECT id, name, days_of_week, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+        SELECT id, name, days_of_week, due_time_local, tz_name, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
         FROM habits
         WHERE guild_id = :guild_id AND user_id = :user_id
         ORDER BY id DESC
@@ -729,7 +753,7 @@ class DataManager:
 
     def get_habit(self, guild_id: int, user_id: int, habit_id: int) -> Optional[Dict[str, Any]]:
         query = """
-        SELECT id, name, days_of_week, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+        SELECT id, name, days_of_week, due_time_local, tz_name, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
         FROM habits
         WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
         """
@@ -768,7 +792,8 @@ class DataManager:
         habit_id: int,
         *,
         days_of_week: Optional[List[int]] = None,
-        due_time_utc: Optional[str] = None,
+        due_time_local: Optional[str] = None,
+        tz_name: Optional[str] = None,
         next_due_at_utc: Optional[str] = None,
         remind_enabled: Optional[bool] = None,
         next_remind_at_utc: Optional[str] = None,
@@ -782,9 +807,15 @@ class DataManager:
             except Exception:
                 params["days"] = json.dumps([0, 1, 2, 3, 4])
             set_parts.append("days_of_week = :days")
-        if due_time_utc is not None:
-            params["due_time"] = str(due_time_utc).strip()
-            set_parts.append("due_time_utc = :due_time")
+        if due_time_local is not None:
+            params["due_time_local"] = str(due_time_local).strip()
+            set_parts.append("due_time_local = :due_time_local")
+            # legacy column kept in sync (best-effort)
+            params["due_time_utc"] = str(due_time_local).strip()
+            set_parts.append("due_time_utc = :due_time_utc")
+        if tz_name is not None:
+            params["tz_name"] = str(tz_name).strip()
+            set_parts.append("tz_name = :tz_name")
         if next_due_at_utc is not None:
             params["next_due_at"] = next_due_at_utc
             set_parts.append("next_due_at = :next_due_at")

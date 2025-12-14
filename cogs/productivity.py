@@ -9,6 +9,12 @@ from discord.ext import commands, tasks
 
 logger = logging.getLogger(__name__)
 
+try:
+    # Python 3.9+
+    from zoneinfo import ZoneInfo  # type: ignore
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
+
 
 def _scope_guild_id_from_ctx(ctx: commands.Context) -> int:
     return ctx.guild.id if ctx.guild else 0
@@ -36,6 +42,83 @@ def _parse_hhmm_utc(s: str) -> Optional[dtime]:
     if hh < 0 or hh > 23 or mm < 0 or mm > 59:
         return None
     return dtime(hour=hh, minute=mm, tzinfo=timezone.utc)
+
+
+def _cet_tzinfo():
+    """
+    Returns tzinfo for CET/CEST (Europe/Warsaw) if available.
+    Falls back to a fixed UTC+1 tz if zoneinfo data isn't present.
+    """
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo("Europe/Warsaw")
+        except Exception:
+            pass
+    return timezone(timedelta(hours=1), name="CET")
+
+
+def _tzinfo_from_name(tz_name: Optional[str]):
+    """
+    Best-effort tz resolver.
+    - 'UTC' => timezone.utc
+    - 'Europe/Warsaw' => CET/CEST (preferred)
+    - fallback => CET fixed offset if zoneinfo isn't available
+    """
+    name = (tz_name or "").strip()
+    if not name:
+        return _cet_tzinfo()
+    if name.upper() in ("UTC", "ETC/UTC", "Z"):
+        return timezone.utc
+    if name.upper() == "CET":
+        return timezone(timedelta(hours=1), name="CET")
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(name)
+        except Exception:
+            pass
+    return _cet_tzinfo()
+
+
+def _parse_hhmm_local(s: str) -> Optional[dtime]:
+    """
+    Parse HH:MM without assuming UTC; tzinfo is assigned by the caller.
+    """
+    if not isinstance(s, str):
+        return None
+    s = s.strip()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", s)
+    if not m:
+        return None
+    hh = int(m.group(1))
+    mm = int(m.group(2))
+    if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+        return None
+    return dtime(hour=hh, minute=mm)
+
+
+def _next_due_datetime_cet_to_utc(now_utc: datetime, days_of_week: List[int], due_hhmm_local: dtime, tz) -> datetime:
+    """
+    Compute next due datetime, interpreting due_hhmm_local in the given tz (CET/CEST),
+    returning a UTC datetime suitable for SQLite comparisons.
+    days_of_week: 0=Mon..6=Sun (local weekday).
+    """
+    now_utc = now_utc.astimezone(timezone.utc)
+    now_local = now_utc.astimezone(tz)
+    days = sorted(set([d for d in days_of_week if 0 <= d <= 6])) or [0, 1, 2, 3, 4]
+
+    today_dow = now_local.weekday()
+    today_due_local = datetime.combine(now_local.date(), due_hhmm_local).replace(tzinfo=tz)
+    if today_dow in days and now_local < today_due_local:
+        return today_due_local.astimezone(timezone.utc)
+
+    for add_days in range(1, 8):
+        d = (today_dow + add_days) % 7
+        if d in days:
+            target_date = (now_local + timedelta(days=add_days)).date()
+            target_local = datetime.combine(target_date, due_hhmm_local).replace(tzinfo=tz)
+            return target_local.astimezone(timezone.utc)
+
+    return (now_local + timedelta(days=1)).astimezone(timezone.utc)
 
 
 DAY_ALIASES = {
@@ -400,19 +483,20 @@ class ProductivityCog(commands.Cog, name="Productivity"):
     @discord.app_commands.describe(
         name="Habit name (e.g. 'Programming').",
         days="Schedule days (e.g. 'mon-fri', 'weekdays', 'mon,wed,fri').",
-        due_time_utc="Due time in UTC (HH:MM, default 18:00).",
+        due_time_cet="Due time in CET/CEST (HH:MM, default 18:00).",
         remind="Whether reminders are enabled (default: True).",
     )
-    async def habit_add(self, ctx: commands.Context, name: str, days: str = "mon-fri", due_time_utc: str = "18:00", remind: bool = True):
+    async def habit_add(self, ctx: commands.Context, name: str, days: str = "mon-fri", due_time_cet: str = "18:00", remind: bool = True):
         is_dm = ctx.guild is None
         await self._defer_if_interaction(ctx, ephemeral=not is_dm)
         if not self.db_manager:
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
-        due_t = _parse_hhmm_utc(due_time_utc) or dtime(18, 0, tzinfo=timezone.utc)
+        tz = _tzinfo_from_name("Europe/Warsaw")
+        due_local = _parse_hhmm_local(due_time_cet) or dtime(18, 0)
         days_list = _parse_days_spec(days)
-        next_due = _next_due_datetime_utc(_utc_now(), days_list, due_t)
+        next_due = _next_due_datetime_cet_to_utc(_utc_now(), days_list, due_local, tz)
 
         guild_id = _scope_guild_id_from_ctx(ctx)
         habit_id = await self.bot.loop.run_in_executor(
@@ -422,7 +506,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             ctx.author.id,
             name,
             days_list,
-            due_t.strftime("%H:%M"),
+            due_local.strftime("%H:%M"),
+            "Europe/Warsaw",
             remind,
             _sqlite_utc_timestamp(next_due),
         )
@@ -432,7 +517,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
         await self.send_response(
             ctx,
-            f"✅ Created habit **#{habit_id}**: **{name}** on `{days}` due `{due_t.strftime('%H:%M')} UTC`.",
+            f"✅ Created habit **#{habit_id}**: **{name}** on `{days}` due `{due_local.strftime('%H:%M')}` CET/CEST.",
             ephemeral=not is_dm,
         )
 
@@ -455,13 +540,15 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         for h in habits[:50]:
             hid = h.get("id")
             name = h.get("name") or ""
-            due_time = h.get("due_time_utc") or "18:00"
+            tz_name = h.get("tz_name")
+            due_time = h.get("due_time_local") or h.get("due_time_utc") or "18:00"
             remind_enabled = bool(h.get("remind_enabled"))
             next_due = h.get("next_due_at")
             last = h.get("last_checkin_at")
             rflag = "🔔" if remind_enabled else "🔕"
+            tz_label = "UTC" if str(tz_name or "").upper() == "UTC" else "CET/CEST"
             lines.append(
-                f"{rflag} **#{hid}** — **{name}** (due `{due_time} UTC`)\n"
+                f"{rflag} **#{hid}** — **{name}** (due `{due_time}` {tz_label})\n"
                 f"• next due: `{next_due or 'n/a'}` | last check-in: `{last or 'n/a'}`"
             )
         embed.description = "\n".join(lines)[:4000]
@@ -488,8 +575,15 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             days_list = json.loads(habit.get("days_of_week") or "[]")
         except Exception:
             days_list = [0, 1, 2, 3, 4]
-        due_t = _parse_hhmm_utc(str(habit.get("due_time_utc") or "18:00")) or dtime(18, 0, tzinfo=timezone.utc)
-        next_due = _next_due_datetime_utc(_utc_now(), days_list, due_t)
+        tz = _tzinfo_from_name(habit.get("tz_name"))
+        due_local_str = str(habit.get("due_time_local") or habit.get("due_time_utc") or "18:00")
+
+        if tz == timezone.utc:
+            due_utc = _parse_hhmm_utc(due_local_str) or dtime(18, 0, tzinfo=timezone.utc)
+            next_due = _next_due_datetime_utc(_utc_now(), days_list, due_utc)
+        else:
+            due_local = _parse_hhmm_local(due_local_str) or dtime(18, 0)
+            next_due = _next_due_datetime_cet_to_utc(_utc_now(), days_list, due_local, tz)
 
         ok = await self.bot.loop.run_in_executor(
             None,
