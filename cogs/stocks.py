@@ -1477,14 +1477,16 @@ class Stocks(commands.Cog):
         except Exception as e:
             await ctx.send(f"❌ Error clearing alert: {str(e)}")
 
-    @commands.command(name="sync_commands", aliases=["sync"])
+    # NOTE: Do not alias to "sync" because `bot.py` already registers a global prefix command named "sync".
+    @commands.command(name="sync_commands")
     async def sync_commands(self, ctx: commands.Context):
         """
         Manually syncs the bot's slash commands with Discord.
         Useful if new commands are not showing up immediately.
         """
         if not await self._is_admin_or_owner(ctx):
-            await ctx.send("This command is restricted to bot administrators.", ephemeral=True)
+            # `ephemeral` is not supported for plain prefix commands (ctx.send).
+            await ctx.send("This command is restricted to bot administrators.")
             return
             
         await ctx.typing()

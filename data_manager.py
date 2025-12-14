@@ -312,6 +312,18 @@ class DataManager:
         """
         create_table_if_not_exists("book_author_seen_works", create_book_author_seen_works_sql)
 
+        # Per-user tracking for book works (needed to respect per-user DND / delivery semantics).
+        create_book_author_user_seen_works_sql = """
+        CREATE TABLE IF NOT EXISTS book_author_user_seen_works (
+            user_id TEXT NOT NULL,
+            author_id TEXT NOT NULL,
+            work_id TEXT NOT NULL,
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, author_id, work_id)
+        )
+        """
+        create_table_if_not_exists("book_author_user_seen_works", create_book_author_user_seen_works_sql)
+
         logger.info("Database initialization check complete.")
 
     # --- TV Show Subscriptions ---
@@ -934,6 +946,58 @@ class DataManager:
         finally:
             try:
                 cur.close()
+            except Exception:
+                pass
+
+    def get_seen_work_ids_for_user_author(self, user_id: int, author_id: str) -> List[str]:
+        query = """
+        SELECT work_id
+        FROM book_author_user_seen_works
+        WHERE user_id = :user_id AND author_id = :author_id
+        """
+        rows = self._execute_query(query, {"user_id": str(user_id), "author_id": author_id}, fetch_all=True)
+        out: List[str] = []
+        for r in rows:
+            wid = r.get("work_id")
+            if isinstance(wid, str):
+                out.append(wid)
+        return out
+
+    def mark_user_author_work_seen(self, user_id: int, author_id: str, work_id: str) -> bool:
+        query = """
+        INSERT OR IGNORE INTO book_author_user_seen_works (user_id, author_id, work_id)
+        VALUES (:user_id, :author_id, :work_id)
+        """
+        params = {"user_id": str(user_id), "author_id": author_id, "work_id": work_id}
+        return self._execute_query(query, params, commit=True)
+
+    def mark_user_author_works_seen(self, user_id: int, author_id: str, work_ids: List[str]) -> bool:
+        """
+        Best-effort bulk insert. Returns True if the operation completes.
+        """
+        if not work_ids:
+            return True
+        conn = self._get_connection()
+        cur = None
+        try:
+            cur = conn.cursor()
+            cur.executemany(
+                "INSERT OR IGNORE INTO book_author_user_seen_works (user_id, author_id, work_id) VALUES (?, ?, ?)",
+                [(str(user_id), author_id, wid) for wid in work_ids],
+            )
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Bulk mark_user_author_works_seen failed: {e}")
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            return False
+        finally:
+            try:
+                if cur:
+                    cur.close()
             except Exception:
                 pass
 

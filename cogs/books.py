@@ -1,8 +1,8 @@
 import asyncio
 import logging
-from collections import defaultdict
+from datetime import datetime, time
 from functools import partial
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import discord
 from discord.ext import commands, tasks
@@ -20,6 +20,7 @@ class AuthorSelectionView(discord.ui.View):
         self.ctx = ctx
         self.results = results
         self.selected_result: Optional[dict] = None
+        self.message: Optional[discord.Message] = None
 
         for i, _ in enumerate(results[:5]):
             self.add_item(AuthorSelectionButton(i, NUMBER_EMOJIS[i]))
@@ -33,6 +34,12 @@ class AuthorSelectionView(discord.ui.View):
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
+        # Best-effort: update the message to reflect disabled buttons.
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 class AuthorSelectionButton(discord.ui.Button):
@@ -72,14 +79,64 @@ class BooksCog(commands.Cog, name="Books"):
         logger.info("BooksCog: Unloading and cancelling check_new_books task.")
         self.check_new_books.cancel()
 
+    async def _defer_if_interaction(self, ctx: commands.Context, *, ephemeral: bool = True) -> None:
+        """
+        Hybrid commands can be invoked as prefix commands too. Only defer when we have an interaction.
+        """
+        if not getattr(ctx, "interaction", None):
+            return
+        try:
+            if not ctx.interaction.response.is_done():
+                await ctx.interaction.response.defer(ephemeral=ephemeral)
+        except discord.InteractionResponded:
+            pass
+        except discord.HTTPException:
+            pass
+
+    async def _is_user_in_dnd(self, user_id: int) -> bool:
+        """
+        Best-effort DND check. If preferences cannot be loaded/parsed, treat as not in DND.
+        """
+        try:
+            dnd_enabled = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_enabled", False)
+            if not dnd_enabled:
+                return False
+
+            dnd_start_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_start_time", "00:00")
+            dnd_end_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_end_time", "00:00")
+            try:
+                dnd_start_time_obj = datetime.strptime(dnd_start_str, "%H:%M").time()
+                dnd_end_time_obj = datetime.strptime(dnd_end_str, "%H:%M").time()
+            except ValueError:
+                dnd_start_time_obj = time(0, 0)
+                dnd_end_time_obj = time(0, 0)
+
+            now_t = datetime.now().time()
+            if dnd_start_time_obj <= dnd_end_time_obj:
+                return dnd_start_time_obj <= now_t <= dnd_end_time_obj
+            return now_t >= dnd_start_time_obj or now_t <= dnd_end_time_obj
+        except Exception:
+            return False
+
     async def send_response(self, ctx: commands.Context, content: Optional[str] = None, *, embed: Optional[discord.Embed] = None, ephemeral: bool = True, view: Optional[discord.ui.View] = None, wait: bool = False):
         if ctx.interaction:
-            kwargs = {"ephemeral": ephemeral, "wait": wait}
+            kwargs = {"ephemeral": ephemeral}
+            if wait:
+                kwargs["wait"] = wait
             if view is not None:
                 kwargs["view"] = view
             if embed is not None:
-                return await ctx.interaction.followup.send(content=content, embed=embed, **kwargs)
-            return await ctx.interaction.followup.send(content=content, **kwargs)
+                kwargs["embed"] = embed
+            if content is not None:
+                kwargs["content"] = content
+
+            # If we haven't responded/deferred yet, use the initial response.
+            try:
+                if not ctx.interaction.response.is_done():
+                    return await ctx.interaction.response.send_message(**kwargs)
+            except discord.HTTPException:
+                pass
+            return await ctx.interaction.followup.send(**kwargs)
         return await ctx.send(content=content, embed=embed, view=view)
 
     async def author_autocomplete(self, interaction: discord.Interaction, current: str) -> List[discord.app_commands.Choice[str]]:
@@ -132,7 +189,7 @@ class BooksCog(commands.Cog, name="Books"):
     @discord.app_commands.describe(author="Author to subscribe to (searches Open Library)")
     @discord.app_commands.autocomplete(author=author_autocomplete)
     async def book_author_subscribe(self, ctx: commands.Context, author: str):
-        await ctx.defer(ephemeral=True)
+        await self._defer_if_interaction(ctx, ephemeral=True)
         if not ctx.guild:
             await self.send_response(ctx, "This command can only be used in a server (not DMs).", ephemeral=True)
             return
@@ -190,9 +247,11 @@ class BooksCog(commands.Cog, name="Books"):
 
                     view = AuthorSelectionView(ctx, display_results)
                     if ctx.interaction:
-                        await ctx.interaction.followup.send(content="Multiple authors found. Pick one:", embeds=embeds, ephemeral=True, view=view, wait=True)
+                        msg = await ctx.interaction.followup.send(content="Multiple authors found. Pick one:", embeds=embeds, ephemeral=True, view=view, wait=True)
+                        view.message = msg
                     else:
-                        await ctx.send(content="Multiple authors found. Pick one:", embeds=embeds, view=view)
+                        msg = await ctx.send(content="Multiple authors found. Pick one:", embeds=embeds, view=view)
+                        view.message = msg
 
                     await view.wait()
                     selected = view.selected_result
@@ -208,7 +267,8 @@ class BooksCog(commands.Cog, name="Books"):
         try:
             works = await self.bot.loop.run_in_executor(None, partial(openlibrary_client.get_author_works, author_id, limit=100))
             work_ids = [w["work_id"] for w in works if isinstance(w, dict) and isinstance(w.get("work_id"), str)]
-            await self.bot.loop.run_in_executor(None, self.db_manager.mark_author_works_seen, author_id, work_ids)
+            # Per-user seen (required for correct DND + no duplicates)
+            await self.bot.loop.run_in_executor(None, self.db_manager.mark_user_author_works_seen, user_id, author_id, work_ids)
         except Exception as e:
             logger.warning(f"BooksCog: baseline mark seen failed for author {author_id}: {e}")
 
@@ -223,7 +283,7 @@ class BooksCog(commands.Cog, name="Books"):
     @discord.app_commands.describe(author="Author to unsubscribe from")
     @discord.app_commands.autocomplete(author=user_author_subscription_autocomplete)
     async def book_author_unsubscribe(self, ctx: commands.Context, author: str):
-        await ctx.defer(ephemeral=True)
+        await self._defer_if_interaction(ctx, ephemeral=True)
         if not ctx.guild:
             await self.send_response(ctx, "This command can only be used in a server (not DMs).", ephemeral=True)
             return
@@ -243,7 +303,7 @@ class BooksCog(commands.Cog, name="Books"):
 
     @commands.hybrid_command(name="my_book_authors", description="List your subscribed book authors in this server.")
     async def my_book_authors(self, ctx: commands.Context):
-        await ctx.defer(ephemeral=True)
+        await self._defer_if_interaction(ctx, ephemeral=True)
         if not ctx.guild:
             await self.send_response(ctx, "This command can only be used in a server (not DMs).", ephemeral=True)
             return
@@ -282,6 +342,8 @@ class BooksCog(commands.Cog, name="Books"):
         # Build distinct author list
         author_ids = sorted({s["author_id"] for s in subs if isinstance(s, dict) and isinstance(s.get("author_id"), str)})
 
+        dnd_cache: dict[int, bool] = {}
+
         for author_id in author_ids:
             try:
                 author_subs = [s for s in subs if s.get("author_id") == author_id]
@@ -295,14 +357,13 @@ class BooksCog(commands.Cog, name="Books"):
                         break
                 author_name = author_name or author_id
 
-                seen = set(await self.bot.loop.run_in_executor(None, self.db_manager.get_seen_work_ids_for_author, author_id))
                 works = await self.bot.loop.run_in_executor(None, partial(openlibrary_client.get_author_works, author_id, limit=25))
-                new_works = [w for w in works if isinstance(w, dict) and isinstance(w.get("work_id"), str) and w["work_id"] not in seen]
-                if not new_works:
+                work_items = [w for w in works if isinstance(w, dict) and isinstance(w.get("work_id"), str)]
+                if not work_items:
                     await asyncio.sleep(0.15)
                     continue
 
-                # Group subscriptions by user_id (DM delivery, consistent with TV/movies behavior).
+                # Group subscriptions by user_id (DM delivery).
                 user_ids: List[int] = []
                 for s in author_subs:
                     gid_s = s.get("guild_id")
@@ -313,67 +374,55 @@ class BooksCog(commands.Cog, name="Books"):
                     user_ids.append(uid)
                 user_ids = sorted(set(user_ids))
 
-                for w in new_works[:10]:  # avoid spam if API returns a huge burst
-                    work_id = w["work_id"]
-                    title = w.get("title") or "Untitled"
-                    first_publish_date = w.get("first_publish_date")
+                # For each user, compute unseen works and send/mark per-user.
+                # This prevents duplicates and ensures DND doesn't cause permanent misses.
+                for uid in user_ids:
+                    # DND cache
+                    if uid not in dnd_cache:
+                        dnd_cache[uid] = await self._is_user_in_dnd(uid)
+                    if dnd_cache[uid]:
+                        continue
 
-                    embed = discord.Embed(
-                        title=f"📚 New title by {author_name}",
-                        description=f"**{title}**",
-                        color=discord.Color.purple(),
-                        url=openlibrary_client.work_url(work_id),
+                    seen_user = set(
+                        await self.bot.loop.run_in_executor(None, self.db_manager.get_seen_work_ids_for_user_author, uid, author_id)
                     )
-                    if isinstance(first_publish_date, str) and first_publish_date.strip():
-                        embed.add_field(name="First publish date", value=first_publish_date.strip(), inline=True)
-                    embed.add_field(name="Open Library", value=f"[View book]({openlibrary_client.work_url(work_id)})", inline=True)
-                    embed.set_footer(text="Source: Open Library")
+                    unseen = [w for w in work_items if w["work_id"] not in seen_user]
+                    if not unseen:
+                        continue
 
-                    any_sent = False
-                    try:
-                        for uid in user_ids:
-                            # Respect existing DND settings (same semantics as Movies).
-                            try:
-                                dnd_enabled = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, uid, "dnd_enabled", False)
-                                if dnd_enabled:
-                                    dnd_start_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, uid, "dnd_start_time", "00:00")
-                                    dnd_end_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, uid, "dnd_end_time", "00:00")
-                                    # Lazy import to keep file tidy
-                                    from datetime import datetime, time
-
-                                    try:
-                                        dnd_start_time_obj = datetime.strptime(dnd_start_str, "%H:%M").time()
-                                        dnd_end_time_obj = datetime.strptime(dnd_end_str, "%H:%M").time()
-                                    except ValueError:
-                                        dnd_start_time_obj = time(0, 0)
-                                        dnd_end_time_obj = time(0, 0)
-
-                                    now_t = datetime.now().time()
-                                    is_dnd = False
-                                    if dnd_start_time_obj <= dnd_end_time_obj:
-                                        if dnd_start_time_obj <= now_t <= dnd_end_time_obj:
-                                            is_dnd = True
-                                    else:
-                                        if now_t >= dnd_start_time_obj or now_t <= dnd_end_time_obj:
-                                            is_dnd = True
-                                    if is_dnd:
-                                        continue
-                            except Exception:
-                                # If prefs fail, don't block sending.
-                                pass
-
+                    user = self.bot.get_user(uid)
+                    if not user:
+                        try:
                             user = await self.bot.fetch_user(uid)
-                            if not user:
-                                continue
-                            await user.send(embed=embed)
-                            any_sent = True
-                    except discord.Forbidden:
-                        logger.warning("BooksCog: Forbidden sending DM (user blocked bot or DMs disabled).")
-                    except discord.HTTPException as e:
-                        logger.warning(f"BooksCog: HTTP error sending DM: {e}")
+                        except (discord.NotFound, discord.HTTPException):
+                            continue
 
-                    if any_sent:
-                        await self.bot.loop.run_in_executor(None, self.db_manager.mark_author_work_seen, author_id, work_id)
+                    for w in unseen[:10]:  # avoid spam
+                        work_id = w["work_id"]
+                        title = w.get("title") or "Untitled"
+                        first_publish_date = w.get("first_publish_date")
+
+                        embed = discord.Embed(
+                            title=f"📚 New title by {author_name}",
+                            description=f"**{title}**",
+                            color=discord.Color.purple(),
+                            url=openlibrary_client.work_url(work_id),
+                        )
+                        if isinstance(first_publish_date, str) and first_publish_date.strip():
+                            embed.add_field(name="First publish date", value=first_publish_date.strip(), inline=True)
+                        embed.add_field(name="Open Library", value=f"[View book]({openlibrary_client.work_url(work_id)})", inline=True)
+                        embed.set_footer(text="Source: Open Library")
+
+                        try:
+                            await user.send(embed=embed)
+                            await self.bot.loop.run_in_executor(None, self.db_manager.mark_user_author_work_seen, uid, author_id, work_id)
+                        except discord.Forbidden:
+                            # User blocked bot / DMs disabled; keep unseen so it can retry if they re-enable.
+                            logger.warning(f"BooksCog: Cannot DM user {uid} (Forbidden).")
+                            break
+                        except discord.HTTPException as e:
+                            logger.warning(f"BooksCog: HTTP error sending DM to user {uid}: {e}")
+                            break
 
                 await asyncio.sleep(0.25)
             except Exception as e:
