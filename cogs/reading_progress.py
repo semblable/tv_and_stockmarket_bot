@@ -124,19 +124,28 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
         view: Optional[discord.ui.View] = None,
         wait: bool = False,
     ):
+        base_kwargs = {}
+        if content is not None:
+            base_kwargs["content"] = content
+        if embed is not None:
+            base_kwargs["embed"] = embed
+        # discord.py expects a discord.ui.View instance if provided; passing None raises TypeError.
+        if view is not None:
+            base_kwargs["view"] = view
+
         if getattr(ctx, "interaction", None):
             # If not responded/deferred yet, use initial response.
             try:
                 if not ctx.interaction.response.is_done():
                     if wait:
-                        return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, view=view, wait=True)
-                    return await ctx.interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral, view=view)
+                        return await ctx.interaction.followup.send(**base_kwargs, ephemeral=ephemeral, wait=True)
+                    return await ctx.interaction.response.send_message(**base_kwargs, ephemeral=ephemeral)
             except discord.HTTPException:
                 pass
             if wait:
-                return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, view=view, wait=True)
-            return await ctx.interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral, view=view)
-        return await ctx.send(content=content, embed=embed, view=view)
+                return await ctx.interaction.followup.send(**base_kwargs, ephemeral=ephemeral, wait=True)
+            return await ctx.interaction.followup.send(**base_kwargs, ephemeral=ephemeral)
+        return await ctx.send(**base_kwargs)
 
     NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
