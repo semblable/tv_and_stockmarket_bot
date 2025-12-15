@@ -555,6 +555,133 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             ephemeral=not is_dm,
         )
 
+    @commands.hybrid_command(name="habit_edit", description="Edit an existing habit (name/schedule/time/timezone).")
+    @discord.app_commands.describe(
+        habit_id="The numeric id (from /habit_list).",
+        name="New name (optional).",
+        days="New schedule days (optional, e.g. 'mon-fri', 'mon,wed,fri').",
+        due_time="New due time HH:MM (optional). Interpreted in tz_name.",
+        tz_name="Timezone name (optional). Use 'UTC' or an IANA name like 'Europe/Warsaw'.",
+    )
+    async def habit_edit(
+        self,
+        ctx: commands.Context,
+        habit_id: int,
+        name: Optional[str] = None,
+        days: Optional[str] = None,
+        due_time: Optional[str] = None,
+        tz_name: Optional[str] = None,
+    ):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        # Load habit (needed to compute next due + keep unchanged fields)
+        guild_id = _scope_guild_id_from_ctx(ctx)
+        if is_dm and hasattr(self.db_manager, "get_habit_any_scope"):
+            habit = await self.bot.loop.run_in_executor(None, self.db_manager.get_habit_any_scope, ctx.author.id, int(habit_id))
+            if habit and "guild_id" in habit:
+                try:
+                    guild_id = int(habit.get("guild_id") or 0)
+                except Exception:
+                    guild_id = 0
+        else:
+            habit = await self.bot.loop.run_in_executor(None, self.db_manager.get_habit, guild_id, ctx.author.id, int(habit_id))
+        if not habit:
+            await self.send_response(ctx, "Could not find that habit (or it’s not yours).", ephemeral=not is_dm)
+            return
+
+        # Determine what changed
+        schedule_changed = any(v is not None for v in (days, due_time, tz_name))
+
+        # Days
+        if days is None:
+            try:
+                days_list = json.loads(habit.get("days_of_week") or "[]")
+            except Exception:
+                days_list = [0, 1, 2, 3, 4]
+        else:
+            days_list = _parse_days_spec(days)
+
+        # Timezone
+        current_tz_name = str(habit.get("tz_name") or "Europe/Warsaw")
+        new_tz_name = (tz_name.strip() if isinstance(tz_name, str) and tz_name.strip() else current_tz_name)
+        # Validate tz if provided and zoneinfo available (avoid persisting garbage tz names)
+        if tz_name is not None:
+            if new_tz_name.upper() != "UTC" and ZoneInfo is not None:
+                try:
+                    ZoneInfo(new_tz_name)
+                except Exception:
+                    await self.send_response(ctx, f"Unknown timezone `{new_tz_name}`. Use `UTC` or a valid IANA name (e.g. `Europe/Warsaw`).", ephemeral=not is_dm)
+                    return
+
+        tz = _tzinfo_from_name(new_tz_name)
+
+        # Due time string (interpreted in tz)
+        current_due_str = str(habit.get("due_time_local") or habit.get("due_time_utc") or "18:00")
+        new_due_str = (due_time.strip() if isinstance(due_time, str) and due_time.strip() else current_due_str)
+
+        if tz == timezone.utc:
+            due_utc = _parse_hhmm_utc(new_due_str)
+            if not due_utc:
+                await self.send_response(ctx, "Invalid `due_time`. Use `HH:MM` (e.g. `18:00`).", ephemeral=not is_dm)
+                return
+            next_due = _next_due_datetime_utc(_utc_now(), days_list, due_utc)
+        else:
+            due_local = _parse_hhmm_local(new_due_str)
+            if not due_local:
+                await self.send_response(ctx, "Invalid `due_time`. Use `HH:MM` (e.g. `18:00`).", ephemeral=not is_dm)
+                return
+            next_due = _next_due_datetime_cet_to_utc(_utc_now(), days_list, due_local, tz)
+
+        # Persist
+        next_due_s = _sqlite_utc_timestamp(next_due) if schedule_changed else None
+        if is_dm and hasattr(self.db_manager, "set_habit_schedule_and_due_any_scope"):
+            ok = await self.bot.loop.run_in_executor(
+                None,
+                lambda: self.db_manager.set_habit_schedule_and_due_any_scope(
+                    ctx.author.id,
+                    int(habit_id),
+                    name=name,
+                    days_of_week=(days_list if days is not None else None),
+                    due_time_local=(new_due_str if due_time is not None else None),
+                    tz_name=(new_tz_name if tz_name is not None else None),
+                    next_due_at_utc=next_due_s,
+                    remind_level=(0 if schedule_changed else None),
+                    clear_next_remind_at=bool(schedule_changed),
+                    clear_snoozed_until=bool(schedule_changed),
+                ),
+            )
+        else:
+            ok = await self.bot.loop.run_in_executor(
+                None,
+                lambda: self.db_manager.set_habit_schedule_and_due(
+                    guild_id,
+                    ctx.author.id,
+                    int(habit_id),
+                    name=name,
+                    days_of_week=(days_list if days is not None else None),
+                    due_time_local=(new_due_str if due_time is not None else None),
+                    tz_name=(new_tz_name if tz_name is not None else None),
+                    next_due_at_utc=next_due_s,
+                    remind_level=(0 if schedule_changed else None),
+                    clear_next_remind_at=bool(schedule_changed),
+                    clear_snoozed_until=bool(schedule_changed),
+                ),
+            )
+
+        if not ok:
+            await self.send_response(ctx, "Could not update that habit.", ephemeral=not is_dm)
+            return
+
+        await self.send_response(
+            ctx,
+            f"✅ Updated habit **#{habit_id}**." + (f" Next due: `{_sqlite_utc_timestamp(next_due)}` (UTC)." if schedule_changed else ""),
+            ephemeral=not is_dm,
+        )
+
     @commands.hybrid_command(name="habit_list", description="List your habits.")
     async def habit_list(self, ctx: commands.Context):
         is_dm = ctx.guild is None

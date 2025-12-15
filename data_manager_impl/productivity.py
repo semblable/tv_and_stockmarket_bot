@@ -575,16 +575,25 @@ class ProductivityMixin:
         user_id: int,
         habit_id: int,
         *,
+        name: Optional[str] = None,
         days_of_week: Optional[List[int]] = None,
         due_time_local: Optional[str] = None,
         tz_name: Optional[str] = None,
         next_due_at_utc: Optional[str] = None,
         remind_enabled: Optional[bool] = None,
+        remind_profile: Optional[str] = None,
         next_remind_at_utc: Optional[str] = None,
         remind_level: Optional[int] = None,
+        clear_next_remind_at: bool = False,
+        clear_snoozed_until: bool = False,
     ) -> bool:
         set_parts: List[str] = []
         params: Dict[str, Any] = {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "id": int(habit_id)}
+        if name is not None:
+            nm = str(name).strip()
+            if nm:
+                params["name"] = nm
+                set_parts.append("name = :name")
         if days_of_week is not None:
             try:
                 params["days"] = json.dumps([int(d) for d in days_of_week])
@@ -606,12 +615,19 @@ class ProductivityMixin:
         if remind_enabled is not None:
             params["remind_enabled"] = 1 if remind_enabled else 0
             set_parts.append("remind_enabled = :remind_enabled")
+        if remind_profile is not None:
+            params["remind_profile"] = self._normalize_habit_remind_profile(remind_profile)
+            set_parts.append("remind_profile = :remind_profile")
         if next_remind_at_utc is not None:
             params["next_remind_at"] = next_remind_at_utc
             set_parts.append("next_remind_at = :next_remind_at")
         if remind_level is not None:
             params["remind_level"] = int(remind_level)
             set_parts.append("remind_level = :remind_level")
+        if clear_next_remind_at:
+            set_parts.append("next_remind_at = NULL")
+        if clear_snoozed_until:
+            set_parts.append("snoozed_until = NULL")
         if not set_parts:
             return False
         query = f"""
@@ -620,6 +636,47 @@ class ProductivityMixin:
         WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
         """
         return bool(self._execute_query(query, params, commit=True))
+
+    def set_habit_schedule_and_due_any_scope(
+        self,
+        user_id: int,
+        habit_id: int,
+        *,
+        name: Optional[str] = None,
+        days_of_week: Optional[List[int]] = None,
+        due_time_local: Optional[str] = None,
+        tz_name: Optional[str] = None,
+        next_due_at_utc: Optional[str] = None,
+        remind_enabled: Optional[bool] = None,
+        remind_profile: Optional[str] = None,
+        next_remind_at_utc: Optional[str] = None,
+        remind_level: Optional[int] = None,
+        clear_next_remind_at: bool = False,
+        clear_snoozed_until: bool = False,
+    ) -> bool:
+        habit = self.get_habit_any_scope(user_id, habit_id)
+        if not habit:
+            return False
+        try:
+            guild_id = int(habit.get("guild_id") or 0)
+        except Exception:
+            guild_id = 0
+        return self.set_habit_schedule_and_due(
+            guild_id,
+            user_id,
+            habit_id,
+            name=name,
+            days_of_week=days_of_week,
+            due_time_local=due_time_local,
+            tz_name=tz_name,
+            next_due_at_utc=next_due_at_utc,
+            remind_enabled=remind_enabled,
+            remind_profile=remind_profile,
+            next_remind_at_utc=next_remind_at_utc,
+            remind_level=remind_level,
+            clear_next_remind_at=clear_next_remind_at,
+            clear_snoozed_until=clear_snoozed_until,
+        )
 
     def record_habit_checkin(
         self,

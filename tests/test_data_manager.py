@@ -281,3 +281,45 @@ def test_habit_snooze_migration_from_old_schema(tmp_path, monkeypatch):
         assert (row.get("last_snooze_period") or "").lower() == "week"
     finally:
         mgr.close()
+
+
+def test_habit_edit_updates_name_and_clears_snooze(db_manager):
+    guild_id = 0
+    user_id = 555
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Old name",
+        [0, 1, 2, 3, 4],
+        "18:00",
+        "Europe/Warsaw",
+        True,
+        "2100-01-01 00:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    # Snooze it to set snoozed_until, then "edit" schedule and clear snooze
+    res = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2099-12-31 12:00:00", "week", 1)
+    assert res.get("ok") is True
+
+    h1 = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h1 is not None
+    assert h1.get("snoozed_until") is not None
+
+    ok = db_manager.set_habit_schedule_and_due(
+        guild_id,
+        user_id,
+        habit_id,
+        name="New name",
+        days_of_week=[0],  # only Mondays
+        next_due_at_utc="2100-01-03 00:00:00",
+        clear_snoozed_until=True,
+        clear_next_remind_at=True,
+        remind_level=0,
+    )
+    assert ok is True
+
+    h2 = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h2 is not None
+    assert h2.get("name") == "New name"
+    assert h2.get("snoozed_until") is None
