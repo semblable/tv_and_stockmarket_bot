@@ -470,3 +470,30 @@ def test_list_users_with_productivity_data_and_list_habits_any_scope(db_manager)
 
     habits = db_manager.list_habits_any_scope(202, 10)
     assert any(int(h.get("id") or 0) == hid for h in habits)
+
+
+def test_list_todo_items_any_scope(db_manager):
+    # Two different guild scopes for the same user.
+    user_id = 303
+    db_manager._execute_query(
+        """
+        INSERT INTO todo_items (guild_id, user_id, content, is_done, created_at, done_at, remind_enabled, remind_level, next_remind_at)
+        VALUES ('0', :user_id, 'dm', 0, '2025-01-01 00:00:00', NULL, 0, 0, NULL)
+        """,
+        {"user_id": str(user_id)},
+        commit=True,
+    )
+    db_manager._execute_query(
+        """
+        INSERT INTO todo_items (guild_id, user_id, content, is_done, created_at, done_at, remind_enabled, remind_level, next_remind_at)
+        VALUES ('999', :user_id, 'server', 0, '2025-01-01 00:00:00', NULL, 0, 0, NULL)
+        """,
+        {"user_id": str(user_id)},
+        commit=True,
+    )
+
+    items = db_manager.list_todo_items_any_scope(user_id, include_done=False, limit=10)
+    assert isinstance(items, list)
+    guild_ids = {str(i.get("guild_id")) for i in items}
+    assert "0" in guild_ids
+    assert "999" in guild_ids

@@ -111,6 +111,24 @@ class ProductivityMixin:
         rows = self._execute_query(base, params, fetch_all=True)
         return rows if isinstance(rows, list) else []
 
+    def list_todo_items_any_scope(self, user_id: int, include_done: bool = False, limit: int = 30) -> List[Dict[str, Any]]:
+        """
+        Lists todo items for a user across all guild scopes.
+        Useful for DM flows where users still want to see server-created items.
+        """
+        limit = max(1, min(200, int(limit)))
+        base = """
+        SELECT id, guild_id, content, is_done, created_at, done_at, remind_enabled, remind_level, next_remind_at
+        FROM todo_items
+        WHERE user_id = :user_id
+        """
+        params: Dict[str, Any] = {"user_id": str(int(user_id)), "limit": limit}
+        if not include_done:
+            base += " AND is_done = 0"
+        base += " ORDER BY is_done ASC, id DESC LIMIT :limit"
+        rows = self._execute_query(base, params, fetch_all=True)
+        return rows if isinstance(rows, list) else []
+
     def get_todo_item_any_scope(self, user_id: int, todo_id: int) -> Optional[Dict[str, Any]]:
         """
         Fetch a todo item by (user_id, id) regardless of guild scope.

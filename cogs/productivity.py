@@ -621,20 +621,33 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
-        guild_id = _scope_guild_id_from_ctx(ctx)
-        items = await self.bot.loop.run_in_executor(None, self.db_manager.list_todo_items, guild_id, ctx.author.id, include_done, 50)
+        if is_dm and hasattr(self.db_manager, "list_todo_items_any_scope"):
+            items = await self.bot.loop.run_in_executor(
+                None, self.db_manager.list_todo_items_any_scope, ctx.author.id, include_done, 50
+            )
+            title = "✅ Your To‑Dos (all scopes)"
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            items = await self.bot.loop.run_in_executor(None, self.db_manager.list_todo_items, guild_id, ctx.author.id, include_done, 50)
+            title = "✅ Your To‑Dos"
         if not items:
             await self.send_response(ctx, "Your to-do list is empty. Use `/todo_add`.", ephemeral=not is_dm)
             return
 
-        embed = discord.Embed(title="✅ Your To‑Dos", color=discord.Color.blurple())
+        embed = discord.Embed(title=title, color=discord.Color.blurple())
         lines: List[str] = []
         for r in items[:50]:
             tid = r.get("id")
             content = r.get("content") or ""
             done = bool(r.get("is_done"))
             prefix = "☑️" if done else "⬜"
-            lines.append(f"{prefix} **#{tid}** — {content}")
+            # In DM + any-scope listing, include scope label (guild_id) so users can disambiguate.
+            if is_dm and "guild_id" in r:
+                gid = str(r.get("guild_id") or "0")
+                scope = "DM" if gid == "0" else f"g:{gid}"
+                lines.append(f"{prefix} **#{tid}** ({scope}) — {content}")
+            else:
+                lines.append(f"{prefix} **#{tid}** — {content}")
         embed.description = "\n".join(lines)[:4000]
         await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
 
@@ -1037,13 +1050,18 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
-        guild_id = _scope_guild_id_from_ctx(ctx)
-        habits = await self.bot.loop.run_in_executor(None, self.db_manager.list_habits, guild_id, ctx.author.id, 50)
+        if is_dm and hasattr(self.db_manager, "list_habits_any_scope"):
+            habits = await self.bot.loop.run_in_executor(None, self.db_manager.list_habits_any_scope, ctx.author.id, 50)
+            title = "📌 Your Habits (all scopes)"
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            habits = await self.bot.loop.run_in_executor(None, self.db_manager.list_habits, guild_id, ctx.author.id, 50)
+            title = "📌 Your Habits"
         if not habits:
             await self.send_response(ctx, "No habits yet. Use `/habit_add`.", ephemeral=not is_dm)
             return
 
-        embed = discord.Embed(title="📌 Your Habits", color=discord.Color.green())
+        embed = discord.Embed(title=title, color=discord.Color.green())
         lines: List[str] = []
         for h in habits[:50]:
             hid = h.get("id")
@@ -1055,9 +1073,13 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             next_due = h.get("next_due_at")
             last = h.get("last_checkin_at")
             rflag = "🔔" if remind_enabled else "🔕"
-            tz_label = "UTC" if str(tz_name or "").upper() == "UTC" else "CET/CEST"
+            tz_label = str(tz_name or "UTC")
+            scope_label = ""
+            if is_dm and "guild_id" in h:
+                gid = str(h.get("guild_id") or "0")
+                scope_label = f" ({'DM' if gid == '0' else f'g:{gid}'})"
             lines.append(
-                f"{rflag} **#{hid}** — **{name}** (due `{due_time}` {tz_label}, remind: `{remind_profile}`)\n"
+                f"{rflag} **#{hid}**{scope_label} — **{name}** (due `{due_time}` `{tz_label}`, remind: `{remind_profile}`)\n"
                 f"• next due: `{next_due or 'n/a'}` | last check-in: `{last or 'n/a'}`"
             )
         embed.description = "\n".join(lines)[:4000]
