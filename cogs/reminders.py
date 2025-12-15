@@ -28,9 +28,22 @@ def _sqlite_utc_timestamp(dt: datetime) -> str:
 def _tzinfo_from_name(tz_name: Optional[str]):
     name = (tz_name or "").strip()
     if not name:
-        return timezone.utc
+        # Default to CET/CEST
+        if ZoneInfo is not None:
+            try:
+                return ZoneInfo("Europe/Warsaw")
+            except Exception:
+                return timezone(timedelta(hours=1), name="CET")
+        return timezone(timedelta(hours=1), name="CET")
     if name.upper() in ("UTC", "ETC/UTC", "Z"):
         return timezone.utc
+    if name.upper() in ("CET", "CEST"):
+        if ZoneInfo is not None:
+            try:
+                return ZoneInfo("Europe/Warsaw")
+            except Exception:
+                return timezone(timedelta(hours=1), name="CET")
+        return timezone(timedelta(hours=1), name="CET")
     if ZoneInfo is not None:
         try:
             return ZoneInfo(name)
@@ -38,6 +51,24 @@ def _tzinfo_from_name(tz_name: Optional[str]):
             return timezone.utc
     # Without zoneinfo data, best-effort fallback is UTC.
     return timezone.utc
+
+
+def _parse_sqlite_utc_timestamp(ts: Optional[str]) -> Optional[datetime]:
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    try:
+        dt = datetime.strptime(ts.strip(), "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _format_local(dt_utc: datetime, tz_name: Optional[str]) -> tuple[str, str]:
+    tz = _tzinfo_from_name(tz_name)
+    label = (str(tz_name or "Europe/Warsaw") or "").strip()
+    if label in ("Europe/Warsaw", "CET", "CEST"):
+        label = "CET/CEST"
+    return (dt_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M"), label)
 
 
 def _parse_hhmm(s: str) -> Optional[Tuple[int, int]]:
@@ -254,6 +285,8 @@ class RemindersCog(commands.Cog, name="Reminders"):
 
         now = _utc_now()
         trigger = now + timedelta(seconds=seconds)
+        tz_name = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, "timezone", "Europe/Warsaw")
+        local_str, tz_label = _format_local(trigger, str(tz_name or "Europe/Warsaw"))
         guild_id = ctx.guild.id if ctx.guild else 0
         channel_id = ctx.channel.id if ctx.channel else 0
         if ctx.guild is None:
@@ -272,7 +305,7 @@ class RemindersCog(commands.Cog, name="Reminders"):
         if not rid:
             await ctx.send("❌ Could not create that reminder.")
             return
-        await ctx.send(f"✅ Reminder **#{rid}** set for `{duration}` from now (at `{_sqlite_utc_timestamp(trigger)}` UTC).")
+        await ctx.send(f"✅ Reminder **#{rid}** set for `{duration}` from now (at `{local_str}` {tz_label}).")
 
     @commands.hybrid_command(name="remind_every", description="Set a repeating reminder (e.g. every 2h).")
     async def remind_every(self, ctx: commands.Context, interval: str, *, message: str):
@@ -286,6 +319,8 @@ class RemindersCog(commands.Cog, name="Reminders"):
 
         now = _utc_now()
         trigger = now + timedelta(seconds=seconds)
+        tz_name = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, "timezone", "Europe/Warsaw")
+        local_str, tz_label = _format_local(trigger, str(tz_name or "Europe/Warsaw"))
         guild_id = ctx.guild.id if ctx.guild else 0
         channel_id = ctx.channel.id if ctx.channel else 0
         if ctx.guild is None:
@@ -304,7 +339,7 @@ class RemindersCog(commands.Cog, name="Reminders"):
         if not rid:
             await ctx.send("❌ Could not create that repeating reminder.")
             return
-        await ctx.send(f"✅ Repeating reminder **#{rid}** set every `{interval}` (next at `{_sqlite_utc_timestamp(trigger)}` UTC).")
+        await ctx.send(f"✅ Repeating reminder **#{rid}** set every `{interval}` (next at `{local_str}` {tz_label}).")
 
     @commands.hybrid_command(name="remind_at", description="Set a reminder at a specific time (uses your saved timezone).")
     async def remind_at(self, ctx: commands.Context, when: str, *, message: str):
@@ -312,8 +347,8 @@ class RemindersCog(commands.Cog, name="Reminders"):
             await ctx.send("Database is not available right now. Please try again later.")
             return
 
-        tz_name = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, "timezone", "UTC")
-        tz = _tzinfo_from_name(str(tz_name or "UTC"))
+        tz_name = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, "timezone", "Europe/Warsaw")
+        tz = _tzinfo_from_name(str(tz_name or "Europe/Warsaw"))
 
         when_utc = _parse_when_to_utc(when, tz)
         if when_utc is None:
@@ -340,7 +375,8 @@ class RemindersCog(commands.Cog, name="Reminders"):
             return
 
         local_str = when_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M")
-        await ctx.send(f"✅ Reminder **#{rid}** set for `{local_str}` `{str(tz_name)}` (=`{_sqlite_utc_timestamp(when_utc)}` UTC).")
+        tz_label = "CET/CEST" if str(tz_name or "").strip() in ("Europe/Warsaw", "CET", "CEST") else str(tz_name)
+        await ctx.send(f"✅ Reminder **#{rid}** set for `{local_str}` {tz_label}.")
 
     @commands.hybrid_command(name="remind_list", description="List your active reminders.")
     async def remind_list(self, ctx: commands.Context):
@@ -353,17 +389,25 @@ class RemindersCog(commands.Cog, name="Reminders"):
             await ctx.send("You have no active reminders.")
             return
 
+        tz_name = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, "timezone", "Europe/Warsaw")
+        tz = _tzinfo_from_name(str(tz_name or "Europe/Warsaw"))
+        tz_label = "CET/CEST" if str(tz_name or "").strip() in ("Europe/Warsaw", "CET", "CEST") else str(tz_name)
+
         embed = discord.Embed(title="⏰ Your reminders", color=discord.Color.gold())
         lines = []
         for r in rows[:50]:
             rid = r.get("id")
             msg = (r.get("message") or "")[:80]
-            at = r.get("trigger_at") or "n/a"
+            at_utc_s = r.get("trigger_at") or ""
+            at_disp = "n/a"
+            dt_at = _parse_sqlite_utc_timestamp(at_utc_s)
+            if dt_at is not None:
+                at_disp = dt_at.astimezone(tz).strftime("%Y-%m-%d %H:%M")
             rep = r.get("repeat_interval_seconds")
             if rep:
-                lines.append(f"- **#{rid}** every **{int(rep)}s** next `{at}` UTC — {msg}")
+                lines.append(f"- **#{rid}** every **{int(rep)}s** next `{at_disp}` {tz_label} — {msg}")
             else:
-                lines.append(f"- **#{rid}** at `{at}` UTC — {msg}")
+                lines.append(f"- **#{rid}** at `{at_disp}` {tz_label} — {msg}")
         embed.description = "\n".join(lines)[:4000]
         await ctx.send(embed=embed)
 

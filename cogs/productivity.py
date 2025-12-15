@@ -31,6 +31,35 @@ def _sqlite_utc_timestamp(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _format_due_display(dt_utc: datetime, tz_name: Optional[str]) -> tuple[str, str]:
+    """
+    Formats a UTC datetime for user-facing display in the requested timezone.
+    Returns (local_str, tz_label).
+    """
+    if not isinstance(dt_utc, datetime):
+        # Defensive fallback; shouldn't happen.
+        dt_utc = _utc_now()
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    dt_utc = dt_utc.astimezone(timezone.utc)
+
+    tz = _tzinfo_from_name(tz_name)
+    local_dt = dt_utc.astimezone(tz)
+
+    name = (tz_name or "").strip()
+    if name.upper() in ("UTC", "ETC/UTC", "Z"):
+        tz_label = "UTC"
+    elif name == "Europe/Warsaw":
+        tz_label = "CET/CEST"
+    elif name:
+        tz_label = name
+    else:
+        # Default for habits: CET/CEST
+        tz_label = "CET/CEST"
+
+    return (local_dt.strftime("%Y-%m-%d %H:%M:%S"), tz_label)
+
+
 def _parse_sqlite_utc_timestamp(ts: Optional[str]) -> Optional[datetime]:
     if not isinstance(ts, str) or not ts.strip():
         return None
@@ -1055,7 +1084,11 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             ctx,
             (
                 f"✅ Updated habit **#{habit_id}**."
-                + (f" Next due: `{_sqlite_utc_timestamp(next_due)}` (UTC)." if schedule_changed else "")
+                + (
+                    (lambda local_str, tz_label: f" Next due: `{local_str}` {tz_label}.")(*_format_due_display(next_due, new_tz_name))
+                    if schedule_changed
+                    else ""
+                )
                 + (f" Reminders: `{str(remind_profile).strip().lower()}`." if profile_changed else "")
             ),
             ephemeral=not is_dm,
@@ -1092,14 +1125,29 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             next_due = h.get("next_due_at")
             last = h.get("last_checkin_at")
             rflag = "🔔" if remind_enabled else "🔕"
-            tz_label = str(tz_name or "UTC")
+            if str(tz_name or "").strip() in ("Europe/Warsaw", "CET"):
+                tz_label = "CET/CEST"
+            elif str(tz_name or "").strip().upper() in ("UTC", "ETC/UTC", "Z"):
+                tz_label = "UTC"
+            elif tz_name:
+                tz_label = str(tz_name)
+            else:
+                tz_label = "CET/CEST"
             scope_label = ""
             if is_dm and "guild_id" in h:
                 gid = str(h.get("guild_id") or "0")
                 scope_label = f" ({'DM' if gid == '0' else f'g:{gid}'})"
+
+            next_due_disp = next_due or "n/a"
+            if isinstance(next_due, str) and next_due.strip():
+                dt_utc = _parse_sqlite_utc_timestamp(next_due)
+                if dt_utc is not None:
+                    local_str, tz_disp = _format_due_display(dt_utc, str(tz_name or "UTC"))
+                    next_due_disp = f"{local_str} {tz_disp}"
+
             lines.append(
                 f"{rflag} **#{hid}**{scope_label} — **{name}** (due `{due_time}` `{tz_label}`, remind: `{remind_profile}`)\n"
-                f"• next due: `{next_due or 'n/a'}` | last check-in: `{last or 'n/a'}`"
+                f"• next due: `{next_due_disp}` | last check-in: `{last or 'n/a'}`"
             )
         embed.description = "\n".join(lines)[:4000]
         await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
@@ -1158,7 +1206,12 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         if not ok:
             await self.send_response(ctx, "Could not check in for that habit.", ephemeral=not is_dm)
             return
-        await self.send_response(ctx, f"✅ Check-in saved for **#{habit_id}**. Next due: `{_sqlite_utc_timestamp(next_due)}`.", ephemeral=not is_dm)
+        local_str, tz_label = _format_due_display(next_due, str(habit.get("tz_name") or "UTC"))
+        await self.send_response(
+            ctx,
+            f"✅ Check-in saved for **#{habit_id}**. Next due: `{local_str}` {tz_label}.",
+            ephemeral=not is_dm,
+        )
 
     @commands.hybrid_command(name="habit_stats", description="Show stats for a habit (streaks, completion rate, totals).")
     @discord.app_commands.describe(habit_id="The numeric id (from /habit_list).", days="How many past days to analyze (default: 30).")
@@ -1193,7 +1246,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         cur_streak = int(stats.get("current_streak") or 0)
         best_streak = int(stats.get("best_streak") or 0)
         total_checkins = int(stats.get("total_checkins") or 0)
-        last_checkin = stats.get("last_checkin_at_utc") or "n/a"
+        last_checkin_utc = stats.get("last_checkin_at_utc") or ""
         tz_name = str(stats.get("tz_name") or habit.get("tz_name") or "UTC")
         rstart = stats.get("range_start_local") or ""
         rend = stats.get("range_end_local") or ""
@@ -1211,7 +1264,13 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             value=f"- Current: **{cur_streak}**\n- Best (last ~10y max): **{best_streak}**",
             inline=False,
         )
-        embed.add_field(name="Totals", value=f"- Total check-ins: **{total_checkins}**\n- Last check-in (UTC): `{last_checkin}`", inline=False)
+        last_disp = "n/a"
+        if isinstance(last_checkin_utc, str) and last_checkin_utc.strip():
+            dt_last = _parse_sqlite_utc_timestamp(last_checkin_utc)
+            if dt_last is not None:
+                last_local, last_tz = _format_due_display(dt_last, tz_name)
+                last_disp = f"{last_local} {last_tz}"
+        embed.add_field(name="Totals", value=f"- Total check-ins: **{total_checkins}**\n- Last check-in: `{last_disp}`", inline=False)
         await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
 
     @commands.hybrid_command(name="habits_stats", description="Show overall stats across all your habits.")
@@ -1457,6 +1516,21 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
+        # Load habit (for timezone display)
+        guild_id = _scope_guild_id_from_ctx(ctx)
+        habit = None
+        if is_dm and hasattr(self.db_manager, "get_habit_any_scope"):
+            habit = await self.bot.loop.run_in_executor(None, self.db_manager.get_habit_any_scope, ctx.author.id, int(habit_id))
+            if habit and "guild_id" in habit:
+                try:
+                    guild_id = int(habit.get("guild_id") or 0)
+                except Exception:
+                    guild_id = 0
+        else:
+            habit = await self.bot.loop.run_in_executor(None, self.db_manager.get_habit, guild_id, ctx.author.id, int(habit_id))
+
+        tz_name = str((habit or {}).get("tz_name") or "Europe/Warsaw")
+
         now = _utc_now()
         now_s = _sqlite_utc_timestamp(now)
 
@@ -1471,7 +1545,6 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 1,
             )
         else:
-            guild_id = _scope_guild_id_from_ctx(ctx)
             res = await self.bot.loop.run_in_executor(
                 None,
                 self.db_manager.snooze_habit_for_day,
@@ -1487,9 +1560,15 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             if isinstance(res, dict) and res.get("error") == "cooldown":
                 next_allowed = res.get("next_allowed_at")
                 eff = res.get("effective_period") or str(period or "week")
+                next_allowed_disp = str(next_allowed or "n/a")
+                if isinstance(next_allowed, str) and next_allowed.strip():
+                    dt_na = _parse_sqlite_utc_timestamp(next_allowed)
+                    if dt_na is not None:
+                        local_na, tz_lbl = _format_due_display(dt_na, tz_name)
+                        next_allowed_disp = f"{local_na} {tz_lbl}"
                 await self.send_response(
                     ctx,
-                    f"⏳ You can only snooze this habit **once per {eff}**. Next snooze available at `{next_allowed}` (UTC).",
+                    f"⏳ You can only snooze this habit **once per {eff}**. Next snooze available at `{next_allowed_disp}`.",
                     ephemeral=not is_dm,
                 )
                 return
@@ -1497,9 +1576,15 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             return
 
         until_s = res.get("snoozed_until") or _sqlite_utc_timestamp(now + timedelta(days=1))
+        until_disp = str(until_s or "n/a")
+        if isinstance(until_s, str) and until_s.strip():
+            dt_until = _parse_sqlite_utc_timestamp(until_s)
+            if dt_until is not None:
+                local_until, tz_lbl = _format_due_display(dt_until, tz_name)
+                until_disp = f"{local_until} {tz_lbl}"
         await self.send_response(
             ctx,
-            f"😴 Snoozed habit **#{habit_id}**. Reminders will resume after `{until_s}` (UTC).",
+            f"😴 Snoozed habit **#{habit_id}**. Reminders will resume after `{until_disp}`.",
             ephemeral=not is_dm,
         )
 

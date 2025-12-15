@@ -61,12 +61,15 @@ def create_settings_embed(ctx, user_preferences, weather_schedules):
     )
 
     # Timezone (used by /remind_at)
-    tz_name = user_preferences.get("timezone", "UTC")
+    tz_name = user_preferences.get("timezone", "Europe/Warsaw")
+    tz_display = str(tz_name or "Europe/Warsaw")
+    if tz_display.strip() in ("Europe/Warsaw", "CET"):
+        tz_display = "CET/CEST"
     embed.add_field(
         name="🕒 Timezone",
         value=(
             f"Used for time-based reminders (e.g. `/remind_at 18:00`).\n"
-            f"Current: `{tz_name}`\n"
+            f"Current: `{tz_display}`\n"
             f"`{ctx.prefix}settings timezone <IANA TZ or UTC>` (e.g. `Europe/Warsaw`, `UTC`)"
         ),
         inline=False,
@@ -96,7 +99,7 @@ class SettingsCog(commands.Cog, name="Settings"):
             "dnd_start_time": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_start_time", "22:00"),
             "dnd_end_time": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_end_time", "07:00"),
             "weather_default_location": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "weather_default_location", "Not Set"),
-            "timezone": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "timezone", "UTC"),
+            "timezone": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "timezone", "Europe/Warsaw"),
         }
         weather_schedules = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_weather_schedules, user_id)
         
@@ -245,6 +248,10 @@ class SettingsCog(commands.Cog, name="Settings"):
                 await ctx.send("❌ Please provide a timezone, e.g. `UTC` or `Europe/Warsaw`.")
             return
 
+        # Normalize common aliases
+        if name.upper() in ("CET", "CEST"):
+            name = "Europe/Warsaw"
+
         # Validate if zoneinfo is available
         try:
             from zoneinfo import ZoneInfo  # type: ignore
@@ -261,7 +268,10 @@ class SettingsCog(commands.Cog, name="Settings"):
             name = "UTC"
 
         await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, ctx.author.id, "timezone", name)
-        await ctx.send(f"✅ Timezone set to `{name}`.")
+        if name == "Europe/Warsaw":
+            await ctx.send("✅ Timezone set to `CET/CEST`.")
+        else:
+            await ctx.send(f"✅ Timezone set to `{name}`.")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SettingsCog(bot, db_manager=bot.db_manager))
