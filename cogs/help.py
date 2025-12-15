@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 import re
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Optional, Sequence, List, Tuple
 
 class MyCustomHelpCommand(commands.HelpCommand):
     def __init__(self):
@@ -12,6 +12,65 @@ class MyCustomHelpCommand(commands.HelpCommand):
             }
         )
         self.color = discord.Color.blurple()  # Default embed color
+        self._max_field_value_len = 1024
+        self._max_fields = 25
+
+    def _chunk_lines(self, lines: List[str], max_len: int) -> List[str]:
+        """
+        Join lines into chunks, each <= max_len (Discord embed field limit is 1024).
+        """
+        chunks: List[str] = []
+        current: List[str] = []
+        current_len = 0
+
+        for line in lines:
+            # Worst-case safety: if a single line is too long, hard-truncate it.
+            if len(line) > max_len:
+                line = line[: max(0, max_len - 1)] + "…"
+
+            added_len = len(line) + (1 if current else 0)  # newline if not first in chunk
+            if current and current_len + added_len > max_len:
+                chunks.append("\n".join(current))
+                current = [line]
+                current_len = len(line)
+            else:
+                current.append(line)
+                current_len += added_len
+
+        if current:
+            chunks.append("\n".join(current))
+        return chunks
+
+    def _add_lines_as_fields(
+        self,
+        embed: discord.Embed,
+        base_name: str,
+        lines: List[str],
+        *,
+        inline: bool = False,
+    ) -> Tuple[bool, bool]:
+        """
+        Add a potentially long list of lines as one-or-more embed fields.
+
+        Returns (added_any, truncated_due_to_field_limit)
+        """
+        if not lines:
+            return False, False
+
+        chunks = self._chunk_lines(lines, self._max_field_value_len)
+        truncated = False
+        added_any = False
+
+        total = len(chunks)
+        for idx, value in enumerate(chunks, start=1):
+            if len(embed.fields) >= self._max_fields:
+                truncated = True
+                break
+            name = base_name if total == 1 else f"{base_name} ({idx}/{total})"
+            embed.add_field(name=name[:256], value=value, inline=inline)
+            added_any = True
+
+        return added_any, truncated
 
     def _iter_app_commands(self) -> Iterable[discord.app_commands.Command]:
         """
@@ -76,13 +135,13 @@ class MyCustomHelpCommand(commands.HelpCommand):
 
         params = getattr(app_cmd, "parameters", []) or []
         if params:
-            param_lines = []
+            param_lines: List[str] = []
             for p in params:
                 p_name = getattr(p, "name", "param")
                 p_desc = getattr(p, "description", None) or "No description."
                 p_req = "Required" if bool(getattr(p, "required", False)) else "Optional"
                 param_lines.append(f"**`{p_name}`** ({p_req}): {p_desc}")
-            embed.add_field(name="Parameters", value="\n".join(param_lines), inline=False)
+            self._add_lines_as_fields(embed, "Parameters", param_lines, inline=False)
 
         binding = getattr(app_cmd, "binding", None)
         if binding and hasattr(binding, "qualified_name"):
@@ -119,6 +178,7 @@ class MyCustomHelpCommand(commands.HelpCommand):
         embed.description = "\n".join(description_parts)
 
         listed_command_names = set() # To avoid listing hybrid commands twice
+        truncated_any = False
 
         for cog, commands_in_cog in mapping.items():
             filtered_commands = await self.filter_commands(commands_in_cog, sort=True)
@@ -126,7 +186,7 @@ class MyCustomHelpCommand(commands.HelpCommand):
                 continue
 
             cog_name = cog.qualified_name if cog else "General Commands"
-            command_list_text = []
+            command_list_text: List[str] = []
             for command in filtered_commands:
                 if isinstance(command, commands.HybridCommand):
                     listed_command_names.add(command.name)
@@ -141,11 +201,12 @@ class MyCustomHelpCommand(commands.HelpCommand):
                 command_list_text.append(entry)
             
             if command_list_text:
-                embed.add_field(name=cog_name, value="\n".join(command_list_text), inline=False)
+                _, truncated = self._add_lines_as_fields(embed, cog_name, command_list_text, inline=False)
+                truncated_any = truncated_any or truncated
 
         # List pure slash commands (those not already listed as hybrid)
         app_commands = self.context.bot.tree.get_commands()
-        pure_app_command_list_text = []
+        pure_app_command_list_text: List[str] = []
         if app_commands:
             for app_cmd in app_commands:
                 if app_cmd.name not in listed_command_names and isinstance(app_cmd, discord.app_commands.Command):
@@ -153,10 +214,13 @@ class MyCustomHelpCommand(commands.HelpCommand):
                     pure_app_command_list_text.append(f"`/{app_cmd.name}` - {desc.splitlines()[0]}")
             
             if pure_app_command_list_text:
-                 embed.add_field(name="Application Commands (Slash-Only)", value="\n".join(pure_app_command_list_text), inline=False)
+                 _, truncated = self._add_lines_as_fields(embed, "Application Commands (Slash-Only)", pure_app_command_list_text, inline=False)
+                 truncated_any = truncated_any or truncated
 
         if not embed.fields:
             embed.description = "No callable commands found."
+        elif truncated_any:
+            embed.set_footer(text=f"List truncated due to Discord embed limits. Use `{ctx.prefix}help <CategoryName>` for the full list.")
         
         await self.get_destination().send(embed=embed)
 
@@ -196,7 +260,7 @@ class MyCustomHelpCommand(commands.HelpCommand):
             embed.description = cog.description
 
         filtered_commands = await self.filter_commands(cog.get_commands(), sort=True)
-        command_list_text = []
+        command_list_text: List[str] = []
         if filtered_commands:
             for command in filtered_commands:
                 desc = command.description or command.short_doc or ""
@@ -207,7 +271,7 @@ class MyCustomHelpCommand(commands.HelpCommand):
                 command_list_text.append(entry)
 
         # Slash-only commands bound to this cog (defined with @app_commands.command inside the cog)
-        slash_only_lines = []
+        slash_only_lines: List[str] = []
         for app_cmd in self._iter_app_commands():
             if not isinstance(app_cmd, discord.app_commands.Command):
                 continue
@@ -215,14 +279,19 @@ class MyCustomHelpCommand(commands.HelpCommand):
                 desc = getattr(app_cmd, "description", None) or "No description."
                 slash_only_lines.append(f"`/{getattr(app_cmd, 'qualified_name', app_cmd.name)}` - {desc.splitlines()[0]}")
 
+        truncated_any = False
         if command_list_text:
-            embed.add_field(name="Commands", value="\n".join(command_list_text), inline=False)
+            _, truncated = self._add_lines_as_fields(embed, "Commands", command_list_text, inline=False)
+            truncated_any = truncated_any or truncated
         if slash_only_lines:
-            embed.add_field(name="Slash Commands", value="\n".join(slash_only_lines), inline=False)
+            _, truncated = self._add_lines_as_fields(embed, "Slash Commands", slash_only_lines, inline=False)
+            truncated_any = truncated_any or truncated
 
         if not command_list_text and not slash_only_lines:
             final_desc = (embed.description + "\n" if embed.description else "") + "No commands in this category."
             embed.description = final_desc
+        elif truncated_any:
+            embed.set_footer(text=f"List truncated due to Discord embed limits. Use `{ctx.prefix}help <command>` for details.")
         await self.get_destination().send(embed=embed)
 
     async def send_group_help(self, group):
@@ -239,7 +308,7 @@ class MyCustomHelpCommand(commands.HelpCommand):
 
         subcommands = await self.filter_commands(group.commands, sort=True)
         if subcommands:
-            sub_list_text = []
+            sub_list_text: List[str] = []
             for cmd in subcommands:
                 desc = cmd.description or cmd.short_doc or ""
                 desc_line = desc.splitlines()[0] if desc else ""
@@ -247,7 +316,9 @@ class MyCustomHelpCommand(commands.HelpCommand):
                 if desc_line:
                     entry += f" - {desc_line}"
                 sub_list_text.append(entry)
-            embed.add_field(name="Subcommands", value="\n".join(sub_list_text), inline=False)
+            added, truncated = self._add_lines_as_fields(embed, "Subcommands", sub_list_text, inline=False)
+            if added and truncated:
+                embed.set_footer(text=f"List truncated due to Discord embed limits. Use `{ctx.prefix}help {group.qualified_name} <subcommand>`.")
         
         if group.cog_name:
             embed.set_footer(text=f"Category: {group.cog_name}")
