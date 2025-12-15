@@ -30,6 +30,17 @@ def _sqlite_utc_timestamp(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _parse_sqlite_utc_timestamp(ts: Optional[str]) -> Optional[datetime]:
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    s = ts.strip()
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+        return dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
 def _parse_hhmm_utc(s: str) -> Optional[dtime]:
     if not isinstance(s, str):
         return None
@@ -235,12 +246,23 @@ def _next_due_datetime_utc(now: datetime, days_of_week: List[int], due_hhmm_utc:
     return now + timedelta(days=1)
 
 
-def _escalation_interval_minutes(level: int) -> int:
+def _escalation_interval_minutes(level: int, profile: str = "normal") -> int:
     """
     Increasing frequency as level grows.
     level starts at 0.
     """
-    schedule = [240, 120, 60, 30, 15]  # 4h, 2h, 1h, 30m, 15m
+    p = str(profile or "normal").strip().lower()
+    schedules = {
+        # Less annoying: starts at 12h, then every 6h
+        "gentle": [720, 360, 360, 360, 360],
+        # Current behavior (backwards compatible default)
+        "normal": [240, 120, 60, 30, 15],
+        # More annoying: ramps quickly to frequent nudges
+        "aggressive": [60, 30, 15, 10, 5],
+        # Very low frequency: once per day while overdue
+        "quiet": [1440, 1440, 1440, 1440, 1440],
+    }
+    schedule = schedules.get(p) or schedules["normal"]
     idx = max(0, min(len(schedule) - 1, int(level)))
     return schedule[idx]
 
@@ -555,12 +577,13 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             tz_name = h.get("tz_name")
             due_time = h.get("due_time_local") or h.get("due_time_utc") or "18:00"
             remind_enabled = bool(h.get("remind_enabled"))
+            remind_profile = str(h.get("remind_profile") or "normal").strip().lower()
             next_due = h.get("next_due_at")
             last = h.get("last_checkin_at")
             rflag = "🔔" if remind_enabled else "🔕"
             tz_label = "UTC" if str(tz_name or "").upper() == "UTC" else "CET/CEST"
             lines.append(
-                f"{rflag} **#{hid}** — **{name}** (due `{due_time}` {tz_label})\n"
+                f"{rflag} **#{hid}** — **{name}** (due `{due_time}` {tz_label}, remind: `{remind_profile}`)\n"
                 f"• next due: `{next_due or 'n/a'}` | last check-in: `{last or 'n/a'}`"
             )
         embed.description = "\n".join(lines)[:4000]
@@ -661,6 +684,101 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             return
         await self.send_response(ctx, ("🔔 Reminders enabled." if enabled else "🔕 Reminders disabled."), ephemeral=not is_dm)
 
+    @commands.hybrid_command(
+        name="habit_remind_profile",
+        description="Set how often I remind you for a habit (less/more annoying).",
+    )
+    @discord.app_commands.describe(
+        habit_id="The numeric id (from /habit_list).",
+        profile="gentle | normal | aggressive | quiet",
+    )
+    async def habit_remind_profile(self, ctx: commands.Context, habit_id: int, profile: str = "normal"):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        if is_dm and hasattr(self.db_manager, "set_habit_reminder_profile_any_scope"):
+            ok = await self.bot.loop.run_in_executor(
+                None, self.db_manager.set_habit_reminder_profile_any_scope, ctx.author.id, int(habit_id), profile
+            )
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            ok = await self.bot.loop.run_in_executor(
+                None, self.db_manager.set_habit_reminder_profile, guild_id, ctx.author.id, int(habit_id), profile
+            )
+
+        if not ok:
+            await self.send_response(ctx, "Could not update that habit (or it’s not yours).", ephemeral=not is_dm)
+            return
+
+        p = str(profile or "normal").strip().lower()
+        if p not in {"gentle", "normal", "aggressive", "quiet"}:
+            p = "normal"
+        await self.send_response(ctx, f"✅ Reminder frequency set to **{p}** for habit **#{habit_id}**.", ephemeral=not is_dm)
+
+    @commands.hybrid_command(
+        name="habit_snooze",
+        description="Snooze a habit for 1 day (can be limited to once per week or month).",
+    )
+    @discord.app_commands.describe(
+        habit_id="The numeric id (from /habit_list).",
+        period="Cooldown: week | month (default: week)",
+    )
+    async def habit_snooze(self, ctx: commands.Context, habit_id: int, period: str = "week"):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        now = _utc_now()
+        now_s = _sqlite_utc_timestamp(now)
+
+        if is_dm and hasattr(self.db_manager, "snooze_habit_for_day_any_scope"):
+            res = await self.bot.loop.run_in_executor(
+                None,
+                self.db_manager.snooze_habit_for_day_any_scope,
+                ctx.author.id,
+                int(habit_id),
+                now_s,
+                period,
+                1,
+            )
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            res = await self.bot.loop.run_in_executor(
+                None,
+                self.db_manager.snooze_habit_for_day,
+                guild_id,
+                ctx.author.id,
+                int(habit_id),
+                now_s,
+                period,
+                1,
+            )
+
+        if not isinstance(res, dict) or not res.get("ok"):
+            if isinstance(res, dict) and res.get("error") == "cooldown":
+                next_allowed = res.get("next_allowed_at")
+                eff = res.get("effective_period") or str(period or "week")
+                await self.send_response(
+                    ctx,
+                    f"⏳ You can only snooze this habit **once per {eff}**. Next snooze available at `{next_allowed}` (UTC).",
+                    ephemeral=not is_dm,
+                )
+                return
+            await self.send_response(ctx, "Could not snooze that habit (or it’s not yours).", ephemeral=not is_dm)
+            return
+
+        until_s = res.get("snoozed_until") or _sqlite_utc_timestamp(now + timedelta(days=1))
+        await self.send_response(
+            ctx,
+            f"😴 Snoozed habit **#{habit_id}**. Reminders will resume after `{until_s}` (UTC).",
+            ephemeral=not is_dm,
+        )
+
     # -------------------------
     # Reminder loop (DM)
     # -------------------------
@@ -682,6 +800,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
                 hid = h.get("id")
                 name = h.get("name") or "Habit"
+                profile = h.get("remind_profile") or "normal"
                 level = int(h.get("remind_level") or 0)
 
                 sent = await self._dm_user(
@@ -703,7 +822,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                     )
                     continue
 
-                next_minutes = _escalation_interval_minutes(level + 1)
+                next_minutes = _escalation_interval_minutes(level + 1, profile)
                 next_rem = _sqlite_utc_timestamp(now + timedelta(minutes=next_minutes))
                 await self.bot.loop.run_in_executor(
                     None,
@@ -747,7 +866,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                     )
                     continue
 
-                next_minutes = _escalation_interval_minutes(level + 1)
+                next_minutes = _escalation_interval_minutes(level + 1, "normal")
                 next_rem = _sqlite_utc_timestamp(now + timedelta(minutes=next_minutes))
                 await self.bot.loop.run_in_executor(
                     None,
@@ -769,5 +888,6 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 async def setup(bot: commands.Bot):
     await bot.add_cog(ProductivityCog(bot, db_manager=getattr(bot, "db_manager", None)))
     logger.info("ProductivityCog has been loaded.")
+
 
 

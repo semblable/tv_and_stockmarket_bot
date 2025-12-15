@@ -466,6 +466,10 @@ class DataManagerCore:
             tz_name TEXT NOT NULL DEFAULT 'Europe/Warsaw', -- IANA tz (CET/CEST), e.g. Europe/Warsaw
             due_time_utc TEXT NOT NULL DEFAULT '18:00', -- legacy: previously interpreted as UTC
             remind_enabled INTEGER NOT NULL DEFAULT 1 CHECK (remind_enabled IN (0,1)),
+            remind_profile TEXT NOT NULL DEFAULT 'normal', -- gentle|normal|aggressive|quiet
+            snoozed_until TIMESTAMP, -- when set, reminders/due are suppressed until this UTC timestamp
+            last_snooze_at TIMESTAMP, -- UTC timestamp of last snooze action
+            last_snooze_period TEXT NOT NULL DEFAULT 'week', -- 'week' or 'month'
             remind_level INTEGER NOT NULL DEFAULT 0,
             next_due_at TIMESTAMP, -- computed UTC timestamp for next due occurrence
             next_remind_at TIMESTAMP,
@@ -490,6 +494,25 @@ class DataManagerCore:
                     # Preserve legacy semantics: old habits were interpreted as UTC.
                     self._execute_query("UPDATE habits SET tz_name = 'UTC' WHERE tz_name IS NULL;", commit=True)
                     logger.info("Column 'tz_name' added successfully to habits.")
+                if "remind_profile" not in col_names:
+                    # Safe: SQLite will backfill existing rows with DEFAULT on ADD COLUMN.
+                    self._execute_query(
+                        "ALTER TABLE habits ADD COLUMN remind_profile TEXT NOT NULL DEFAULT 'normal';",
+                        commit=True,
+                    )
+                    logger.info("Column 'remind_profile' added successfully to habits.")
+                if "snoozed_until" not in col_names:
+                    self._execute_query("ALTER TABLE habits ADD COLUMN snoozed_until TIMESTAMP;", commit=True)
+                    logger.info("Column 'snoozed_until' added successfully to habits.")
+                if "last_snooze_at" not in col_names:
+                    self._execute_query("ALTER TABLE habits ADD COLUMN last_snooze_at TIMESTAMP;", commit=True)
+                    logger.info("Column 'last_snooze_at' added successfully to habits.")
+                if "last_snooze_period" not in col_names:
+                    self._execute_query(
+                        "ALTER TABLE habits ADD COLUMN last_snooze_period TEXT NOT NULL DEFAULT 'week';",
+                        commit=True,
+                    )
+                    logger.info("Column 'last_snooze_period' added successfully to habits.")
         except Exception as e:
             logger.warning(f"Could not apply habits schema migration (due_time_local/tz_name): {e}")
         try:

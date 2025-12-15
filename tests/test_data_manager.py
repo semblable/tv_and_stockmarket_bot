@@ -106,3 +106,178 @@ def test_book_author_subscriptions(db_manager):
     assert ok is True
     subs2 = db_manager.get_user_book_author_subscriptions(guild_id, user_id)
     assert len(subs2) == 0
+
+
+def test_habit_reminder_profile_default_and_set(db_manager):
+    guild_id = 0
+    user_id = 123
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Test habit",
+        [0, 1, 2, 3, 4],
+        "18:00",
+        "Europe/Warsaw",
+        True,
+        "2000-01-01 00:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    h = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h is not None
+    assert (h.get("remind_profile") or "normal") == "normal"
+
+    ok = db_manager.set_habit_reminder_profile(guild_id, user_id, habit_id, "aggressive")
+    assert ok is True
+    h2 = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h2 is not None
+    assert (h2.get("remind_profile") or "").lower() == "aggressive"
+
+    due = db_manager.list_due_habit_reminders("2100-01-01 00:00:00", 50)
+    # Our habit is due (next_due_at is ancient), so it should show up and include profile.
+    assert any((r.get("id") == habit_id and (r.get("remind_profile") or "").lower() == "aggressive") for r in due)
+
+
+def test_habit_reminder_profile_migration_from_old_schema(tmp_path, monkeypatch):
+    """
+    Create an older `habits` table without `remind_profile`, then ensure DataManagerCore migrates it.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "old_schema.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE habits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                days_of_week TEXT NOT NULL,
+                due_time_local TEXT,
+                tz_name TEXT,
+                due_time_utc TEXT NOT NULL DEFAULT '18:00',
+                remind_enabled INTEGER NOT NULL DEFAULT 1,
+                remind_level INTEGER NOT NULL DEFAULT 0,
+                next_due_at TIMESTAMP,
+                next_remind_at TIMESTAMP,
+                last_checkin_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO habits (guild_id, user_id, name, days_of_week, due_time_utc, remind_enabled, remind_level, next_due_at)
+            VALUES ('0', '999', 'Old habit', '[0,1,2,3,4]', '18:00', 1, 0, '2000-01-01 00:00:00')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr("data_manager.SQLITE_DB_PATH", str(db_path))
+    mgr = DataManager()
+    try:
+        cols = mgr._execute_query("PRAGMA table_info(habits);", fetch_all=True)
+        col_names = [c.get("name") for c in cols if isinstance(c, dict)]
+        assert "remind_profile" in col_names
+
+        row = mgr._execute_query("SELECT remind_profile FROM habits WHERE user_id = '999' AND id = 1;", fetch_one=True)
+        assert row is not None
+        assert (row.get("remind_profile") or "").lower() == "normal"
+    finally:
+        mgr.close()
+
+
+def test_habit_snooze_excludes_from_due_list(db_manager):
+    guild_id = 0
+    user_id = 321
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Snooze me",
+        [0, 1, 2, 3, 4],
+        "18:00",
+        "Europe/Warsaw",
+        True,
+        "2000-01-01 00:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    # Sanity: it's due far in the future 'now'
+    due0 = db_manager.list_due_habit_reminders("2100-01-01 00:00:00", 50)
+    assert any(r.get("id") == habit_id for r in due0)
+
+    # Snooze for "today" at 2099-12-31 noon UTC. This should suppress reminders until the next
+    # local midnight in the habit tz (Europe/Warsaw), returned as snoozed_until (UTC).
+    res = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2099-12-31 12:00:00", "week", 1)
+    assert res.get("ok") is True
+    until_s = res.get("snoozed_until")
+    assert isinstance(until_s, str) and len(until_s) >= 19
+
+    # Before snooze expires => not due for reminders
+    due1 = db_manager.list_due_habit_reminders("2099-12-31 22:00:00", 50)
+    assert not any(r.get("id") == habit_id for r in due1)
+
+    # At/after snooze expires, it should be due again (it's still overdue).
+    due2 = db_manager.list_due_habit_reminders(until_s, 50)
+    assert any(r.get("id") == habit_id for r in due2)
+
+
+def test_habit_snooze_migration_from_old_schema(tmp_path, monkeypatch):
+    """
+    Create an older `habits` table without snooze columns, then ensure DataManagerCore migrates it.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "old_schema_snooze.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            """
+            CREATE TABLE habits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                days_of_week TEXT NOT NULL,
+                due_time_local TEXT,
+                tz_name TEXT,
+                due_time_utc TEXT NOT NULL DEFAULT '18:00',
+                remind_enabled INTEGER NOT NULL DEFAULT 1,
+                remind_profile TEXT NOT NULL DEFAULT 'normal',
+                remind_level INTEGER NOT NULL DEFAULT 0,
+                next_due_at TIMESTAMP,
+                next_remind_at TIMESTAMP,
+                last_checkin_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO habits (guild_id, user_id, name, days_of_week, due_time_utc, remind_enabled, remind_level, next_due_at)
+            VALUES ('0', '777', 'Old habit 2', '[0,1,2,3,4]', '18:00', 1, 0, '2000-01-01 00:00:00')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr("data_manager.SQLITE_DB_PATH", str(db_path))
+    mgr = DataManager()
+    try:
+        cols = mgr._execute_query("PRAGMA table_info(habits);", fetch_all=True)
+        col_names = [c.get("name") for c in cols if isinstance(c, dict)]
+        assert "snoozed_until" in col_names
+        assert "last_snooze_at" in col_names
+        assert "last_snooze_period" in col_names
+
+        # Default for new column should exist (week)
+        row = mgr._execute_query("SELECT last_snooze_period FROM habits WHERE user_id = '777' AND id = 1;", fetch_one=True)
+        assert row is not None
+        assert (row.get("last_snooze_period") or "").lower() == "week"
+    finally:
+        mgr.close()

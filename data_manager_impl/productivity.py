@@ -1,12 +1,72 @@
 import sqlite3
 import logging
 import datetime
+import json
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+try:
+    # Python 3.9+ (may require tzdata package on some platforms)
+    from zoneinfo import ZoneInfo  # type: ignore
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
+
 
 class ProductivityMixin:
+    _HABIT_REMIND_PROFILES = {"gentle", "normal", "aggressive", "quiet"}
+    _HABIT_SNOOZE_PERIODS = {"week", "month"}
+
+    def _normalize_habit_remind_profile(self, profile: Optional[str]) -> str:
+        p = str(profile or "").strip().lower()
+        if not p:
+            return "normal"
+        aliases = {
+            "low": "gentle",
+            "soft": "gentle",
+            "medium": "normal",
+            "default": "normal",
+            "high": "aggressive",
+            "hard": "aggressive",
+            "silent": "quiet",
+            "daily": "quiet",
+        }
+        p = aliases.get(p, p)
+        return p if p in self._HABIT_REMIND_PROFILES else "normal"
+
+    def _normalize_habit_snooze_period(self, period: Optional[str]) -> str:
+        p = str(period or "").strip().lower()
+        aliases = {"weekly": "week", "w": "week", "monthly": "month", "m": "month"}
+        p = aliases.get(p, p)
+        return p if p in self._HABIT_SNOOZE_PERIODS else "week"
+
+    def _parse_sqlite_utc_timestamp(self, ts: Optional[str]) -> Optional[datetime.datetime]:
+        if not isinstance(ts, str) or not ts.strip():
+            return None
+        s = ts.strip()
+        try:
+            # "YYYY-MM-DD HH:MM:SS" (SQLite CURRENT_TIMESTAMP in UTC)
+            dt = datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+            return dt.replace(tzinfo=datetime.timezone.utc)
+        except Exception:
+            return None
+
+    def _tzinfo_from_name(self, tz_name: Optional[str]) -> datetime.tzinfo:
+        name = (tz_name or "").strip()
+        if not name or name.upper() in ("UTC", "ETC/UTC", "Z"):
+            return datetime.timezone.utc
+
+        if ZoneInfo is not None:
+            try:
+                return ZoneInfo(name)
+            except Exception:
+                pass
+
+        # Fallback: best-effort fixed offset for the only common case in this bot.
+        if name == "Europe/Warsaw":
+            return datetime.timezone(datetime.timedelta(hours=1), name="CET")
+        return datetime.timezone.utc
+
     def create_todo_item(self, guild_id: int, user_id: int, content: str) -> Optional[int]:
         if not content or not str(content).strip():
             return None
@@ -366,7 +426,10 @@ class ProductivityMixin:
     def list_habits(self, guild_id: int, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
         limit = max(1, min(200, int(limit)))
         query = """
-        SELECT id, name, days_of_week, due_time_local, tz_name, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+        SELECT id, name, days_of_week, due_time_local, tz_name, due_time_utc,
+               remind_enabled, remind_profile,
+               snoozed_until, last_snooze_at, last_snooze_period,
+               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
         FROM habits
         WHERE guild_id = :guild_id AND user_id = :user_id
         ORDER BY id DESC
@@ -377,7 +440,10 @@ class ProductivityMixin:
 
     def get_habit(self, guild_id: int, user_id: int, habit_id: int) -> Optional[Dict[str, Any]]:
         query = """
-        SELECT id, name, days_of_week, due_time_local, tz_name, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+        SELECT id, name, days_of_week, due_time_local, tz_name, due_time_utc,
+               remind_enabled, remind_profile,
+               snoozed_until, last_snooze_at, last_snooze_period,
+               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
         FROM habits
         WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
         """
@@ -390,7 +456,10 @@ class ProductivityMixin:
         Useful for DM flows where the habit was created in a server.
         """
         query = """
-        SELECT id, guild_id, name, days_of_week, due_time_local, tz_name, due_time_utc, remind_enabled, remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+        SELECT id, guild_id, name, days_of_week, due_time_local, tz_name, due_time_utc,
+               remind_enabled, remind_profile,
+               snoozed_until, last_snooze_at, last_snooze_period,
+               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
         FROM habits
         WHERE user_id = :user_id AND id = :id
         """
@@ -584,6 +653,7 @@ class ProductivityMixin:
                     SET last_checkin_at = CURRENT_TIMESTAMP,
                         remind_level = 0,
                         next_remind_at = NULL,
+                        snoozed_until = NULL,
                         next_due_at = :next_due_at
                     WHERE guild_id = :guild_id AND user_id = :user_id AND id = :habit_id
                     """,
@@ -615,17 +685,201 @@ class ProductivityMixin:
         limit = max(1, min(500, int(limit)))
         now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         query = """
-        SELECT id, guild_id, user_id, name, remind_level, next_due_at, next_remind_at
+        SELECT id, guild_id, user_id, name, remind_profile, snoozed_until, last_snooze_at, last_snooze_period,
+               remind_level, next_due_at, next_remind_at
         FROM habits
         WHERE remind_enabled = 1
           AND next_due_at IS NOT NULL
           AND next_due_at <= :now
+          AND (snoozed_until IS NULL OR snoozed_until <= :now)
           AND (next_remind_at IS NULL OR next_remind_at <= :now)
         ORDER BY COALESCE(next_remind_at, next_due_at) ASC
         LIMIT :limit
         """
         rows = self._execute_query(query, {"now": now_utc, "limit": limit}, fetch_all=True)
         return rows if isinstance(rows, list) else []
+
+    def snooze_habit_for_day(
+        self,
+        guild_id: int,
+        user_id: int,
+        habit_id: int,
+        now_utc: Optional[str] = None,
+        period: str = "week",
+        days: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Snooze a habit for the rest of today (and optionally N days) in the habit's timezone.
+        Snooze will NOT extend past the habit's upcoming `next_due_at` (if it is in the future).
+        Enforces: once per week or once per calendar month (per habit).
+
+        Returns: { ok: bool, error?: str, snoozed_until?: str, next_allowed_at?: str, effective_period?: str }
+        """
+        period_n = self._normalize_habit_snooze_period(period)
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if now_utc else datetime.datetime.now(datetime.timezone.utc)
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        days = max(1, min(30, int(days)))
+        now_s = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        habit = self.get_habit(guild_id, user_id, habit_id)
+        if not habit:
+            return {"ok": False, "error": "not_found", "effective_period": period_n}
+
+        tz = self._tzinfo_from_name(habit.get("tz_name"))
+        now_local = now_dt.astimezone(tz)
+        target_date = now_local.date() + datetime.timedelta(days=days)
+        snoozed_until_local = datetime.datetime.combine(target_date, datetime.time(0, 0), tzinfo=tz)
+        snoozed_until_dt = snoozed_until_local.astimezone(datetime.timezone.utc)
+
+        # Don't snooze beyond the next upcoming due time (if not due yet).
+        next_due_dt = self._parse_sqlite_utc_timestamp(habit.get("next_due_at"))
+        if next_due_dt and next_due_dt > now_dt and next_due_dt < snoozed_until_dt:
+            snoozed_until_dt = next_due_dt
+
+        snoozed_until = snoozed_until_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        last_ts = self._parse_sqlite_utc_timestamp(habit.get("last_snooze_at"))
+        if last_ts:
+            if period_n == "week":
+                next_allowed = last_ts + datetime.timedelta(days=7)
+                if now_dt < next_allowed:
+                    return {
+                        "ok": False,
+                        "error": "cooldown",
+                        "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
+                        "effective_period": period_n,
+                    }
+            else:
+                # month = once per calendar month (UTC)
+                if last_ts.year == now_dt.year and last_ts.month == now_dt.month:
+                    # next allowed at start of next month (UTC)
+                    if now_dt.month == 12:
+                        next_allowed = datetime.datetime(now_dt.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
+                    else:
+                        next_allowed = datetime.datetime(now_dt.year, now_dt.month + 1, 1, tzinfo=datetime.timezone.utc)
+                    return {
+                        "ok": False,
+                        "error": "cooldown",
+                        "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
+                        "effective_period": period_n,
+                    }
+
+        query = """
+        UPDATE habits
+        SET snoozed_until = :snoozed_until,
+            last_snooze_at = :now,
+            last_snooze_period = :period,
+            remind_level = 0,
+            next_remind_at = :snoozed_until
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
+        """
+        params = {
+            "snoozed_until": snoozed_until,
+            "now": now_s,
+            "period": period_n,
+            "guild_id": str(int(guild_id)),
+            "user_id": str(int(user_id)),
+            "id": int(habit_id),
+        }
+        ok = bool(self._execute_query(query, params, commit=True))
+        return {"ok": ok, "snoozed_until": snoozed_until, "effective_period": period_n}
+
+    def snooze_habit_for_day_any_scope(
+        self,
+        user_id: int,
+        habit_id: int,
+        now_utc: Optional[str] = None,
+        period: str = "week",
+        days: int = 1,
+    ) -> Dict[str, Any]:
+        period_n = self._normalize_habit_snooze_period(period)
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if now_utc else datetime.datetime.now(datetime.timezone.utc)
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        days = max(1, min(30, int(days)))
+        now_s = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        habit = self.get_habit_any_scope(user_id, habit_id)
+        if not habit:
+            return {"ok": False, "error": "not_found", "effective_period": period_n}
+
+        tz = self._tzinfo_from_name(habit.get("tz_name"))
+        now_local = now_dt.astimezone(tz)
+        target_date = now_local.date() + datetime.timedelta(days=days)
+        snoozed_until_local = datetime.datetime.combine(target_date, datetime.time(0, 0), tzinfo=tz)
+        snoozed_until_dt = snoozed_until_local.astimezone(datetime.timezone.utc)
+
+        # Don't snooze beyond the next upcoming due time (if not due yet).
+        next_due_dt = self._parse_sqlite_utc_timestamp(habit.get("next_due_at"))
+        if next_due_dt and next_due_dt > now_dt and next_due_dt < snoozed_until_dt:
+            snoozed_until_dt = next_due_dt
+
+        snoozed_until = snoozed_until_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        last_ts = self._parse_sqlite_utc_timestamp(habit.get("last_snooze_at"))
+        if last_ts:
+            if period_n == "week":
+                next_allowed = last_ts + datetime.timedelta(days=7)
+                if now_dt < next_allowed:
+                    return {
+                        "ok": False,
+                        "error": "cooldown",
+                        "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
+                        "effective_period": period_n,
+                    }
+            else:
+                if last_ts.year == now_dt.year and last_ts.month == now_dt.month:
+                    if now_dt.month == 12:
+                        next_allowed = datetime.datetime(now_dt.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
+                    else:
+                        next_allowed = datetime.datetime(now_dt.year, now_dt.month + 1, 1, tzinfo=datetime.timezone.utc)
+                    return {
+                        "ok": False,
+                        "error": "cooldown",
+                        "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
+                        "effective_period": period_n,
+                    }
+
+        query = """
+        UPDATE habits
+        SET snoozed_until = :snoozed_until,
+            last_snooze_at = :now,
+            last_snooze_period = :period,
+            remind_level = 0,
+            next_remind_at = :snoozed_until
+        WHERE user_id = :user_id AND id = :id
+        """
+        params = {"snoozed_until": snoozed_until, "now": now_s, "period": period_n, "user_id": str(int(user_id)), "id": int(habit_id)}
+        ok = bool(self._execute_query(query, params, commit=True))
+        return {"ok": ok, "snoozed_until": snoozed_until, "effective_period": period_n}
+
+    def set_habit_reminder_profile(self, guild_id: int, user_id: int, habit_id: int, profile: str) -> bool:
+        """
+        Sets how often reminders are sent for a habit.
+        Allowed profiles: gentle|normal|aggressive|quiet
+        """
+        p = self._normalize_habit_remind_profile(profile)
+        query = """
+        UPDATE habits
+        SET remind_profile = :profile
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
+        """
+        params = {"profile": p, "guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "id": int(habit_id)}
+        return bool(self._execute_query(query, params, commit=True))
+
+    def set_habit_reminder_profile_any_scope(self, user_id: int, habit_id: int, profile: str) -> bool:
+        """
+        Sets reminder profile by (user_id, id) regardless of guild scope.
+        """
+        p = self._normalize_habit_remind_profile(profile)
+        query = """
+        UPDATE habits
+        SET remind_profile = :profile
+        WHERE user_id = :user_id AND id = :id
+        """
+        params = {"profile": p, "user_id": str(int(user_id)), "id": int(habit_id)}
+        return bool(self._execute_query(query, params, commit=True))
 
     def bump_habit_reminder(self, guild_id: int, user_id: int, habit_id: int, remind_level: int, next_remind_at_utc: str) -> bool:
         query = """
