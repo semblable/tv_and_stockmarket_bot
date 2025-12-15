@@ -1,6 +1,7 @@
 import logging
 import re
 from datetime import datetime, timedelta, timezone, time as dtime
+from functools import partial
 from typing import Optional, Tuple
 
 import discord
@@ -220,15 +221,17 @@ class RemindersCog(commands.Cog, name="Reminders"):
                 sent = await self._send_reminder(user_id=uid, guild_id=gid, channel_id=cid, message=msg)
                 if not sent:
                     # If delivery fails, back off for 12h to avoid spinning.
+                    backoff_s = _sqlite_utc_timestamp(now + timedelta(hours=12))
                     await self.bot.loop.run_in_executor(
-                        None, self.db_manager.bump_reminder_after_send, rid, next_trigger_at_utc=_sqlite_utc_timestamp(now + timedelta(hours=12))
+                        None, partial(self.db_manager.bump_reminder_after_send, rid, next_trigger_at_utc=backoff_s)
                     )
                     continue
 
                 if rep_s and rep_s > 0:
                     nxt = now + timedelta(seconds=rep_s)
+                    nxt_s = _sqlite_utc_timestamp(nxt)
                     await self.bot.loop.run_in_executor(
-                        None, self.db_manager.bump_reminder_after_send, rid, next_trigger_at_utc=_sqlite_utc_timestamp(nxt)
+                        None, partial(self.db_manager.bump_reminder_after_send, rid, next_trigger_at_utc=nxt_s)
                     )
                 else:
                     await self.bot.loop.run_in_executor(None, self.db_manager.complete_oneoff_reminder, rid)

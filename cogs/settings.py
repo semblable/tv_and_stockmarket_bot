@@ -239,7 +239,10 @@ class SettingsCog(commands.Cog, name="Settings"):
         """
         name = (tz_name or "").strip()
         if not name:
-            await ctx.send("❌ Please provide a timezone, e.g. `UTC` or `Europe/Warsaw`.", ephemeral=True)
+            if getattr(ctx, "interaction", None):
+                await ctx.send("❌ Please provide a timezone, e.g. `UTC` or `Europe/Warsaw`.", ephemeral=True)
+            else:
+                await ctx.send("❌ Please provide a timezone, e.g. `UTC` or `Europe/Warsaw`.")
             return
 
         # Validate if zoneinfo is available
@@ -250,7 +253,10 @@ class SettingsCog(commands.Cog, name="Settings"):
         except Exception:
             # If zoneinfo missing or invalid tz, accept only UTC-like values.
             if name.upper() not in ("UTC", "ETC/UTC", "Z"):
-                await ctx.send("❌ Unknown timezone. Use `UTC` or a valid IANA name like `Europe/Warsaw`.", ephemeral=True)
+                if getattr(ctx, "interaction", None):
+                    await ctx.send("❌ Unknown timezone. Use `UTC` or a valid IANA name like `Europe/Warsaw`.", ephemeral=True)
+                else:
+                    await ctx.send("❌ Unknown timezone. Use `UTC` or a valid IANA name like `Europe/Warsaw`.")
                 return
             name = "UTC"
 
