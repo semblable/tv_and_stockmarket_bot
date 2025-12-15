@@ -1191,6 +1191,94 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         embed.add_field(name="Totals", value=f"- Total check-ins: **{total_checkins}**\n- Last check-in (UTC): `{last_checkin}`", inline=False)
         await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
 
+    @commands.hybrid_command(name="habits_stats", description="Show overall stats across all your habits.")
+    @discord.app_commands.describe(days="How many past days to analyze (default: 30).", limit_habits="Max habits to include (default: 50).")
+    async def habits_stats(self, ctx: commands.Context, days: int = 30, limit_habits: int = 50):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        days = max(1, min(365, int(days)))
+        limit_habits = max(1, min(200, int(limit_habits)))
+
+        guild_id = _scope_guild_id_from_ctx(ctx)
+
+        if is_dm and hasattr(self.db_manager, "get_habits_overall_stats_any_scope"):
+            stats = await self.bot.loop.run_in_executor(
+                None, lambda: self.db_manager.get_habits_overall_stats_any_scope(ctx.author.id, days=days, limit_habits=limit_habits)
+            )
+            scope_label = "all scopes"
+        else:
+            stats = await self.bot.loop.run_in_executor(
+                None, lambda: self.db_manager.get_habits_overall_stats(guild_id, ctx.author.id, days=days, limit_habits=limit_habits)
+            )
+            scope_label = "this server" if ctx.guild else "DM scope"
+
+        if not isinstance(stats, dict) or not stats.get("habits"):
+            await self.send_response(ctx, "No habit stats available yet. Create habits with `/habit_add` and check in with `/habit_checkin`.", ephemeral=not is_dm)
+            return
+
+        total_habits = int(stats.get("habits_with_stats") or 0)
+        total_sched = int(stats.get("total_scheduled_days") or 0)
+        total_comp = int(stats.get("total_completed_days") or 0)
+        overall_rate = float(stats.get("overall_completion_rate") or 0.0) * 100.0
+        avg_rate = float(stats.get("avg_habit_completion_rate") or 0.0) * 100.0
+        total_checkins = int(stats.get("total_checkins") or 0)
+        best_streak = int(stats.get("best_streak_max") or 0)
+        avg_cur = float(stats.get("avg_current_streak") or 0.0)
+
+        embed = discord.Embed(title="📊 Habits — overall stats", color=discord.Color.green())
+        embed.add_field(name=f"Scope ({scope_label})", value=f"- Last **{days}** days", inline=False)
+        embed.add_field(
+            name="Totals",
+            value=(
+                f"- Habits analyzed: **{total_habits}**\n"
+                f"- Scheduled days (sum): **{total_sched}**\n"
+                f"- Completed scheduled days (sum): **{total_comp}**\n"
+                f"- Overall completion: **{overall_rate:.0f}%**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Streaks & check-ins",
+            value=(
+                f"- Total check-ins: **{total_checkins}**\n"
+                f"- Best streak (max across habits): **{best_streak}**\n"
+                f"- Avg current streak: **{avg_cur:.1f}**\n"
+                f"- Avg habit completion rate: **{avg_rate:.0f}%**"
+            ),
+            inline=False,
+        )
+
+        habits = stats.get("habits") or []
+        if isinstance(habits, list):
+            # Rank by completion_rate desc, then scheduled_days desc (avoid tiny-schedule habits dominating too much)
+            habits_sorted = sorted(
+                [h for h in habits if isinstance(h, dict)],
+                key=lambda h: (float(h.get("completion_rate") or 0.0), int(h.get("scheduled_days") or 0)),
+                reverse=True,
+            )
+            lines: List[str] = []
+            for h in habits_sorted[:8]:
+                hid = int(h.get("id") or 0)
+                name = str(h.get("name") or "Habit")
+                scheduled = int(h.get("scheduled_days") or 0)
+                completed = int(h.get("completed_days") or 0)
+                rate = float(h.get("completion_rate") or 0.0) * 100.0
+                bst = int(h.get("best_streak") or 0)
+                # Include scope tag in DMs when available
+                scope = ""
+                if is_dm and "guild_id" in h:
+                    gid = str(h.get("guild_id") or "0")
+                    scope = f" ({'DM' if gid == '0' else f'g:{gid}'})"
+                lines.append(f"- **#{hid}**{scope} {name}: **{completed}/{scheduled}** (**{rate:.0f}%**), best streak **{bst}**")
+            if lines:
+                embed.add_field(name="🏁 Top habits (by completion)", value="\n".join(lines)[:1024], inline=False)
+
+        await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
+
     @commands.hybrid_command(name="habit_graph", description="Show graphs for a habit (trend + weekday breakdown).")
     @discord.app_commands.describe(
         habit_id="The numeric id (from /habit_list).",

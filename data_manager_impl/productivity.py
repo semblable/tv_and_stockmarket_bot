@@ -1071,6 +1071,194 @@ class ProductivityMixin:
             "daily_counts": daily_counts,
             "weekday_counts": weekday_counts,
         }
+
+    def get_habits_overall_stats(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        days: int = 30,
+        limit_habits: int = 50,
+        now_utc: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Aggregated habit stats across all habits in the given scope (guild_id/user_id).
+
+        Notes:
+        - Habits can have different timezones; per-habit stats are computed in each habit's tz,
+          then summed for overall scheduled/completed days totals.
+        """
+        days = max(1, min(365, int(days)))
+        limit_habits = max(1, min(200, int(limit_habits)))
+
+        habits = self.list_habits(guild_id, user_id, limit_habits)
+        summaries: List[Dict[str, Any]] = []
+
+        total_scheduled = 0
+        total_completed = 0
+        total_checkins = 0
+        best_streak_max = 0
+        current_streak_sum = 0
+        habits_with_stats = 0
+
+        for h in habits or []:
+            if not isinstance(h, dict):
+                continue
+            hid = h.get("id")
+            try:
+                hid_i = int(hid)
+            except Exception:
+                continue
+
+            s = self.get_habit_stats(guild_id, user_id, hid_i, days=days, now_utc=now_utc)
+            if not isinstance(s, dict):
+                continue
+
+            scheduled = int(s.get("scheduled_days") or 0)
+            completed = int(s.get("completed_days") or 0)
+            rate = float(s.get("completion_rate") or 0.0)
+            cur = int(s.get("current_streak") or 0)
+            best = int(s.get("best_streak") or 0)
+            tcheck = int(s.get("total_checkins") or 0)
+
+            summaries.append(
+                {
+                    "id": hid_i,
+                    "name": str(s.get("name") or h.get("name") or "Habit"),
+                    "scheduled_days": scheduled,
+                    "completed_days": completed,
+                    "completion_rate": rate,
+                    "current_streak": cur,
+                    "best_streak": best,
+                    "total_checkins": tcheck,
+                    "tz_name": str(s.get("tz_name") or h.get("tz_name") or "UTC"),
+                }
+            )
+
+            total_scheduled += scheduled
+            total_completed += completed
+            total_checkins += tcheck
+            best_streak_max = max(best_streak_max, best)
+            current_streak_sum += cur
+            habits_with_stats += 1
+
+        overall_rate = (float(total_completed) / float(total_scheduled)) if total_scheduled > 0 else 0.0
+        avg_current_streak = (float(current_streak_sum) / float(habits_with_stats)) if habits_with_stats > 0 else 0.0
+        avg_habit_rate = (
+            (sum(float(x.get("completion_rate") or 0.0) for x in summaries) / float(habits_with_stats))
+            if habits_with_stats > 0
+            else 0.0
+        )
+
+        return {
+            "guild_id": int(guild_id),
+            "user_id": int(user_id),
+            "days": int(days),
+            "habits_total": int(len(habits or [])),
+            "habits_with_stats": int(habits_with_stats),
+            "total_scheduled_days": int(total_scheduled),
+            "total_completed_days": int(total_completed),
+            "overall_completion_rate": float(overall_rate),
+            "avg_habit_completion_rate": float(avg_habit_rate),
+            "total_checkins": int(total_checkins),
+            "best_streak_max": int(best_streak_max),
+            "avg_current_streak": float(avg_current_streak),
+            "habits": summaries,
+        }
+
+    def get_habits_overall_stats_any_scope(
+        self,
+        user_id: int,
+        *,
+        days: int = 30,
+        limit_habits: int = 50,
+        now_utc: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Aggregated habit stats across all habits for the user, regardless of guild scope.
+        Intended for DM usage.
+        """
+        days = max(1, min(365, int(days)))
+        limit_habits = max(1, min(200, int(limit_habits)))
+
+        habits = self.list_habits_any_scope(user_id, limit_habits)
+        summaries: List[Dict[str, Any]] = []
+
+        total_scheduled = 0
+        total_completed = 0
+        total_checkins = 0
+        best_streak_max = 0
+        current_streak_sum = 0
+        habits_with_stats = 0
+
+        for h in habits or []:
+            if not isinstance(h, dict):
+                continue
+            hid = h.get("id")
+            try:
+                hid_i = int(hid)
+            except Exception:
+                continue
+            try:
+                gid_i = int(h.get("guild_id") or 0)
+            except Exception:
+                gid_i = 0
+
+            s = self.get_habit_stats(gid_i, user_id, hid_i, days=days, now_utc=now_utc)
+            if not isinstance(s, dict):
+                continue
+
+            scheduled = int(s.get("scheduled_days") or 0)
+            completed = int(s.get("completed_days") or 0)
+            rate = float(s.get("completion_rate") or 0.0)
+            cur = int(s.get("current_streak") or 0)
+            best = int(s.get("best_streak") or 0)
+            tcheck = int(s.get("total_checkins") or 0)
+
+            summaries.append(
+                {
+                    "id": hid_i,
+                    "guild_id": int(gid_i),
+                    "name": str(s.get("name") or h.get("name") or "Habit"),
+                    "scheduled_days": scheduled,
+                    "completed_days": completed,
+                    "completion_rate": rate,
+                    "current_streak": cur,
+                    "best_streak": best,
+                    "total_checkins": tcheck,
+                    "tz_name": str(s.get("tz_name") or h.get("tz_name") or "UTC"),
+                }
+            )
+
+            total_scheduled += scheduled
+            total_completed += completed
+            total_checkins += tcheck
+            best_streak_max = max(best_streak_max, best)
+            current_streak_sum += cur
+            habits_with_stats += 1
+
+        overall_rate = (float(total_completed) / float(total_scheduled)) if total_scheduled > 0 else 0.0
+        avg_current_streak = (float(current_streak_sum) / float(habits_with_stats)) if habits_with_stats > 0 else 0.0
+        avg_habit_rate = (
+            (sum(float(x.get("completion_rate") or 0.0) for x in summaries) / float(habits_with_stats))
+            if habits_with_stats > 0
+            else 0.0
+        )
+
+        return {
+            "user_id": int(user_id),
+            "days": int(days),
+            "habits_total": int(len(habits or [])),
+            "habits_with_stats": int(habits_with_stats),
+            "total_scheduled_days": int(total_scheduled),
+            "total_completed_days": int(total_completed),
+            "overall_completion_rate": float(overall_rate),
+            "avg_habit_completion_rate": float(avg_habit_rate),
+            "total_checkins": int(total_checkins),
+            "best_streak_max": int(best_streak_max),
+            "avg_current_streak": float(avg_current_streak),
+            "habits": summaries,
+        }
     def create_habit(
         self,
         guild_id: int,

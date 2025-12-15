@@ -497,3 +497,40 @@ def test_list_todo_items_any_scope(db_manager):
     guild_ids = {str(i.get("guild_id")) for i in items}
     assert "0" in guild_ids
     assert "999" in guild_ids
+
+
+def test_get_habits_overall_stats(db_manager):
+    user_id = 404
+    guild_id = 0
+
+    # Two simple UTC habits, both scheduled daily for 3 days window (2025-01-01..2025-01-03).
+    h1 = db_manager.create_habit(guild_id, user_id, "h1", [0, 1, 2, 3, 4, 5, 6], "18:00", "UTC", True, "2025-01-01 00:00:00")
+    h2 = db_manager.create_habit(guild_id, user_id, "h2", [0, 1, 2, 3, 4, 5, 6], "18:00", "UTC", True, "2025-01-01 00:00:00")
+    assert isinstance(h1, int)
+    assert isinstance(h2, int)
+
+    # Check-in for h1 on Jan 1 and Jan 2 => completed_days=2 in 3-day window
+    db_manager._execute_query(
+        "INSERT INTO habit_checkins (habit_id, guild_id, user_id, checked_in_at, note) VALUES (:hid, :gid, :uid, :ts, NULL)",
+        {"hid": int(h1), "gid": str(guild_id), "uid": str(user_id), "ts": "2025-01-01 12:00:00"},
+        commit=True,
+    )
+    db_manager._execute_query(
+        "INSERT INTO habit_checkins (habit_id, guild_id, user_id, checked_in_at, note) VALUES (:hid, :gid, :uid, :ts, NULL)",
+        {"hid": int(h1), "gid": str(guild_id), "uid": str(user_id), "ts": "2025-01-02 12:00:00"},
+        commit=True,
+    )
+    # Check-in for h2 on Jan 3 => completed_days=1 in 3-day window
+    db_manager._execute_query(
+        "INSERT INTO habit_checkins (habit_id, guild_id, user_id, checked_in_at, note) VALUES (:hid, :gid, :uid, :ts, NULL)",
+        {"hid": int(h2), "gid": str(guild_id), "uid": str(user_id), "ts": "2025-01-03 12:00:00"},
+        commit=True,
+    )
+
+    overall = db_manager.get_habits_overall_stats(guild_id, user_id, days=3, now_utc="2025-01-03 12:00:00", limit_habits=50)
+    assert isinstance(overall, dict)
+    assert int(overall.get("habits_with_stats") or 0) == 2
+    assert int(overall.get("total_scheduled_days") or 0) == 6  # 2 habits * 3 days each (daily schedule)
+    assert int(overall.get("total_completed_days") or 0) == 3  # 2 + 1
+    rate = float(overall.get("overall_completion_rate") or 0.0)
+    assert abs(rate - 0.5) < 0.001
