@@ -562,3 +562,22 @@ def test_get_habit_stats_does_not_count_days_before_created_at(db_manager):
     assert isinstance(stats, dict)
     assert int(stats.get("scheduled_days") or 0) == 1
     assert int(stats.get("completed_days") or 0) == 1
+
+
+def test_get_habit_stats_all_time_since_created_at(db_manager):
+    user_id = 606
+    guild_id = 0
+
+    hid = db_manager.create_habit(guild_id, user_id, "h", [0, 1, 2, 3, 4, 5, 6], "18:00", "UTC", True, "2025-01-01 00:00:00")
+    assert isinstance(hid, int)
+
+    # Created on Jan 03, now is Jan 05 -> all-time window should be Jan 03..Jan 05 (3 scheduled days).
+    db_manager._execute_query(
+        "UPDATE habits SET created_at = '2025-01-03 00:00:00' WHERE id = :id",
+        {"id": int(hid)},
+        commit=True,
+    )
+
+    stats = db_manager.get_habit_stats(guild_id, user_id, int(hid), days=None, now_utc="2025-01-05 12:00:00")
+    assert isinstance(stats, dict)
+    assert int(stats.get("scheduled_days") or 0) == 3

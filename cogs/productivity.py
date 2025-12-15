@@ -283,6 +283,25 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         self.monthly_report_loop.cancel()
         logger.info("ProductivityCog unloaded and reminder loop cancelled.")
 
+    def _parse_days_arg(self, raw, *, max_days: int = 3650) -> Optional[int]:
+        """
+        Returns:
+        - int days (1..max_days) when provided
+        - None when 'all' is requested
+        """
+        if raw is None:
+            return None
+        if isinstance(raw, int):
+            return max(1, min(max_days, int(raw)))
+        s = str(raw).strip().lower()
+        if s in {"all", "a", "*"}:
+            return None
+        try:
+            n = int(s)
+        except ValueError:
+            return -1  # sentinel for invalid
+        return max(1, min(max_days, n))
+
     def _month_key(self, dt_utc: datetime) -> str:
         return dt_utc.strftime("%Y-%m")
 
@@ -1143,14 +1162,17 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
     @commands.hybrid_command(name="habit_stats", description="Show stats for a habit (streaks, completion rate, totals).")
     @discord.app_commands.describe(habit_id="The numeric id (from /habit_list).", days="How many past days to analyze (default: 30).")
-    async def habit_stats(self, ctx: commands.Context, habit_id: int, days: int = 30):
+    async def habit_stats(self, ctx: commands.Context, habit_id: int, days: str = "30"):
         is_dm = ctx.guild is None
         await self._defer_if_interaction(ctx, ephemeral=not is_dm)
         if not self.db_manager:
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
-        days = max(1, min(365, int(days)))
+        days_n = self._parse_days_arg(days, max_days=3650)
+        if days_n == -1:
+            await self.send_response(ctx, "Invalid `days`. Use a number like `30` or `all`.", ephemeral=not is_dm)
+            return
         habit, guild_id = await self._load_habit_for_ctx(ctx, int(habit_id))
         if not habit:
             await self.send_response(ctx, "Could not find that habit (or it’s not yours).", ephemeral=not is_dm)
@@ -1158,7 +1180,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
         stats = await self.bot.loop.run_in_executor(
             None,
-            lambda: self.db_manager.get_habit_stats(guild_id, ctx.author.id, int(habit_id), days=days),
+            lambda: self.db_manager.get_habit_stats(guild_id, ctx.author.id, int(habit_id), days=days_n),
         )
         if not isinstance(stats, dict):
             await self.send_response(ctx, "No stats available yet. Try checking in a few times first.", ephemeral=not is_dm)
@@ -1177,7 +1199,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         rend = stats.get("range_end_local") or ""
 
         embed = discord.Embed(title=f"📊 Habit stats — {name} (#{habit_id})", color=discord.Color.green())
-        embed.add_field(name=f"Last {days} days (local)", value=f"- Range: **{rstart} → {rend}**\n- TZ: `{tz_name}`", inline=False)
+        range_label = "All time" if days_n is None else f"Last {days_n} days"
+        embed.add_field(name=f"{range_label} (local)", value=f"- Range: **{rstart} → {rend}**\n- TZ: `{tz_name}`", inline=False)
         embed.add_field(
             name="Completion vs schedule",
             value=f"- Scheduled days: **{scheduled}**\n- Completed days: **{completed}**\n- Rate: **{rate:.0f}%**",
@@ -1193,26 +1216,29 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
     @commands.hybrid_command(name="habits_stats", description="Show overall stats across all your habits.")
     @discord.app_commands.describe(days="How many past days to analyze (default: 30).", limit_habits="Max habits to include (default: 50).")
-    async def habits_stats(self, ctx: commands.Context, days: int = 30, limit_habits: int = 50):
+    async def habits_stats(self, ctx: commands.Context, days: str = "30", limit_habits: int = 50):
         is_dm = ctx.guild is None
         await self._defer_if_interaction(ctx, ephemeral=not is_dm)
         if not self.db_manager:
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
-        days = max(1, min(365, int(days)))
+        days_n = self._parse_days_arg(days, max_days=3650)
+        if days_n == -1:
+            await self.send_response(ctx, "Invalid `days`. Use a number like `30` or `all`.", ephemeral=not is_dm)
+            return
         limit_habits = max(1, min(200, int(limit_habits)))
 
         guild_id = _scope_guild_id_from_ctx(ctx)
 
         if is_dm and hasattr(self.db_manager, "get_habits_overall_stats_any_scope"):
             stats = await self.bot.loop.run_in_executor(
-                None, lambda: self.db_manager.get_habits_overall_stats_any_scope(ctx.author.id, days=days, limit_habits=limit_habits)
+                None, lambda: self.db_manager.get_habits_overall_stats_any_scope(ctx.author.id, days=days_n, limit_habits=limit_habits)
             )
             scope_label = "all scopes"
         else:
             stats = await self.bot.loop.run_in_executor(
-                None, lambda: self.db_manager.get_habits_overall_stats(guild_id, ctx.author.id, days=days, limit_habits=limit_habits)
+                None, lambda: self.db_manager.get_habits_overall_stats(guild_id, ctx.author.id, days=days_n, limit_habits=limit_habits)
             )
             scope_label = "this server" if ctx.guild else "DM scope"
 
@@ -1230,7 +1256,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         avg_cur = float(stats.get("avg_current_streak") or 0.0)
 
         embed = discord.Embed(title="📊 Habits — overall stats", color=discord.Color.green())
-        embed.add_field(name=f"Scope ({scope_label})", value=f"- Last **{days}** days", inline=False)
+        range_label = "All time" if days_n is None else f"Last **{days_n}** days"
+        embed.add_field(name=f"Scope ({scope_label})", value=f"- {range_label}", inline=False)
         embed.add_field(
             name="Totals",
             value=(

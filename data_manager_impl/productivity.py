@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover
 
 
 class ProductivityMixin:
+    _HABIT_STATS_MAX_DAYS = 3650
     _HABIT_REMIND_PROFILES = {"gentle", "normal", "aggressive", "quiet"}
     _HABIT_SNOOZE_PERIODS = {"week", "month"}
 
@@ -945,7 +946,7 @@ class ProductivityMixin:
         user_id: int,
         habit_id: int,
         *,
-        days: int = 30,
+        days: Optional[int] = 30,
         now_utc: Optional[str] = None,
         streak_max_days: int = 3650,
     ) -> Optional[Dict[str, Any]]:
@@ -960,7 +961,11 @@ class ProductivityMixin:
           daily_labels, daily_counts,
           weekday_counts (Mon..Sun)
         """
-        days = max(1, min(365, int(days)))
+        # days=None means "all time since created_at" (with a safety cap).
+        if days is None:
+            days_n: Optional[int] = None
+        else:
+            days_n = max(1, min(self._HABIT_STATS_MAX_DAYS, int(days)))
         streak_max_days = max(30, min(3650, int(streak_max_days)))
 
         habit = self.get_habit(guild_id, user_id, habit_id)
@@ -977,14 +982,20 @@ class ProductivityMixin:
             now_dt = datetime.datetime.now(datetime.timezone.utc)
         now_local = now_dt.astimezone(tz)
         range_end_local = now_local.date()
-        range_start_local = range_end_local - datetime.timedelta(days=days - 1)
+
+        # Provisional range start (before applying created_at clamp):
+        cap_start = range_end_local - datetime.timedelta(days=self._HABIT_STATS_MAX_DAYS - 1)
+        provisional_start = cap_start if days_n is None else (range_end_local - datetime.timedelta(days=days_n - 1))
 
         created_dt = self._parse_sqlite_utc_timestamp(habit.get("created_at"))
-        created_local_date = created_dt.astimezone(tz).date() if created_dt else range_start_local
+        created_local_date = created_dt.astimezone(tz).date() if created_dt else provisional_start
+
         # If caller overrides `now_utc` to an earlier time than the habit's created_at (tests / backfills),
         # clamp the effective "created" bound so stats still work for that requested window.
         if created_local_date > range_end_local:
-            created_local_date = range_start_local
+            created_local_date = provisional_start
+
+        range_start_local = max(created_local_date, cap_start) if days_n is None else provisional_start
         # Avoid iterating unbounded histories for streak computations.
         earliest_local_for_streak = max(created_local_date, range_end_local - datetime.timedelta(days=streak_max_days))
 
@@ -1078,7 +1089,7 @@ class ProductivityMixin:
         guild_id: int,
         user_id: int,
         *,
-        days: int = 30,
+        days: Optional[int] = 30,
         limit_habits: int = 50,
         now_utc: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1089,7 +1100,11 @@ class ProductivityMixin:
         - Habits can have different timezones; per-habit stats are computed in each habit's tz,
           then summed for overall scheduled/completed days totals.
         """
-        days = max(1, min(365, int(days)))
+        days_n: Optional[int]
+        if days is None:
+            days_n = None
+        else:
+            days_n = max(1, min(self._HABIT_STATS_MAX_DAYS, int(days)))
         limit_habits = max(1, min(200, int(limit_habits)))
 
         habits = self.list_habits(guild_id, user_id, limit_habits)
@@ -1111,7 +1126,7 @@ class ProductivityMixin:
             except Exception:
                 continue
 
-            s = self.get_habit_stats(guild_id, user_id, hid_i, days=days, now_utc=now_utc)
+            s = self.get_habit_stats(guild_id, user_id, hid_i, days=days_n, now_utc=now_utc)
             if not isinstance(s, dict):
                 continue
 
@@ -1154,7 +1169,7 @@ class ProductivityMixin:
         return {
             "guild_id": int(guild_id),
             "user_id": int(user_id),
-            "days": int(days),
+            "days": (None if days_n is None else int(days_n)),
             "habits_total": int(len(habits or [])),
             "habits_with_stats": int(habits_with_stats),
             "total_scheduled_days": int(total_scheduled),
@@ -1171,7 +1186,7 @@ class ProductivityMixin:
         self,
         user_id: int,
         *,
-        days: int = 30,
+        days: Optional[int] = 30,
         limit_habits: int = 50,
         now_utc: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1179,7 +1194,11 @@ class ProductivityMixin:
         Aggregated habit stats across all habits for the user, regardless of guild scope.
         Intended for DM usage.
         """
-        days = max(1, min(365, int(days)))
+        days_n: Optional[int]
+        if days is None:
+            days_n = None
+        else:
+            days_n = max(1, min(self._HABIT_STATS_MAX_DAYS, int(days)))
         limit_habits = max(1, min(200, int(limit_habits)))
 
         habits = self.list_habits_any_scope(user_id, limit_habits)
@@ -1205,7 +1224,7 @@ class ProductivityMixin:
             except Exception:
                 gid_i = 0
 
-            s = self.get_habit_stats(gid_i, user_id, hid_i, days=days, now_utc=now_utc)
+            s = self.get_habit_stats(gid_i, user_id, hid_i, days=days_n, now_utc=now_utc)
             if not isinstance(s, dict):
                 continue
 
@@ -1248,7 +1267,7 @@ class ProductivityMixin:
 
         return {
             "user_id": int(user_id),
-            "days": int(days),
+            "days": (None if days_n is None else int(days_n)),
             "habits_total": int(len(habits or [])),
             "habits_with_stats": int(habits_with_stats),
             "total_scheduled_days": int(total_scheduled),
