@@ -1249,3 +1249,4 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(ReadingProgressCog(bot, db_manager=bot.db_manager))
     logger.info("ReadingProgressCog has been loaded.")
 
+

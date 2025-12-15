@@ -28,6 +28,7 @@ COPY bot.py .
 COPY config.py .
 COPY logger.py .
 COPY data_manager.py .
+COPY data_manager_impl/ ./data_manager_impl/
 COPY cogs/ ./cogs/
 COPY api_clients/ ./api_clients/
 COPY utils/ ./utils/

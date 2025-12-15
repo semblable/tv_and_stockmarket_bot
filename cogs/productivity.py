@@ -770,3 +770,4 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(ProductivityCog(bot, db_manager=getattr(bot, "db_manager", None)))
     logger.info("ProductivityCog has been loaded.")
 
+

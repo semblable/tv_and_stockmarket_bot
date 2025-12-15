@@ -118,3 +118,4 @@ def lookup(query: str, *, limit: int = 5) -> Optional[Dict[str, Any]]:
         return None
     t0 = titles[0]
     return {"title": t0, "url": page_url(t0)}
+

@@ -231,3 +231,4 @@ def get_app_details(appid: int, *, cc: str = "us", l: str = "english") -> Option
         "metacritic_score": metacritic_score,
         "platforms": platforms_out,
     }
+
