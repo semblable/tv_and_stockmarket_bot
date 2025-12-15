@@ -1009,7 +1009,8 @@ class ProductivityMixin:
             daily_labels.append(label)
             cnt = int(per_day_counts.get(d, 0))
             daily_counts.append(cnt)
-            if d.weekday() in sched_set:
+            # Do not count scheduled/completed days before the habit existed.
+            if d >= created_local_date and d.weekday() in sched_set:
                 scheduled_days += 1
                 if cnt > 0:
                     completed_days += 1

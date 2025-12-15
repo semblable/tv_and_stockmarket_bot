@@ -534,3 +534,31 @@ def test_get_habits_overall_stats(db_manager):
     assert int(overall.get("total_completed_days") or 0) == 3  # 2 + 1
     rate = float(overall.get("overall_completion_rate") or 0.0)
     assert abs(rate - 0.5) < 0.001
+
+
+def test_get_habit_stats_does_not_count_days_before_created_at(db_manager):
+    # Habit created on Jan 3 should not count scheduled days for Jan 1-2 even if we ask for last 3 days.
+    user_id = 505
+    guild_id = 0
+
+    hid = db_manager.create_habit(guild_id, user_id, "h", [0, 1, 2, 3, 4, 5, 6], "18:00", "UTC", True, "2025-01-03 00:00:00")
+    assert isinstance(hid, int)
+
+    # Force created_at to Jan 03 (UTC) in the DB so the test is deterministic.
+    db_manager._execute_query(
+        "UPDATE habits SET created_at = '2025-01-03 00:00:00' WHERE id = :id",
+        {"id": int(hid)},
+        commit=True,
+    )
+
+    # One check-in on Jan 03.
+    db_manager._execute_query(
+        "INSERT INTO habit_checkins (habit_id, guild_id, user_id, checked_in_at, note) VALUES (:hid, :gid, :uid, :ts, NULL)",
+        {"hid": int(hid), "gid": str(guild_id), "uid": str(user_id), "ts": "2025-01-03 12:00:00"},
+        commit=True,
+    )
+
+    stats = db_manager.get_habit_stats(guild_id, user_id, int(hid), days=3, now_utc="2025-01-03 12:00:00")
+    assert isinstance(stats, dict)
+    assert int(stats.get("scheduled_days") or 0) == 1
+    assert int(stats.get("completed_days") or 0) == 1
