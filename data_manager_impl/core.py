@@ -537,6 +537,28 @@ class DataManagerCore:
         ):
             logger.warning("Could not create idx_habit_checkins_habit.")
 
+        # --- Generic Reminders (one-off + repeating) ---
+        create_reminders_sql = """
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id TEXT NOT NULL, -- 0 for DMs
+            channel_id TEXT NOT NULL, -- 0 for DMs
+            user_id TEXT NOT NULL,
+            message TEXT NOT NULL,
+            trigger_at TIMESTAMP NOT NULL, -- UTC timestamp string "YYYY-MM-DD HH:MM:SS"
+            repeat_interval_seconds INTEGER, -- NULL for one-off
+            repeat_count INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        create_table_if_not_exists("reminders", create_reminders_sql)
+        try:
+            self._execute_query("CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(is_active, trigger_at);", commit=True)
+            self._execute_query("CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders(user_id, is_active, id);", commit=True)
+        except Exception as e:
+            logger.warning(f"Could not create reminders indexes: {e}")
+
         logger.info("Database initialization check complete.")
 
     # -------------------------

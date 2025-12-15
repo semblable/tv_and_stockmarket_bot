@@ -581,3 +581,40 @@ def test_get_habit_stats_all_time_since_created_at(db_manager):
     stats = db_manager.get_habit_stats(guild_id, user_id, int(hid), days=None, now_utc="2025-01-05 12:00:00")
     assert isinstance(stats, dict)
     assert int(stats.get("scheduled_days") or 0) == 3
+
+
+def test_create_and_fire_oneoff_reminder(db_manager):
+    guild_id = 0
+    channel_id = 0
+    user_id = 1234
+
+    rid = db_manager.create_reminder(guild_id, channel_id, user_id, "test", "2025-01-01 00:00:00", None)
+    assert isinstance(rid, int)
+
+    due = db_manager.list_due_reminders("2025-01-01 00:00:01", 50)
+    assert any(int(r.get("id") or 0) == rid for r in due)
+
+    ok = db_manager.complete_oneoff_reminder(rid)
+    assert ok is True
+
+    due2 = db_manager.list_due_reminders("2025-01-01 00:00:02", 50)
+    assert not any(int(r.get("id") or 0) == rid for r in due2)
+
+
+def test_repeating_reminder_bump(db_manager):
+    rid = db_manager.create_reminder(0, 0, 5678, "repeat", "2025-01-01 00:00:00", 60)
+    assert isinstance(rid, int)
+
+    due = db_manager.list_due_reminders("2025-01-01 00:00:05", 50)
+    assert any(int(r.get("id") or 0) == rid for r in due)
+
+    ok = db_manager.bump_reminder_after_send(rid, next_trigger_at_utc="2025-01-01 00:01:00")
+    assert ok is True
+
+    # Not due before the new trigger time
+    due2 = db_manager.list_due_reminders("2025-01-01 00:00:59", 50)
+    assert not any(int(r.get("id") or 0) == rid for r in due2)
+
+    # Due again at/after
+    due3 = db_manager.list_due_reminders("2025-01-01 00:01:00", 50)
+    assert any(int(r.get("id") or 0) == rid for r in due3)

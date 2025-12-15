@@ -1514,6 +1514,21 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         now = _utc_now()
         now_str = _sqlite_utc_timestamp(now)
 
+        habit_messages = [
+            "⏰ Habit reminder: **{name}** (id #{hid}) is due.\nCheck in with `/habit_checkin {hid}`",
+            "📌 Quick nudge: **{name}** is still due (#{hid}).\nLog it with `/habit_checkin {hid}`",
+            "🧠 Future-you says hi: time for **{name}** (#{hid}).\n`/habit_checkin {hid}`",
+            "🔥 Keep the streak alive: **{name}** (#{hid}) is due.\n`/habit_checkin {hid}`",
+            "✅ Small step time: **{name}** (#{hid}).\nCheck in: `/habit_checkin {hid}`",
+        ]
+        todo_messages = [
+            "🔔 To‑do reminder: **#{tid}** — {content}\nMark done with `/todo_done {tid}` or disable with `/todo_nag {tid} enabled:false`.",
+            "🧾 Still open: **#{tid}** — {content}\nDone? `/todo_done {tid}` • Stop nags: `/todo_nag {tid} enabled:false`",
+            "⏳ Gentle ping: **#{tid}** — {content}\n`/todo_done {tid}` when it’s done.",
+            "🎯 Focus moment: **#{tid}** — {content}\nClose it: `/todo_done {tid}`",
+            "🧩 One more step: **#{tid}** — {content}\nDone? `/todo_done {tid}`",
+        ]
+
         # Habits first
         due_habits = await self.bot.loop.run_in_executor(None, self.db_manager.list_due_habit_reminders, now_str, 50)
         for h in due_habits or []:
@@ -1527,10 +1542,10 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 profile = h.get("remind_profile") or "normal"
                 level = int(h.get("remind_level") or 0)
 
+                tpl = habit_messages[level % len(habit_messages)]
                 sent = await self._dm_user(
                     uid,
-                    content=f"⏰ Habit reminder: **{name}** (id #{hid}) is due.\n"
-                            f"Check in with `/habit_checkin {hid}`",
+                    content=tpl.format(name=name, hid=hid),
                 )
                 if not sent:
                     # If DM fails, don't spin; back off a bit.
@@ -1572,10 +1587,10 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 content = t.get("content") or "To-do"
                 level = int(t.get("remind_level") or 0)
 
+                tpl = todo_messages[level % len(todo_messages)]
                 sent = await self._dm_user(
                     uid,
-                    content=f"🔔 To‑do reminder: **#{tid}** — {content}\n"
-                            f"Mark done with `/todo_done {tid}` or disable with `/todo_nag {tid} enabled:false` (or run `/todo_nag` and fill the options).",
+                    content=tpl.format(tid=tid, content=content),
                 )
                 if not sent:
                     next_rem = _sqlite_utc_timestamp(now + timedelta(hours=12))

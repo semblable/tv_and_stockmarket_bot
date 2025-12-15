@@ -12,6 +12,7 @@ from config import SQLITE_DB_PATH
 
 from data_manager_impl.core import DataManagerCore
 from data_manager_impl.productivity import ProductivityMixin
+from data_manager_impl.reminders import RemindersMixin
 from data_manager_impl.media import MediaMixin
 from data_manager_impl.stocks import StocksMixin
 from data_manager_impl.prefs_weather import PrefsWeatherMixin
@@ -23,6 +24,7 @@ from data_manager_impl.games import GamesMixin
 class DataManager(
     DataManagerCore,
     ProductivityMixin,
+    RemindersMixin,
     MediaMixin,
     StocksMixin,
     PrefsWeatherMixin,
