@@ -287,3 +287,342 @@ def get_weekly_reading_chart_image(
         return None
     except Exception:
         return None
+
+
+def _create_habit_daily_chart_config(title: str, labels: list, values: list):
+    """
+    Simple daily bar chart for habit check-ins.
+    """
+    if not labels or not values or len(labels) != len(values):
+        return None
+    if len(labels) > 62:
+        labels = labels[-62:]
+        values = values[-62:]
+
+    max_v = 0
+    try:
+        max_v = max(int(v or 0) for v in values)
+    except Exception:
+        max_v = 0
+
+    suggested_max = None
+    if max_v > 0:
+        suggested_max = max_v * 1.25
+
+    return {
+        "type": "bar",
+        "data": {
+            "labels": labels,
+            "datasets": [
+                {
+                    "label": "check-ins",
+                    "data": values,
+                    "backgroundColor": "rgba(46, 204, 113, 0.35)",
+                    "borderColor": "rgba(46, 204, 113, 1)",
+                    "borderWidth": 2,
+                    "borderRadius": 6,
+                }
+            ],
+        },
+        "options": {
+            "responsive": True,
+            "plugins": {
+                "title": {"display": True, "text": title, "font": {"size": 18}},
+                "legend": {"display": False},
+            },
+            "scales": {
+                "x": {"grid": {"display": False}},
+                "y": {
+                    "beginAtZero": True,
+                    "grid": {"color": "rgba(0, 0, 0, 0.05)"},
+                    **({"suggestedMax": suggested_max} if suggested_max else {}),
+                },
+            },
+        },
+    }
+
+
+def get_habit_daily_chart_image(
+    title: str,
+    labels: list,
+    values: list,
+    *,
+    chart_width: int = 900,
+    chart_height: int = 420,
+):
+    """
+    Generates a habit daily check-ins bar chart as bytes (io.BytesIO).
+    """
+    chart_config = _create_habit_daily_chart_config(title, labels, values)
+    if not chart_config:
+        return None
+    try:
+        post_payload = {
+            "chart": chart_config,
+            "width": chart_width,
+            "height": chart_height,
+            "backgroundColor": "white",
+            "format": "png",
+        }
+        response = requests.post(QUICKCHART_BASE_URL, json=post_payload, timeout=30)
+        if response.status_code == 200:
+            return io.BytesIO(response.content)
+        return None
+    except Exception:
+        return None
+
+
+def _create_habit_weekday_chart_config(title: str, labels: list, values: list):
+    """
+    Weekday distribution bar chart for habit check-ins.
+    """
+    if not labels or not values or len(labels) != len(values):
+        return None
+    if len(labels) != 7:
+        # Expect Mon..Sun
+        return None
+
+    max_v = 0
+    try:
+        max_v = max(int(v or 0) for v in values)
+    except Exception:
+        max_v = 0
+
+    suggested_max = None
+    if max_v > 0:
+        suggested_max = max_v * 1.25
+
+    return {
+        "type": "bar",
+        "data": {
+            "labels": labels,
+            "datasets": [
+                {
+                    "label": "check-ins",
+                    "data": values,
+                    "backgroundColor": "rgba(155, 89, 182, 0.35)",
+                    "borderColor": "rgba(155, 89, 182, 1)",
+                    "borderWidth": 2,
+                    "borderRadius": 6,
+                }
+            ],
+        },
+        "options": {
+            "responsive": True,
+            "plugins": {
+                "title": {"display": True, "text": title, "font": {"size": 18}},
+                "legend": {"display": False},
+            },
+            "scales": {
+                "x": {"grid": {"display": False}},
+                "y": {
+                    "beginAtZero": True,
+                    "grid": {"color": "rgba(0, 0, 0, 0.05)"},
+                    **({"suggestedMax": suggested_max} if suggested_max else {}),
+                },
+            },
+        },
+    }
+
+
+def get_habit_weekday_chart_image(
+    title: str,
+    labels: list,
+    values: list,
+    *,
+    chart_width: int = 800,
+    chart_height: int = 420,
+):
+    """
+    Generates a habit weekday distribution bar chart as bytes (io.BytesIO).
+    """
+    chart_config = _create_habit_weekday_chart_config(title, labels, values)
+    if not chart_config:
+        return None
+    try:
+        post_payload = {
+            "chart": chart_config,
+            "width": chart_width,
+            "height": chart_height,
+            "backgroundColor": "white",
+            "format": "png",
+        }
+        response = requests.post(QUICKCHART_BASE_URL, json=post_payload, timeout=30)
+        if response.status_code == 200:
+            return io.BytesIO(response.content)
+        return None
+    except Exception:
+        return None
+
+
+def _create_todo_daily_created_done_chart_config(title: str, labels: list, created: list, done: list):
+    """
+    Two-series daily bar chart for created vs done to-dos.
+    """
+    if not labels or created is None or done is None:
+        return None
+    if len(labels) != len(created) or len(labels) != len(done):
+        return None
+    if len(labels) > 62:
+        labels = labels[-62:]
+        created = created[-62:]
+        done = done[-62:]
+
+    max_v = 0
+    try:
+        max_v = max(max(int(v or 0) for v in created), max(int(v or 0) for v in done))
+    except Exception:
+        max_v = 0
+
+    suggested_max = None
+    if max_v > 0:
+        suggested_max = max_v * 1.25
+
+    return {
+        "type": "bar",
+        "data": {
+            "labels": labels,
+            "datasets": [
+                {
+                    "label": "created",
+                    "data": created,
+                    "backgroundColor": "rgba(52, 152, 219, 0.35)",
+                    "borderColor": "rgba(52, 152, 219, 1)",
+                    "borderWidth": 2,
+                    "borderRadius": 6,
+                },
+                {
+                    "label": "done",
+                    "data": done,
+                    "backgroundColor": "rgba(46, 204, 113, 0.35)",
+                    "borderColor": "rgba(46, 204, 113, 1)",
+                    "borderWidth": 2,
+                    "borderRadius": 6,
+                },
+            ],
+        },
+        "options": {
+            "responsive": True,
+            "plugins": {
+                "title": {"display": True, "text": title, "font": {"size": 18}},
+            },
+            "scales": {
+                "x": {"grid": {"display": False}},
+                "y": {
+                    "beginAtZero": True,
+                    "grid": {"color": "rgba(0, 0, 0, 0.05)"},
+                    **({"suggestedMax": suggested_max} if suggested_max else {}),
+                },
+            },
+        },
+    }
+
+
+def get_todo_daily_created_done_chart_image(
+    title: str,
+    labels: list,
+    created: list,
+    done: list,
+    *,
+    chart_width: int = 900,
+    chart_height: int = 420,
+):
+    """
+    Generates a created vs done daily bar chart image for to-dos.
+    """
+    chart_config = _create_todo_daily_created_done_chart_config(title, labels, created, done)
+    if not chart_config:
+        return None
+    try:
+        post_payload = {
+            "chart": chart_config,
+            "width": chart_width,
+            "height": chart_height,
+            "backgroundColor": "white",
+            "format": "png",
+        }
+        response = requests.post(QUICKCHART_BASE_URL, json=post_payload, timeout=30)
+        if response.status_code == 200:
+            return io.BytesIO(response.content)
+        return None
+    except Exception:
+        return None
+
+
+def _create_todo_weekday_done_chart_config(title: str, labels: list, values: list):
+    if not labels or not values or len(labels) != len(values):
+        return None
+    if len(labels) != 7:
+        return None
+
+    max_v = 0
+    try:
+        max_v = max(int(v or 0) for v in values)
+    except Exception:
+        max_v = 0
+
+    suggested_max = None
+    if max_v > 0:
+        suggested_max = max_v * 1.25
+
+    return {
+        "type": "bar",
+        "data": {
+            "labels": labels,
+            "datasets": [
+                {
+                    "label": "done",
+                    "data": values,
+                    "backgroundColor": "rgba(241, 196, 15, 0.35)",
+                    "borderColor": "rgba(241, 196, 15, 1)",
+                    "borderWidth": 2,
+                    "borderRadius": 6,
+                }
+            ],
+        },
+        "options": {
+            "responsive": True,
+            "plugins": {
+                "title": {"display": True, "text": title, "font": {"size": 18}},
+                "legend": {"display": False},
+            },
+            "scales": {
+                "x": {"grid": {"display": False}},
+                "y": {
+                    "beginAtZero": True,
+                    "grid": {"color": "rgba(0, 0, 0, 0.05)"},
+                    **({"suggestedMax": suggested_max} if suggested_max else {}),
+                },
+            },
+        },
+    }
+
+
+def get_todo_weekday_done_chart_image(
+    title: str,
+    labels: list,
+    values: list,
+    *,
+    chart_width: int = 800,
+    chart_height: int = 420,
+):
+    """
+    Generates a weekday distribution chart for completed to-dos.
+    """
+    chart_config = _create_todo_weekday_done_chart_config(title, labels, values)
+    if not chart_config:
+        return None
+    try:
+        post_payload = {
+            "chart": chart_config,
+            "width": chart_width,
+            "height": chart_height,
+            "backgroundColor": "white",
+            "format": "png",
+        }
+        response = requests.post(QUICKCHART_BASE_URL, json=post_payload, timeout=30)
+        if response.status_code == 200:
+            return io.BytesIO(response.content)
+        return None
+    except Exception:
+        return None

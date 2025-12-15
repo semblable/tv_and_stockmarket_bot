@@ -2,7 +2,7 @@ import sqlite3
 import logging
 import datetime
 import json
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +349,399 @@ class ProductivityMixin:
         }
         return bool(self._execute_query(query, params, commit=True))
 
+    def get_todo_stats(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        days: int = 30,
+        now_utc: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Computes to-do stats and series for the given scope (guild_id/user_id).
+
+        Returns keys:
+          range_start_utc_day, range_end_utc_day,
+          open_count, done_count, total_count,
+          created_in_range, done_in_range,
+          current_done_streak_days, best_done_streak_days,
+          avg_hours_to_done (for tasks done within range),
+          daily_labels, daily_created, daily_done,
+          weekday_done_counts (Mon..Sun)
+        """
+        days = max(1, min(365, int(days)))
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if isinstance(now_utc, str) and now_utc.strip() else None
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        end_day = now_dt.date()
+        start_day = end_day - datetime.timedelta(days=days - 1)
+        start_day_s = start_day.isoformat()
+        end_day_s = end_day.isoformat()
+
+        base_params = {"guild_id": str(int(guild_id)), "user_id": str(int(user_id))}
+
+        # Counts
+        row_counts = self._execute_query(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN is_done = 0 THEN 1 END), 0) AS open_count,
+                COALESCE(SUM(CASE WHEN is_done = 1 THEN 1 END), 0) AS done_count,
+                COUNT(*) AS total_count
+            FROM todo_items
+            WHERE guild_id = :guild_id AND user_id = :user_id
+            """,
+            base_params,
+            fetch_one=True,
+        ) or {}
+
+        open_count = int(row_counts.get("open_count") or 0)
+        done_count = int(row_counts.get("done_count") or 0)
+        total_count = int(row_counts.get("total_count") or 0)
+
+        row_range = self._execute_query(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN date(created_at) >= :start_day AND date(created_at) <= :end_day THEN 1 END), 0) AS created_in_range,
+                COALESCE(SUM(CASE WHEN is_done = 1 AND done_at IS NOT NULL AND date(done_at) >= :start_day AND date(done_at) <= :end_day THEN 1 END), 0) AS done_in_range
+            FROM todo_items
+            WHERE guild_id = :guild_id AND user_id = :user_id
+            """,
+            {**base_params, "start_day": start_day_s, "end_day": end_day_s},
+            fetch_one=True,
+        ) or {}
+        created_in_range = int(row_range.get("created_in_range") or 0)
+        done_in_range = int(row_range.get("done_in_range") or 0)
+
+        # Avg hours from created->done (for items done in range)
+        row_avg = self._execute_query(
+            """
+            SELECT
+                AVG((julianday(done_at) - julianday(created_at)) * 24.0) AS avg_hours
+            FROM todo_items
+            WHERE guild_id = :guild_id AND user_id = :user_id
+              AND is_done = 1
+              AND done_at IS NOT NULL
+              AND created_at IS NOT NULL
+              AND date(done_at) >= :start_day AND date(done_at) <= :end_day
+            """,
+            {**base_params, "start_day": start_day_s, "end_day": end_day_s},
+            fetch_one=True,
+        ) or {}
+        try:
+            avg_hours_to_done = float(row_avg.get("avg_hours")) if row_avg.get("avg_hours") is not None else None
+        except (TypeError, ValueError):
+            avg_hours_to_done = None
+
+        # Weekday distribution (done_at) in UTC: strftime('%w') => 0=Sun..6=Sat
+        wd_rows = self._execute_query(
+            """
+            SELECT strftime('%w', done_at) AS wd, COUNT(*) AS c
+            FROM todo_items
+            WHERE guild_id = :guild_id AND user_id = :user_id
+              AND is_done = 1 AND done_at IS NOT NULL
+              AND date(done_at) >= :start_day AND date(done_at) <= :end_day
+            GROUP BY wd
+            """,
+            {**base_params, "start_day": start_day_s, "end_day": end_day_s},
+            fetch_all=True,
+        ) or []
+        weekday_done_counts = [0, 0, 0, 0, 0, 0, 0]  # Mon..Sun
+        for r in wd_rows:
+            if not isinstance(r, dict):
+                continue
+            wd = r.get("wd")
+            try:
+                c = int(r.get("c") or 0)
+            except (TypeError, ValueError):
+                c = 0
+            try:
+                wd_i = int(wd)
+            except (TypeError, ValueError):
+                continue
+            # Convert 0=Sun..6=Sat to 0=Mon..6=Sun
+            if wd_i == 0:
+                idx = 6
+            else:
+                idx = wd_i - 1
+            if 0 <= idx <= 6:
+                weekday_done_counts[idx] += c
+
+        # Daily series using recursive CTE (UTC days)
+        series = self._execute_query(
+            """
+            WITH RECURSIVE days(day) AS (
+                SELECT date(:end_day, '-' || (:days - 1) || ' day')
+                UNION ALL
+                SELECT date(day, '+1 day') FROM days WHERE day < date(:end_day)
+            ),
+            created AS (
+                SELECT date(created_at) AS day, COUNT(*) AS c
+                FROM todo_items
+                WHERE guild_id = :guild_id AND user_id = :user_id
+                  AND date(created_at) >= :start_day AND date(created_at) <= :end_day
+                GROUP BY date(created_at)
+            ),
+            done AS (
+                SELECT date(done_at) AS day, COUNT(*) AS c
+                FROM todo_items
+                WHERE guild_id = :guild_id AND user_id = :user_id
+                  AND is_done = 1 AND done_at IS NOT NULL
+                  AND date(done_at) >= :start_day AND date(done_at) <= :end_day
+                GROUP BY date(done_at)
+            )
+            SELECT
+                d.day AS day,
+                COALESCE(c.c, 0) AS created_count,
+                COALESCE(x.c, 0) AS done_count
+            FROM days d
+            LEFT JOIN created c ON c.day = d.day
+            LEFT JOIN done x ON x.day = d.day
+            ORDER BY d.day ASC
+            """,
+            {**base_params, "start_day": start_day_s, "end_day": end_day_s, "days": days},
+            fetch_all=True,
+        ) or []
+
+        daily_labels: List[str] = []
+        daily_created: List[int] = []
+        daily_done: List[int] = []
+        for r in series:
+            if not isinstance(r, dict):
+                continue
+            day_s = r.get("day")
+            if not isinstance(day_s, str):
+                continue
+            daily_labels.append(day_s[5:] if len(day_s) >= 10 else day_s)
+            try:
+                daily_created.append(int(r.get("created_count") or 0))
+            except (TypeError, ValueError):
+                daily_created.append(0)
+            try:
+                daily_done.append(int(r.get("done_count") or 0))
+            except (TypeError, ValueError):
+                daily_done.append(0)
+
+        # Streaks (UTC days) where done_count > 0
+        cur = 0
+        for v in reversed(daily_done):
+            if int(v) > 0:
+                cur += 1
+            else:
+                break
+        best = 0
+        run = 0
+        for v in daily_done:
+            if int(v) > 0:
+                run += 1
+                if run > best:
+                    best = run
+            else:
+                run = 0
+
+        return {
+            "range_start_utc_day": start_day_s,
+            "range_end_utc_day": end_day_s,
+            "open_count": int(open_count),
+            "done_count": int(done_count),
+            "total_count": int(total_count),
+            "created_in_range": int(created_in_range),
+            "done_in_range": int(done_in_range),
+            "current_done_streak_days": int(cur),
+            "best_done_streak_days": int(best),
+            "avg_hours_to_done": avg_hours_to_done,
+            "daily_labels": daily_labels,
+            "daily_created": daily_created,
+            "daily_done": daily_done,
+            "weekday_done_counts": weekday_done_counts,
+        }
+
+    def get_todo_stats_any_scope(
+        self,
+        user_id: int,
+        *,
+        days: int = 30,
+        now_utc: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Same as get_todo_stats, but aggregates across all guild scopes for the user.
+        Useful for DM flows.
+        """
+        days = max(1, min(365, int(days)))
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if isinstance(now_utc, str) and now_utc.strip() else None
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        end_day = now_dt.date()
+        start_day = end_day - datetime.timedelta(days=days - 1)
+        start_day_s = start_day.isoformat()
+        end_day_s = end_day.isoformat()
+
+        base_params = {"user_id": str(int(user_id))}
+
+        row_counts = self._execute_query(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN is_done = 0 THEN 1 END), 0) AS open_count,
+                COALESCE(SUM(CASE WHEN is_done = 1 THEN 1 END), 0) AS done_count,
+                COUNT(*) AS total_count
+            FROM todo_items
+            WHERE user_id = :user_id
+            """,
+            base_params,
+            fetch_one=True,
+        ) or {}
+        open_count = int(row_counts.get("open_count") or 0)
+        done_count = int(row_counts.get("done_count") or 0)
+        total_count = int(row_counts.get("total_count") or 0)
+
+        row_range = self._execute_query(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN date(created_at) >= :start_day AND date(created_at) <= :end_day THEN 1 END), 0) AS created_in_range,
+                COALESCE(SUM(CASE WHEN is_done = 1 AND done_at IS NOT NULL AND date(done_at) >= :start_day AND date(done_at) <= :end_day THEN 1 END), 0) AS done_in_range
+            FROM todo_items
+            WHERE user_id = :user_id
+            """,
+            {**base_params, "start_day": start_day_s, "end_day": end_day_s},
+            fetch_one=True,
+        ) or {}
+        created_in_range = int(row_range.get("created_in_range") or 0)
+        done_in_range = int(row_range.get("done_in_range") or 0)
+
+        row_avg = self._execute_query(
+            """
+            SELECT
+                AVG((julianday(done_at) - julianday(created_at)) * 24.0) AS avg_hours
+            FROM todo_items
+            WHERE user_id = :user_id
+              AND is_done = 1
+              AND done_at IS NOT NULL
+              AND created_at IS NOT NULL
+              AND date(done_at) >= :start_day AND date(done_at) <= :end_day
+            """,
+            {**base_params, "start_day": start_day_s, "end_day": end_day_s},
+            fetch_one=True,
+        ) or {}
+        try:
+            avg_hours_to_done = float(row_avg.get("avg_hours")) if row_avg.get("avg_hours") is not None else None
+        except (TypeError, ValueError):
+            avg_hours_to_done = None
+
+        wd_rows = self._execute_query(
+            """
+            SELECT strftime('%w', done_at) AS wd, COUNT(*) AS c
+            FROM todo_items
+            WHERE user_id = :user_id
+              AND is_done = 1 AND done_at IS NOT NULL
+              AND date(done_at) >= :start_day AND date(done_at) <= :end_day
+            GROUP BY wd
+            """,
+            {**base_params, "start_day": start_day_s, "end_day": end_day_s},
+            fetch_all=True,
+        ) or []
+        weekday_done_counts = [0, 0, 0, 0, 0, 0, 0]
+        for r in wd_rows:
+            if not isinstance(r, dict):
+                continue
+            wd = r.get("wd")
+            try:
+                c = int(r.get("c") or 0)
+            except (TypeError, ValueError):
+                c = 0
+            try:
+                wd_i = int(wd)
+            except (TypeError, ValueError):
+                continue
+            idx = 6 if wd_i == 0 else wd_i - 1
+            if 0 <= idx <= 6:
+                weekday_done_counts[idx] += c
+
+        series = self._execute_query(
+            """
+            WITH RECURSIVE days(day) AS (
+                SELECT date(:end_day, '-' || (:days - 1) || ' day')
+                UNION ALL
+                SELECT date(day, '+1 day') FROM days WHERE day < date(:end_day)
+            ),
+            created AS (
+                SELECT date(created_at) AS day, COUNT(*) AS c
+                FROM todo_items
+                WHERE user_id = :user_id
+                  AND date(created_at) >= :start_day AND date(created_at) <= :end_day
+                GROUP BY date(created_at)
+            ),
+            done AS (
+                SELECT date(done_at) AS day, COUNT(*) AS c
+                FROM todo_items
+                WHERE user_id = :user_id
+                  AND is_done = 1 AND done_at IS NOT NULL
+                  AND date(done_at) >= :start_day AND date(done_at) <= :end_day
+                GROUP BY date(done_at)
+            )
+            SELECT
+                d.day AS day,
+                COALESCE(c.c, 0) AS created_count,
+                COALESCE(x.c, 0) AS done_count
+            FROM days d
+            LEFT JOIN created c ON c.day = d.day
+            LEFT JOIN done x ON x.day = d.day
+            ORDER BY d.day ASC
+            """,
+            {**base_params, "start_day": start_day_s, "end_day": end_day_s, "days": days},
+            fetch_all=True,
+        ) or []
+
+        daily_labels: List[str] = []
+        daily_created: List[int] = []
+        daily_done: List[int] = []
+        for r in series:
+            if not isinstance(r, dict):
+                continue
+            day_s = r.get("day")
+            if not isinstance(day_s, str):
+                continue
+            daily_labels.append(day_s[5:] if len(day_s) >= 10 else day_s)
+            try:
+                daily_created.append(int(r.get("created_count") or 0))
+            except (TypeError, ValueError):
+                daily_created.append(0)
+            try:
+                daily_done.append(int(r.get("done_count") or 0))
+            except (TypeError, ValueError):
+                daily_done.append(0)
+
+        cur = 0
+        for v in reversed(daily_done):
+            if int(v) > 0:
+                cur += 1
+            else:
+                break
+        best = 0
+        run = 0
+        for v in daily_done:
+            if int(v) > 0:
+                run += 1
+                if run > best:
+                    best = run
+            else:
+                run = 0
+
+        return {
+            "range_start_utc_day": start_day_s,
+            "range_end_utc_day": end_day_s,
+            "open_count": int(open_count),
+            "done_count": int(done_count),
+            "total_count": int(total_count),
+            "created_in_range": int(created_in_range),
+            "done_in_range": int(done_in_range),
+            "current_done_streak_days": int(cur),
+            "best_done_streak_days": int(best),
+            "avg_hours_to_done": avg_hours_to_done,
+            "daily_labels": daily_labels,
+            "daily_created": daily_created,
+            "daily_done": daily_done,
+            "weekday_done_counts": weekday_done_counts,
+        }
+
     def list_due_todo_reminders(self, now_utc: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
         limit = max(1, min(500, int(limit)))
         now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -365,9 +758,301 @@ class ProductivityMixin:
         rows = self._execute_query(query, {"now": now_utc, "limit": limit}, fetch_all=True)
         return rows if isinstance(rows, list) else []
 
+    def list_users_with_productivity_data(self, limit: int = 5000) -> List[int]:
+        """
+        Returns distinct user_ids that have habits or todos (any guild scope).
+        """
+        limit = max(1, min(50000, int(limit)))
+        rows = self._execute_query(
+            """
+            SELECT user_id FROM (
+                SELECT DISTINCT user_id FROM habits
+                UNION
+                SELECT DISTINCT user_id FROM todo_items
+            )
+            LIMIT :limit
+            """,
+            {"limit": int(limit)},
+            fetch_all=True,
+        )
+        out: List[int] = []
+        for r in rows or []:
+            if not isinstance(r, dict):
+                continue
+            uid = r.get("user_id")
+            try:
+                out.append(int(uid))
+            except Exception:
+                continue
+        return out
+
+    def list_habits_any_scope(self, user_id: int, limit: int = 200) -> List[Dict[str, Any]]:
+        """
+        Lists habits for a user across all guild scopes.
+        """
+        limit = max(1, min(2000, int(limit)))
+        query = """
+        SELECT id, guild_id, name, days_of_week, due_time_local, tz_name, due_time_utc,
+               remind_enabled, remind_profile,
+               snoozed_until, last_snooze_at, last_snooze_period,
+               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+        FROM habits
+        WHERE user_id = :user_id
+        ORDER BY id DESC
+        LIMIT :limit
+        """
+        rows = self._execute_query(query, {"user_id": str(int(user_id)), "limit": limit}, fetch_all=True)
+        return rows if isinstance(rows, list) else []
+
     # -------------------------
     # Productivity: Habits
     # -------------------------
+    def list_habit_checkins(
+        self,
+        guild_id: int,
+        user_id: int,
+        habit_id: int,
+        *,
+        since_utc: Optional[str] = None,
+        limit: int = 5000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Returns check-in history rows for a habit.
+        Output rows: {checked_in_at, note}
+        """
+        limit = max(1, min(20000, int(limit)))
+        query = """
+        SELECT checked_in_at, note
+        FROM habit_checkins
+        WHERE habit_id = :habit_id
+          AND guild_id = :guild_id
+          AND user_id = :user_id
+        """
+        params: Dict[str, Any] = {
+            "habit_id": int(habit_id),
+            "guild_id": str(int(guild_id)),
+            "user_id": str(int(user_id)),
+            "limit": limit,
+        }
+        if isinstance(since_utc, str) and since_utc.strip():
+            query += " AND checked_in_at >= :since"
+            params["since"] = since_utc.strip()
+        query += " ORDER BY checked_in_at ASC LIMIT :limit"
+        rows = self._execute_query(query, params, fetch_all=True)
+        return rows if isinstance(rows, list) else []
+
+    def list_habit_checkins_any_scope(
+        self,
+        user_id: int,
+        habit_id: int,
+        *,
+        since_utc: Optional[str] = None,
+        limit: int = 5000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Returns check-ins by (user_id, habit_id) regardless of guild scope.
+        """
+        habit = self.get_habit_any_scope(user_id, habit_id)
+        if not habit:
+            return []
+        try:
+            guild_id = int(habit.get("guild_id") or 0)
+        except Exception:
+            guild_id = 0
+        return self.list_habit_checkins(guild_id, user_id, habit_id, since_utc=since_utc, limit=limit)
+
+    def _parse_days_of_week_json(self, days_json: Optional[str]) -> List[int]:
+        try:
+            days = json.loads(days_json or "[]")
+            if not isinstance(days, list):
+                return [0, 1, 2, 3, 4]
+            out = []
+            for d in days:
+                try:
+                    di = int(d)
+                except Exception:
+                    continue
+                if 0 <= di <= 6:
+                    out.append(di)
+            out = sorted(set(out))
+            return out if out else [0, 1, 2, 3, 4]
+        except Exception:
+            return [0, 1, 2, 3, 4]
+
+    def _bucket_checkins_by_local_date(
+        self,
+        checkins: List[Dict[str, Any]],
+        tz: datetime.tzinfo,
+    ) -> Tuple[Set[datetime.date], Dict[datetime.date, int], Dict[int, int], int, Optional[datetime.datetime]]:
+        """
+        Returns:
+          - completed_dates: set of local dates with >=1 check-in
+          - per_day_counts: local date -> count
+          - per_weekday_counts: 0=Mon..6=Sun -> count
+          - total_checkins
+          - last_checkin_utc_dt (max, if any)
+        """
+        completed_dates: Set[datetime.date] = set()
+        per_day_counts: Dict[datetime.date, int] = {}
+        per_weekday_counts: Dict[int, int] = {i: 0 for i in range(7)}
+        total = 0
+        last_dt_utc: Optional[datetime.datetime] = None
+
+        for r in checkins or []:
+            if not isinstance(r, dict):
+                continue
+            ts = r.get("checked_in_at")
+            dt_utc = self._parse_sqlite_utc_timestamp(ts if isinstance(ts, str) else None)
+            if not dt_utc:
+                continue
+            if last_dt_utc is None or dt_utc > last_dt_utc:
+                last_dt_utc = dt_utc
+            dt_local = dt_utc.astimezone(tz)
+            d = dt_local.date()
+            completed_dates.add(d)
+            per_day_counts[d] = int(per_day_counts.get(d, 0)) + 1
+            try:
+                wd = int(dt_local.weekday())
+            except Exception:
+                wd = 0
+            if 0 <= wd <= 6:
+                per_weekday_counts[wd] = int(per_weekday_counts.get(wd, 0)) + 1
+            total += 1
+
+        return completed_dates, per_day_counts, per_weekday_counts, total, last_dt_utc
+
+    def get_habit_stats(
+        self,
+        guild_id: int,
+        user_id: int,
+        habit_id: int,
+        *,
+        days: int = 30,
+        now_utc: Optional[str] = None,
+        streak_max_days: int = 3650,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Computes habit stats for the last N local days and scheduled-day streaks.
+
+        Returns dict with keys:
+          name, tz_name, days_of_week, range_start_local, range_end_local,
+          scheduled_days, completed_days, completion_rate,
+          current_streak, best_streak,
+          total_checkins, last_checkin_at_utc,
+          daily_labels, daily_counts,
+          weekday_counts (Mon..Sun)
+        """
+        days = max(1, min(365, int(days)))
+        streak_max_days = max(30, min(3650, int(streak_max_days)))
+
+        habit = self.get_habit(guild_id, user_id, habit_id)
+        if not habit:
+            return None
+
+        tz_name = str(habit.get("tz_name") or "UTC").strip()
+        tz = self._tzinfo_from_name(tz_name)
+        sched_days = self._parse_days_of_week_json(habit.get("days_of_week"))
+        sched_set = set(sched_days)
+
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if isinstance(now_utc, str) and now_utc.strip() else None
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        now_local = now_dt.astimezone(tz)
+        range_end_local = now_local.date()
+        range_start_local = range_end_local - datetime.timedelta(days=days - 1)
+
+        created_dt = self._parse_sqlite_utc_timestamp(habit.get("created_at"))
+        created_local_date = created_dt.astimezone(tz).date() if created_dt else range_start_local
+        # If caller overrides `now_utc` to an earlier time than the habit's created_at (tests / backfills),
+        # clamp the effective "created" bound so stats still work for that requested window.
+        if created_local_date > range_end_local:
+            created_local_date = range_start_local
+        # Avoid iterating unbounded histories for streak computations.
+        earliest_local_for_streak = max(created_local_date, range_end_local - datetime.timedelta(days=streak_max_days))
+
+        # Fetch checkins (for bucketing): best-effort, limited.
+        # We fetch from earliest_local_for_streak - 2 days (UTC) to reduce edge misses due to tz offsets.
+        earliest_streak_dt_local = datetime.datetime.combine(earliest_local_for_streak, datetime.time(0, 0), tzinfo=tz)
+        earliest_streak_dt_utc = earliest_streak_dt_local.astimezone(datetime.timezone.utc) - datetime.timedelta(days=2)
+        since_utc = earliest_streak_dt_utc.strftime("%Y-%m-%d %H:%M:%S")
+
+        checkins = self.list_habit_checkins(guild_id, user_id, habit_id, since_utc=since_utc, limit=20000)
+        completed_dates, per_day_counts, per_weekday_counts, total_checkins, last_dt_utc = self._bucket_checkins_by_local_date(checkins, tz)
+
+        # Daily series (last N days)
+        daily_labels: List[str] = []
+        daily_counts: List[int] = []
+        scheduled_days = 0
+        completed_days = 0
+
+        d = range_start_local
+        while d <= range_end_local:
+            label = d.strftime("%m-%d")
+            daily_labels.append(label)
+            cnt = int(per_day_counts.get(d, 0))
+            daily_counts.append(cnt)
+            if d.weekday() in sched_set:
+                scheduled_days += 1
+                if cnt > 0:
+                    completed_days += 1
+            d = d + datetime.timedelta(days=1)
+
+        completion_rate = (float(completed_days) / float(scheduled_days)) if scheduled_days > 0 else 0.0
+
+        # Streaks are over *scheduled days* only.
+        # Best streak since earliest_local_for_streak
+        best = 0
+        run = 0
+        d = earliest_local_for_streak
+        while d <= range_end_local:
+            if d.weekday() in sched_set:
+                if d in completed_dates:
+                    run += 1
+                    if run > best:
+                        best = run
+                else:
+                    run = 0
+            d = d + datetime.timedelta(days=1)
+
+        # Current streak: walk backwards through scheduled days
+        cur = 0
+        d = range_end_local
+        # Find the last scheduled day <= today
+        guard = 0
+        while d.weekday() not in sched_set and guard < 14:
+            d = d - datetime.timedelta(days=1)
+            guard += 1
+        # Now count consecutive completions on scheduled days
+        guard = 0
+        while d >= earliest_local_for_streak and guard < streak_max_days:
+            if d.weekday() in sched_set:
+                if d in completed_dates:
+                    cur += 1
+                else:
+                    break
+            d = d - datetime.timedelta(days=1)
+            guard += 1
+
+        weekday_counts = [int(per_weekday_counts.get(i, 0)) for i in range(7)]
+
+        return {
+            "id": int(habit_id),
+            "name": habit.get("name") or "Habit",
+            "tz_name": tz_name or "UTC",
+            "days_of_week": sched_days,
+            "range_start_local": range_start_local.isoformat(),
+            "range_end_local": range_end_local.isoformat(),
+            "scheduled_days": int(scheduled_days),
+            "completed_days": int(completed_days),
+            "completion_rate": float(completion_rate),
+            "current_streak": int(cur),
+            "best_streak": int(best),
+            "total_checkins": int(total_checkins),
+            "last_checkin_at_utc": (last_dt_utc.strftime("%Y-%m-%d %H:%M:%S") if last_dt_utc else None),
+            "daily_labels": daily_labels,
+            "daily_counts": daily_counts,
+            "weekday_counts": weekday_counts,
+        }
     def create_habit(
         self,
         guild_id: int,

@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timedelta, timezone, time as dtime
 import json
 from typing import List, Optional
+from functools import partial
 
 import discord
 from discord.ext import commands, tasks
@@ -274,11 +275,205 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
     async def cog_load(self):
         self.reminder_loop.start()
+        self.monthly_report_loop.start()
         logger.info("ProductivityCog loaded and reminder loop started.")
 
     async def cog_unload(self):
         self.reminder_loop.cancel()
+        self.monthly_report_loop.cancel()
         logger.info("ProductivityCog unloaded and reminder loop cancelled.")
+
+    def _month_key(self, dt_utc: datetime) -> str:
+        return dt_utc.strftime("%Y-%m")
+
+    def _prev_month_range_utc(self, now_utc: datetime) -> tuple[datetime, datetime]:
+        """
+        Returns (start_utc, end_utc) for the previous calendar month in UTC.
+        """
+        now_utc = now_utc.astimezone(timezone.utc)
+        first_this = datetime(now_utc.year, now_utc.month, 1, tzinfo=timezone.utc)
+        end_prev = first_this - timedelta(seconds=1)
+        start_prev = datetime(end_prev.year, end_prev.month, 1, tzinfo=timezone.utc)
+        return start_prev, end_prev
+
+    def _prev_month_range_in_tz(self, now_utc: datetime, tz) -> tuple[datetime, datetime]:
+        """
+        Returns (start_local, end_local) for the previous calendar month in the given tz.
+        """
+        now_local = now_utc.astimezone(tz)
+        first_this_local = datetime(now_local.year, now_local.month, 1, tzinfo=tz)
+        end_prev_local = first_this_local - timedelta(seconds=1)
+        start_prev_local = datetime(end_prev_local.year, end_prev_local.month, 1, tzinfo=tz)
+        return start_prev_local, end_prev_local
+
+    async def _send_monthly_report_for_user(self, user_id: int, *, now_utc: datetime) -> bool:
+        """
+        Generates and DMs a monthly report to the user. Returns True if sent.
+        """
+        if not self.db_manager:
+            return False
+        # Respect DND (best-effort). We'll retry next loop.
+        if await self._is_user_in_dnd(int(user_id)):
+            return False
+
+        # Opt-out flag
+        enabled = await self.bot.loop.run_in_executor(
+            None, self.db_manager.get_user_preference, int(user_id), "monthly_report_enabled", True
+        )
+        if enabled is False:
+            return False
+
+        # Prevent duplicates: store last sent for current month key (UTC)
+        current_month_key = self._month_key(now_utc)
+        last_sent = await self.bot.loop.run_in_executor(
+            None, self.db_manager.get_user_preference, int(user_id), "monthly_report_last_sent_ym", None
+        )
+        if isinstance(last_sent, str) and last_sent.strip() == current_month_key:
+            return False
+
+        # We report the *previous month*
+        start_prev_utc, end_prev_utc = self._prev_month_range_utc(now_utc)
+        prev_label = start_prev_utc.strftime("%Y-%m")
+
+        # --- To-dos (UTC month) ---
+        todo_days = (end_prev_utc.date() - start_prev_utc.date()).days + 1
+        todo_stats = None
+        if hasattr(self.db_manager, "get_todo_stats_any_scope"):
+            todo_stats = await self.bot.loop.run_in_executor(
+                None, lambda: self.db_manager.get_todo_stats_any_scope(int(user_id), days=int(todo_days), now_utc=end_prev_utc.strftime("%Y-%m-%d %H:%M:%S"))
+            )
+
+        # --- Habits (per-habit tz month) ---
+        habits = []
+        if hasattr(self.db_manager, "list_habits_any_scope"):
+            habits = await self.bot.loop.run_in_executor(None, self.db_manager.list_habits_any_scope, int(user_id), 200)
+
+        habit_summaries = []
+        for h in habits or []:
+            try:
+                hid = int(h.get("id"))
+            except Exception:
+                continue
+            try:
+                guild_id = int(h.get("guild_id") or 0)
+            except Exception:
+                guild_id = 0
+            tz = _tzinfo_from_name(h.get("tz_name"))
+            start_local, end_local = self._prev_month_range_in_tz(now_utc, tz)
+            habit_days = (end_local.date() - start_local.date()).days + 1
+            # Pick an end-of-month moment in the habit tz to align get_habit_stats local window.
+            end_local_dt = datetime.combine(end_local.date(), dtime(23, 59, 59)).replace(tzinfo=tz)
+            end_local_as_utc = end_local_dt.astimezone(timezone.utc)
+            stats = await self.bot.loop.run_in_executor(
+                None,
+                lambda: self.db_manager.get_habit_stats(
+                    guild_id,
+                    int(user_id),
+                    hid,
+                    days=int(habit_days),
+                    now_utc=end_local_as_utc.strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
+            if not isinstance(stats, dict):
+                continue
+            habit_summaries.append(stats)
+
+        # Build embed
+        embed = discord.Embed(title=f"📬 Monthly report — {prev_label}", color=discord.Color.dark_teal())
+
+        if isinstance(todo_stats, dict):
+            open_count = int(todo_stats.get("open_count") or 0)
+            done_in = int(todo_stats.get("done_in_range") or 0)
+            created_in = int(todo_stats.get("created_in_range") or 0)
+            avg_hours = todo_stats.get("avg_hours_to_done")
+            avg_str = "n/a" if avg_hours is None else f"{float(avg_hours):.1f}h"
+            cur = int(todo_stats.get("current_done_streak_days") or 0)
+            best = int(todo_stats.get("best_done_streak_days") or 0)
+            embed.add_field(
+                name="✅ To‑dos (UTC month)",
+                value=(
+                    f"- Created: **{created_in}**\n"
+                    f"- Completed: **{done_in}**\n"
+                    f"- Avg time-to-done: **{avg_str}**\n"
+                    f"- Done streak (days w/ ≥1 done): **{best}** best, **{cur}** current\n"
+                    f"- Still open now: **{open_count}**"
+                ),
+                inline=False,
+            )
+        else:
+            embed.add_field(name="✅ To‑dos", value="No to-do stats available.", inline=False)
+
+        if habit_summaries:
+            # Sort by scheduled_days desc, show top 8 (keeps DM readable)
+            habit_summaries.sort(key=lambda s: int(s.get("scheduled_days") or 0), reverse=True)
+            lines = []
+            for s in habit_summaries[:8]:
+                hid = int(s.get("id") or 0)
+                name = str(s.get("name") or "Habit")
+                scheduled = int(s.get("scheduled_days") or 0)
+                completed = int(s.get("completed_days") or 0)
+                rate = float(s.get("completion_rate") or 0.0) * 100.0
+                best = int(s.get("best_streak") or 0)
+                lines.append(f"- **#{hid}** {name}: **{completed}/{scheduled}** (**{rate:.0f}%**), best streak **{best}**")
+            embed.add_field(name="📌 Habits (prev month in each habit’s TZ)", value="\n".join(lines)[:1024], inline=False)
+        else:
+            embed.add_field(name="📌 Habits", value="No habit stats available.", inline=False)
+
+        # Attach charts (keep it to 1-2 images max)
+        files: List[discord.File] = []
+        try:
+            from utils.chart_utils import get_todo_daily_created_done_chart_image
+            if isinstance(todo_stats, dict):
+                labels = todo_stats.get("daily_labels") or []
+                created = todo_stats.get("daily_created") or []
+                done = todo_stats.get("daily_done") or []
+                title = f"To‑dos — created vs done ({prev_label})"
+                img = await self.bot.loop.run_in_executor(None, partial(get_todo_daily_created_done_chart_image, title, labels, created, done))
+                if img:
+                    files.append(discord.File(fp=img, filename=f"monthly_todos_{prev_label}.png"))
+        except Exception:
+            pass
+
+        sent = await self._dm_user(int(user_id), embed=embed)
+        if not sent:
+            return False
+        # If we have charts, send them as a follow-up DM message.
+        if files:
+            await self._dm_user(int(user_id), content="Charts:", embed=None)
+            user = self.bot.get_user(int(user_id)) or await self.bot.fetch_user(int(user_id))
+            try:
+                await user.send(files=files)
+            except Exception:
+                pass
+
+        await self.bot.loop.run_in_executor(
+            None, self.db_manager.set_user_preference, int(user_id), "monthly_report_last_sent_ym", current_month_key
+        )
+        return True
+
+    @tasks.loop(minutes=60)
+    async def monthly_report_loop(self):
+        """
+        Sends monthly reports on/after the start of a new month (best-effort).
+        """
+        if not self.db_manager:
+            return
+        now = _utc_now()
+        # Only attempt near the start of the month (first 2 days) to reduce load.
+        if now.day not in (1, 2):
+            return
+
+        # Iterate users who actually have data.
+        user_ids = await self.bot.loop.run_in_executor(None, self.db_manager.list_users_with_productivity_data, 5000)
+        for uid in user_ids or []:
+            try:
+                await self._send_monthly_report_for_user(int(uid), now_utc=now)
+            except Exception as e:
+                logger.warning(f"monthly_report_loop error for user {uid}: {e}")
+
+    @monthly_report_loop.before_loop
+    async def before_monthly_report_loop(self):
+        await self.bot.wait_until_ready()
 
     async def _defer_if_interaction(self, ctx: commands.Context, *, ephemeral: bool = True) -> None:
         if not getattr(ctx, "interaction", None):
@@ -380,6 +575,24 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         except discord.HTTPException:
             return False
 
+    async def _load_habit_for_ctx(self, ctx: commands.Context, habit_id: int) -> tuple[Optional[dict], int]:
+        """
+        Loads habit for guild or DM context, returning (habit_row, resolved_guild_id).
+        In DMs, attempts to resolve the habit's original guild scope via any-scope lookup.
+        """
+        is_dm = ctx.guild is None
+        guild_id = _scope_guild_id_from_ctx(ctx)
+        if is_dm and hasattr(self.db_manager, "get_habit_any_scope"):
+            habit = await self.bot.loop.run_in_executor(None, self.db_manager.get_habit_any_scope, ctx.author.id, int(habit_id))
+            if habit and "guild_id" in habit:
+                try:
+                    guild_id = int(habit.get("guild_id") or 0)
+                except Exception:
+                    guild_id = 0
+            return habit, guild_id
+        habit = await self.bot.loop.run_in_executor(None, self.db_manager.get_habit, guild_id, ctx.author.id, int(habit_id))
+        return habit, guild_id
+
     # -------------------------
     # To-do commands
     # -------------------------
@@ -478,6 +691,131 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Could not find that to-do (or it’s not yours).", ephemeral=not is_dm)
             return
         await self.send_response(ctx, f"🗑️ Removed **#{todo_id}**.", ephemeral=not is_dm)
+
+    @commands.hybrid_command(name="todo_stats", description="Show your to-do stats (open/done, streak, speed).")
+    @discord.app_commands.describe(days="How many past days to analyze (default: 30).")
+    async def todo_stats(self, ctx: commands.Context, days: int = 30):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        days = max(1, min(365, int(days)))
+        guild_id = _scope_guild_id_from_ctx(ctx)
+
+        if is_dm and hasattr(self.db_manager, "get_todo_stats_any_scope"):
+            stats = await self.bot.loop.run_in_executor(None, lambda: self.db_manager.get_todo_stats_any_scope(ctx.author.id, days=days))
+            scope_label = "all scopes"
+        else:
+            stats = await self.bot.loop.run_in_executor(None, lambda: self.db_manager.get_todo_stats(guild_id, ctx.author.id, days=days))
+            scope_label = "this server" if ctx.guild else "DM scope"
+
+        if not isinstance(stats, dict):
+            await self.send_response(ctx, "No stats available yet.", ephemeral=not is_dm)
+            return
+
+        open_count = int(stats.get("open_count") or 0)
+        done_count = int(stats.get("done_count") or 0)
+        total_count = int(stats.get("total_count") or 0)
+        created_in = int(stats.get("created_in_range") or 0)
+        done_in = int(stats.get("done_in_range") or 0)
+        cur_streak = int(stats.get("current_done_streak_days") or 0)
+        best_streak = int(stats.get("best_done_streak_days") or 0)
+        avg_hours = stats.get("avg_hours_to_done")
+        avg_str = "n/a" if avg_hours is None else f"{float(avg_hours):.1f}h"
+
+        rstart = stats.get("range_start_utc_day") or ""
+        rend = stats.get("range_end_utc_day") or ""
+
+        embed = discord.Embed(title="📊 To‑do stats", color=discord.Color.blurple())
+        embed.add_field(name=f"Scope ({scope_label})", value=f"- Range (UTC day): **{rstart} → {rend}**", inline=False)
+        embed.add_field(name="Counts", value=f"- Open: **{open_count}**\n- Done: **{done_count}**\n- Total: **{total_count}**", inline=False)
+        embed.add_field(
+            name=f"Last {days} days",
+            value=f"- Created: **{created_in}**\n- Completed: **{done_in}**\n- Avg time-to-done: **{avg_str}**",
+            inline=False,
+        )
+        embed.add_field(
+            name="Streaks (UTC day with ≥1 completed task)",
+            value=f"- Current: **{cur_streak}** days\n- Best (in range): **{best_streak}** days",
+            inline=False,
+        )
+        await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
+
+    @commands.hybrid_command(name="todo_graph", description="Show graphs for your to-dos (created vs done + weekday breakdown).")
+    @discord.app_commands.describe(
+        days="How many past days to chart (default: 30).",
+        kind="trend | weekday | both (default: both)",
+    )
+    async def todo_graph(self, ctx: commands.Context, days: int = 30, kind: str = "both"):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        from utils.chart_utils import get_todo_daily_created_done_chart_image, get_todo_weekday_done_chart_image
+
+        days = max(1, min(365, int(days)))
+        kind_l = str(kind or "both").strip().lower()
+        if kind_l not in {"trend", "weekday", "both"}:
+            await self.send_response(ctx, "Kind must be `trend`, `weekday`, or `both`.", ephemeral=not is_dm)
+            return
+
+        guild_id = _scope_guild_id_from_ctx(ctx)
+        if is_dm and hasattr(self.db_manager, "get_todo_stats_any_scope"):
+            stats = await self.bot.loop.run_in_executor(None, lambda: self.db_manager.get_todo_stats_any_scope(ctx.author.id, days=days))
+            title_scope = "To‑dos — all scopes"
+        else:
+            stats = await self.bot.loop.run_in_executor(None, lambda: self.db_manager.get_todo_stats(guild_id, ctx.author.id, days=days))
+            title_scope = "To‑dos — this server" if ctx.guild else "To‑dos — DM scope"
+
+        if not isinstance(stats, dict):
+            await self.send_response(ctx, "No graph data yet.", ephemeral=not is_dm)
+            return
+
+        labels = stats.get("daily_labels") or []
+        created = stats.get("daily_created") or []
+        done = stats.get("daily_done") or []
+        weekday_counts = stats.get("weekday_done_counts") or [0, 0, 0, 0, 0, 0, 0]
+        weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+        files: List[discord.File] = []
+        if kind_l in {"trend", "both"}:
+            title = f"{title_scope} — created vs done (last {days}d)"
+            img = await self.bot.loop.run_in_executor(None, partial(get_todo_daily_created_done_chart_image, title, labels, created, done))
+            if img:
+                files.append(discord.File(fp=img, filename="todo_trend.png"))
+
+        if kind_l in {"weekday", "both"}:
+            title = f"{title_scope} — done by weekday (UTC)"
+            img2 = await self.bot.loop.run_in_executor(None, partial(get_todo_weekday_done_chart_image, title, weekday_labels, weekday_counts))
+            if img2:
+                files.append(discord.File(fp=img2, filename="todo_weekday.png"))
+
+        if not files:
+            await self.send_response(ctx, "❌ Could not generate charts right now.", ephemeral=not is_dm)
+            return
+
+        if ctx.interaction:
+            await ctx.interaction.followup.send(content="Here you go:", files=files, ephemeral=not is_dm)
+        else:
+            await ctx.send(content="Here you go:", files=files)
+
+    @commands.hybrid_command(name="monthly_report", description="Enable/disable monthly stats DM reports.")
+    @discord.app_commands.describe(enabled="Enable monthly reports (default: True).")
+    async def monthly_report(self, ctx: commands.Context, enabled: bool = True):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+        ok = await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, ctx.author.id, "monthly_report_enabled", bool(enabled))
+        if not ok:
+            await self.send_response(ctx, "Could not update that setting.", ephemeral=not is_dm)
+            return
+        await self.send_response(ctx, ("✅ Monthly reports enabled." if enabled else "🔕 Monthly reports disabled."), ephemeral=not is_dm)
 
     @commands.hybrid_command(name="todo_nag", description="Enable/disable escalating reminders for a to-do item (DM).")
     @discord.app_commands.describe(
@@ -780,6 +1118,119 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Could not check in for that habit.", ephemeral=not is_dm)
             return
         await self.send_response(ctx, f"✅ Check-in saved for **#{habit_id}**. Next due: `{_sqlite_utc_timestamp(next_due)}`.", ephemeral=not is_dm)
+
+    @commands.hybrid_command(name="habit_stats", description="Show stats for a habit (streaks, completion rate, totals).")
+    @discord.app_commands.describe(habit_id="The numeric id (from /habit_list).", days="How many past days to analyze (default: 30).")
+    async def habit_stats(self, ctx: commands.Context, habit_id: int, days: int = 30):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        days = max(1, min(365, int(days)))
+        habit, guild_id = await self._load_habit_for_ctx(ctx, int(habit_id))
+        if not habit:
+            await self.send_response(ctx, "Could not find that habit (or it’s not yours).", ephemeral=not is_dm)
+            return
+
+        stats = await self.bot.loop.run_in_executor(
+            None,
+            lambda: self.db_manager.get_habit_stats(guild_id, ctx.author.id, int(habit_id), days=days),
+        )
+        if not isinstance(stats, dict):
+            await self.send_response(ctx, "No stats available yet. Try checking in a few times first.", ephemeral=not is_dm)
+            return
+
+        name = str(stats.get("name") or habit.get("name") or "Habit")
+        scheduled = int(stats.get("scheduled_days") or 0)
+        completed = int(stats.get("completed_days") or 0)
+        rate = float(stats.get("completion_rate") or 0.0) * 100.0
+        cur_streak = int(stats.get("current_streak") or 0)
+        best_streak = int(stats.get("best_streak") or 0)
+        total_checkins = int(stats.get("total_checkins") or 0)
+        last_checkin = stats.get("last_checkin_at_utc") or "n/a"
+        tz_name = str(stats.get("tz_name") or habit.get("tz_name") or "UTC")
+        rstart = stats.get("range_start_local") or ""
+        rend = stats.get("range_end_local") or ""
+
+        embed = discord.Embed(title=f"📊 Habit stats — {name} (#{habit_id})", color=discord.Color.green())
+        embed.add_field(name=f"Last {days} days (local)", value=f"- Range: **{rstart} → {rend}**\n- TZ: `{tz_name}`", inline=False)
+        embed.add_field(
+            name="Completion vs schedule",
+            value=f"- Scheduled days: **{scheduled}**\n- Completed days: **{completed}**\n- Rate: **{rate:.0f}%**",
+            inline=False,
+        )
+        embed.add_field(
+            name="Streaks (scheduled days)",
+            value=f"- Current: **{cur_streak}**\n- Best (last ~10y max): **{best_streak}**",
+            inline=False,
+        )
+        embed.add_field(name="Totals", value=f"- Total check-ins: **{total_checkins}**\n- Last check-in (UTC): `{last_checkin}`", inline=False)
+        await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
+
+    @commands.hybrid_command(name="habit_graph", description="Show graphs for a habit (trend + weekday breakdown).")
+    @discord.app_commands.describe(
+        habit_id="The numeric id (from /habit_list).",
+        days="How many past days to chart (default: 30).",
+        kind="trend | weekday | both (default: both)",
+    )
+    async def habit_graph(self, ctx: commands.Context, habit_id: int, days: int = 30, kind: str = "both"):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        from utils.chart_utils import get_habit_daily_chart_image, get_habit_weekday_chart_image
+
+        days = max(1, min(365, int(days)))
+        kind_l = str(kind or "both").strip().lower()
+        if kind_l not in {"trend", "weekday", "both"}:
+            await self.send_response(ctx, "Kind must be `trend`, `weekday`, or `both`.", ephemeral=not is_dm)
+            return
+
+        habit, guild_id = await self._load_habit_for_ctx(ctx, int(habit_id))
+        if not habit:
+            await self.send_response(ctx, "Could not find that habit (or it’s not yours).", ephemeral=not is_dm)
+            return
+
+        stats = await self.bot.loop.run_in_executor(
+            None,
+            lambda: self.db_manager.get_habit_stats(guild_id, ctx.author.id, int(habit_id), days=days),
+        )
+        if not isinstance(stats, dict):
+            await self.send_response(ctx, "No graph data yet. Try checking in a few times first.", ephemeral=not is_dm)
+            return
+
+        name = str(stats.get("name") or habit.get("name") or "Habit")
+        labels = stats.get("daily_labels") or []
+        values = stats.get("daily_counts") or []
+        weekday_counts = stats.get("weekday_counts") or [0, 0, 0, 0, 0, 0, 0]
+        weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+        files: List[discord.File] = []
+        if kind_l in {"trend", "both"}:
+            title = f"{name} — daily check-ins (last {days}d)"
+            img = await self.bot.loop.run_in_executor(None, partial(get_habit_daily_chart_image, title, labels, values))
+            if img:
+                files.append(discord.File(fp=img, filename=f"habit_{habit_id}_trend.png"))
+
+        if kind_l in {"weekday", "both"}:
+            title = f"{name} — weekday distribution"
+            img2 = await self.bot.loop.run_in_executor(None, partial(get_habit_weekday_chart_image, title, weekday_labels, weekday_counts))
+            if img2:
+                files.append(discord.File(fp=img2, filename=f"habit_{habit_id}_weekday.png"))
+
+        if not files:
+            await self.send_response(ctx, "❌ Could not generate charts right now.", ephemeral=not is_dm)
+            return
+
+        content = "Here you go:"
+        if ctx.interaction:
+            await ctx.interaction.followup.send(content=content, files=files, ephemeral=not is_dm)
+        else:
+            await ctx.send(content=content, files=files)
 
     @commands.hybrid_command(name="habit_remove", description="Remove a habit.")
     @discord.app_commands.describe(habit_id="The numeric id (from /habit_list).")
