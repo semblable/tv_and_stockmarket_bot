@@ -555,13 +555,14 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             ephemeral=not is_dm,
         )
 
-    @commands.hybrid_command(name="habit_edit", description="Edit an existing habit (name/schedule/time/timezone).")
+    @commands.hybrid_command(name="habit_edit", description="Edit an existing habit (name/schedule/time/timezone/reminder profile).")
     @discord.app_commands.describe(
         habit_id="The numeric id (from /habit_list).",
         name="New name (optional).",
         days="New schedule days (optional, e.g. 'mon-fri', 'mon,wed,fri').",
         due_time="New due time HH:MM (optional). Interpreted in tz_name.",
         tz_name="Timezone name (optional). Use 'UTC' or an IANA name like 'Europe/Warsaw'.",
+        remind_profile="gentle | normal | aggressive | quiet (optional).",
     )
     async def habit_edit(
         self,
@@ -571,6 +572,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         days: Optional[str] = None,
         due_time: Optional[str] = None,
         tz_name: Optional[str] = None,
+        remind_profile: Optional[str] = None,
     ):
         is_dm = ctx.guild is None
         await self._defer_if_interaction(ctx, ephemeral=not is_dm)
@@ -595,6 +597,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
         # Determine what changed
         schedule_changed = any(v is not None for v in (days, due_time, tz_name))
+        profile_changed = remind_profile is not None
 
         # Days
         if days is None:
@@ -649,6 +652,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                     due_time_local=(new_due_str if due_time is not None else None),
                     tz_name=(new_tz_name if tz_name is not None else None),
                     next_due_at_utc=next_due_s,
+                    remind_profile=remind_profile,
                     remind_level=(0 if schedule_changed else None),
                     clear_next_remind_at=bool(schedule_changed),
                     clear_snoozed_until=bool(schedule_changed),
@@ -666,6 +670,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                     due_time_local=(new_due_str if due_time is not None else None),
                     tz_name=(new_tz_name if tz_name is not None else None),
                     next_due_at_utc=next_due_s,
+                    remind_profile=remind_profile,
                     remind_level=(0 if schedule_changed else None),
                     clear_next_remind_at=bool(schedule_changed),
                     clear_snoozed_until=bool(schedule_changed),
@@ -678,7 +683,11 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
         await self.send_response(
             ctx,
-            f"✅ Updated habit **#{habit_id}**." + (f" Next due: `{_sqlite_utc_timestamp(next_due)}` (UTC)." if schedule_changed else ""),
+            (
+                f"✅ Updated habit **#{habit_id}**."
+                + (f" Next due: `{_sqlite_utc_timestamp(next_due)}` (UTC)." if schedule_changed else "")
+                + (f" Reminders: `{str(remind_profile).strip().lower()}`." if profile_changed else "")
+            ),
             ephemeral=not is_dm,
         )
 

@@ -323,3 +323,25 @@ def test_habit_edit_updates_name_and_clears_snooze(db_manager):
     assert h2 is not None
     assert h2.get("name") == "New name"
     assert h2.get("snoozed_until") is None
+
+
+def test_habit_edit_can_update_remind_profile_via_set_habit_schedule_and_due(db_manager):
+    guild_id = 0
+    user_id = 556
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Profile test",
+        [0, 1, 2, 3, 4],
+        "18:00",
+        "Europe/Warsaw",
+        True,
+        "2100-01-01 00:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    ok = db_manager.set_habit_schedule_and_due(guild_id, user_id, habit_id, remind_profile="aggressive")
+    assert ok is True
+    h = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h is not None
+    assert (h.get("remind_profile") or "").lower() == "aggressive"
