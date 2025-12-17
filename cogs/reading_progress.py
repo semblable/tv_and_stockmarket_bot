@@ -258,10 +258,13 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
                 return False
 
             now_t = datetime.now().time()
-            if dnd_start <= dnd_end:
-                return dnd_start <= now_t <= dnd_end
+            # Treat DND as a half-open interval [start, end) so the "end" time is not suppressed.
+            if dnd_start == dnd_end:
+                return False
+            if dnd_start < dnd_end:
+                return dnd_start <= now_t < dnd_end
             # crosses midnight
-            return now_t >= dnd_start or now_t <= dnd_end
+            return now_t >= dnd_start or now_t < dnd_end
         except Exception:
             return False
 
@@ -1248,5 +1251,7 @@ class ReadingProgressCog(commands.Cog, name="Reading"):
 async def setup(bot: commands.Bot):
     await bot.add_cog(ReadingProgressCog(bot, db_manager=bot.db_manager))
     logger.info("ReadingProgressCog has been loaded.")
+
+
 
 

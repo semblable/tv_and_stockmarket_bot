@@ -230,6 +230,37 @@ class Utility(commands.Cog):
         for schedule in schedules:
             user_id = int(schedule['user_id'])
             location = schedule['location']
+
+            # Respect DND (best-effort) for consistency with other reminder systems.
+            try:
+                dnd_enabled = await self.bot.loop.run_in_executor(
+                    None, self.bot.db_manager.get_user_preference, user_id, "dnd_enabled", False
+                )
+                if dnd_enabled:
+                    dnd_start_str = await self.bot.loop.run_in_executor(
+                        None, self.bot.db_manager.get_user_preference, user_id, "dnd_start_time", "00:00"
+                    )
+                    dnd_end_str = await self.bot.loop.run_in_executor(
+                        None, self.bot.db_manager.get_user_preference, user_id, "dnd_end_time", "00:00"
+                    )
+                    try:
+                        start_t = datetime.datetime.strptime(str(dnd_start_str), "%H:%M").time()
+                        end_t = datetime.datetime.strptime(str(dnd_end_str), "%H:%M").time()
+                        now_t = datetime.datetime.now().time()
+                        in_dnd = False
+                        # Half-open interval [start, end)
+                        if start_t != end_t:
+                            if start_t < end_t:
+                                in_dnd = start_t <= now_t < end_t
+                            else:
+                                in_dnd = now_t >= start_t or now_t < end_t
+                        if in_dnd:
+                            continue
+                    except Exception:
+                        # If parsing fails, don't suppress.
+                        pass
+            except Exception:
+                pass
             
             # If location is not in schedule, check default preference
             if not location:

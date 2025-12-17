@@ -232,3 +232,4 @@ def get_app_details(appid: int, *, cc: str = "us", l: str = "english") -> Option
         "platforms": platforms_out,
     }
 
+

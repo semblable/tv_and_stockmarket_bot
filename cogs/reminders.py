@@ -195,9 +195,13 @@ class RemindersCog(commands.Cog, name="Reminders"):
                 end_t = dtime(0, 0)
 
             now_t = datetime.now().time()
-            if start_t <= end_t:
-                return start_t <= now_t <= end_t
-            return now_t >= start_t or now_t <= end_t
+            # Treat DND as a half-open interval [start, end) so the "end" time is not suppressed.
+            # This avoids surprises like DND 22:00-07:00 suppressing notifications at exactly 07:00.
+            if start_t == end_t:
+                return False
+            if start_t < end_t:
+                return start_t <= now_t < end_t
+            return now_t >= start_t or now_t < end_t
         except Exception:
             return False
 

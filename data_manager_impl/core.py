@@ -513,6 +513,19 @@ class DataManagerCore:
                         commit=True,
                     )
                     logger.info("Column 'last_snooze_period' added successfully to habits.")
+                if "is_archived" not in col_names:
+                    # Archiving replaces destructive deletes so users don't lose stats/history accidentally.
+                    self._execute_query(
+                        "ALTER TABLE habits ADD COLUMN is_archived INTEGER NOT NULL DEFAULT 0;",
+                        commit=True,
+                    )
+                    logger.info("Column 'is_archived' added successfully to habits.")
+                if "archived_at" not in col_names:
+                    self._execute_query(
+                        "ALTER TABLE habits ADD COLUMN archived_at TIMESTAMP;",
+                        commit=True,
+                    )
+                    logger.info("Column 'archived_at' added successfully to habits.")
         except Exception as e:
             logger.warning(f"Could not apply habits schema migration (due_time_local/tz_name): {e}")
         try:

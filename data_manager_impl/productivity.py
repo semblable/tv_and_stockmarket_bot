@@ -814,9 +814,11 @@ class ProductivityMixin:
         SELECT id, guild_id, name, days_of_week, due_time_local, tz_name, due_time_utc,
                remind_enabled, remind_profile,
                snoozed_until, last_snooze_at, last_snooze_period,
-               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at,
+               COALESCE(is_archived, 0) AS is_archived, archived_at
         FROM habits
         WHERE user_id = :user_id
+          AND COALESCE(is_archived, 0) = 0
         ORDER BY id DESC
         LIMIT :limit
         """
@@ -968,7 +970,7 @@ class ProductivityMixin:
             days_n = max(1, min(self._HABIT_STATS_MAX_DAYS, int(days)))
         streak_max_days = max(30, min(3650, int(streak_max_days)))
 
-        habit = self.get_habit(guild_id, user_id, habit_id)
+        habit = self.get_habit(guild_id, user_id, habit_id, include_archived=True)
         if not habit:
             return None
 
@@ -1340,28 +1342,33 @@ class ProductivityMixin:
         SELECT id, name, days_of_week, due_time_local, tz_name, due_time_utc,
                remind_enabled, remind_profile,
                snoozed_until, last_snooze_at, last_snooze_period,
-               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at,
+               COALESCE(is_archived, 0) AS is_archived, archived_at
         FROM habits
         WHERE guild_id = :guild_id AND user_id = :user_id
+          AND COALESCE(is_archived, 0) = 0
         ORDER BY id DESC
         LIMIT :limit
         """
         rows = self._execute_query(query, {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "limit": limit}, fetch_all=True)
         return rows if isinstance(rows, list) else []
 
-    def get_habit(self, guild_id: int, user_id: int, habit_id: int) -> Optional[Dict[str, Any]]:
+    def get_habit(self, guild_id: int, user_id: int, habit_id: int, *, include_archived: bool = False) -> Optional[Dict[str, Any]]:
         query = """
         SELECT id, name, days_of_week, due_time_local, tz_name, due_time_utc,
                remind_enabled, remind_profile,
                snoozed_until, last_snooze_at, last_snooze_period,
-               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at,
+               COALESCE(is_archived, 0) AS is_archived, archived_at
         FROM habits
         WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
         """
+        if not include_archived:
+            query = query.replace("WHERE ", "WHERE COALESCE(is_archived, 0) = 0 AND ")
         row = self._execute_query(query, {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "id": int(habit_id)}, fetch_one=True)
         return row if isinstance(row, dict) else None
 
-    def get_habit_any_scope(self, user_id: int, habit_id: int) -> Optional[Dict[str, Any]]:
+    def get_habit_any_scope(self, user_id: int, habit_id: int, *, include_archived: bool = False) -> Optional[Dict[str, Any]]:
         """
         Fetch a habit by (user_id, id) regardless of guild scope.
         Useful for DM flows where the habit was created in a server.
@@ -1370,29 +1377,48 @@ class ProductivityMixin:
         SELECT id, guild_id, name, days_of_week, due_time_local, tz_name, due_time_utc,
                remind_enabled, remind_profile,
                snoozed_until, last_snooze_at, last_snooze_period,
-               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at
+               remind_level, next_due_at, next_remind_at, last_checkin_at, created_at,
+               COALESCE(is_archived, 0) AS is_archived, archived_at
         FROM habits
         WHERE user_id = :user_id AND id = :id
         """
+        if not include_archived:
+            query = query.replace("WHERE ", "WHERE COALESCE(is_archived, 0) = 0 AND ")
         row = self._execute_query(query, {"user_id": str(int(user_id)), "id": int(habit_id)}, fetch_one=True)
         return row if isinstance(row, dict) else None
 
     def delete_habit_any_scope(self, user_id: int, habit_id: int) -> bool:
         """
-        Delete a habit by (user_id, id) regardless of guild scope.
+        Backwards-compatible: "delete" now archives so stats aren't lost.
+        Use `purge_habit_any_scope` for destructive deletion (including history).
         """
-        query = "DELETE FROM habits WHERE user_id = :user_id AND id = :id"
+        return self.archive_habit_any_scope(user_id, habit_id)
+
+    def archive_habit_any_scope(self, user_id: int, habit_id: int) -> bool:
+        """
+        Archive (soft-delete) a habit by (user_id, id), keeping check-in history for stats.
+        """
+        query = """
+        UPDATE habits
+        SET is_archived = 1,
+            archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+            remind_enabled = 0,
+            remind_level = 0,
+            next_due_at = NULL,
+            next_remind_at = NULL
+        WHERE user_id = :user_id AND id = :id AND COALESCE(is_archived, 0) = 0
+        """
         conn = self._get_connection()
         cur = None
         with self._lock:
             try:
                 cur = conn.cursor()
                 cur.execute(query, {"user_id": str(int(user_id)), "id": int(habit_id)})
-                deleted = int(cur.rowcount or 0)
+                updated = int(cur.rowcount or 0)
                 conn.commit()
-                return deleted > 0
+                return updated > 0
             except sqlite3.Error as e:
-                logger.error(f"delete_habit_any_scope failed: {e}")
+                logger.error(f"archive_habit_any_scope failed: {e}")
                 try:
                     conn.rollback()
                 except sqlite3.Error:
@@ -1404,6 +1430,19 @@ class ProductivityMixin:
                         cur.close()
                 except Exception:
                     pass
+
+    def purge_habit_any_scope(self, user_id: int, habit_id: int) -> bool:
+        """
+        Destructively delete a habit AND its check-in history by (user_id, id), regardless of guild scope.
+        """
+        habit = self.get_habit_any_scope(user_id, habit_id, include_archived=True)
+        if not habit:
+            return False
+        try:
+            guild_id = int(habit.get("guild_id") or 0)
+        except Exception:
+            guild_id = 0
+        return self.purge_habit(guild_id, user_id, habit_id)
 
     def set_habit_reminder_enabled_any_scope(self, user_id: int, habit_id: int, enabled: bool) -> bool:
         """
@@ -1456,18 +1495,71 @@ class ProductivityMixin:
         return self.record_habit_checkin(guild_id, user_id, habit_id, note, next_due_at_utc)
 
     def delete_habit(self, guild_id: int, user_id: int, habit_id: int) -> bool:
-        query = "DELETE FROM habits WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id"
+        """
+        Backwards-compatible: "delete" now archives so stats aren't lost.
+        Use `purge_habit` for destructive deletion (including history).
+        """
+        return self.archive_habit(guild_id, user_id, habit_id)
+
+    def archive_habit(self, guild_id: int, user_id: int, habit_id: int) -> bool:
+        """
+        Archive (soft-delete) a habit, keeping check-in history for stats.
+        """
+        query = """
+        UPDATE habits
+        SET is_archived = 1,
+            archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+            remind_enabled = 0,
+            remind_level = 0,
+            next_due_at = NULL,
+            next_remind_at = NULL
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id AND COALESCE(is_archived, 0) = 0
+        """
         conn = self._get_connection()
         cur = None
         with self._lock:
             try:
                 cur = conn.cursor()
                 cur.execute(query, {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "id": int(habit_id)})
+                updated = int(cur.rowcount or 0)
+                conn.commit()
+                return updated > 0
+            except sqlite3.Error as e:
+                logger.error(f"archive_habit failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return False
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def purge_habit(self, guild_id: int, user_id: int, habit_id: int) -> bool:
+        """
+        Destructively delete a habit AND its check-in history.
+        """
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "DELETE FROM habit_checkins WHERE habit_id = :habit_id AND guild_id = :guild_id AND user_id = :user_id",
+                    {"habit_id": int(habit_id), "guild_id": str(int(guild_id)), "user_id": str(int(user_id))},
+                )
+                cur.execute(
+                    "DELETE FROM habits WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id",
+                    {"guild_id": str(int(guild_id)), "user_id": str(int(user_id)), "id": int(habit_id)},
+                )
                 deleted = int(cur.rowcount or 0)
                 conn.commit()
                 return deleted > 0
             except sqlite3.Error as e:
-                logger.error(f"delete_habit failed: {e}")
+                logger.error(f"purge_habit failed: {e}")
                 try:
                     conn.rollback()
                 except sqlite3.Error:
@@ -1657,6 +1749,7 @@ class ProductivityMixin:
                remind_level, next_due_at, next_remind_at
         FROM habits
         WHERE remind_enabled = 1
+          AND COALESCE(is_archived, 0) = 0
           AND next_due_at IS NOT NULL
           AND next_due_at <= :now
           AND (snoozed_until IS NULL OR snoozed_until <= :now)

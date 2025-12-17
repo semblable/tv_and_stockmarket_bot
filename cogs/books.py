@@ -122,9 +122,12 @@ class BooksCog(commands.Cog, name="Books"):
                 dnd_end_time_obj = time(0, 0)
 
             now_t = datetime.now().time()
-            if dnd_start_time_obj <= dnd_end_time_obj:
-                return dnd_start_time_obj <= now_t <= dnd_end_time_obj
-            return now_t >= dnd_start_time_obj or now_t <= dnd_end_time_obj
+            # Treat DND as a half-open interval [start, end) so the "end" time is not suppressed.
+            if dnd_start_time_obj == dnd_end_time_obj:
+                return False
+            if dnd_start_time_obj < dnd_end_time_obj:
+                return dnd_start_time_obj <= now_t < dnd_end_time_obj
+            return now_t >= dnd_start_time_obj or now_t < dnd_end_time_obj
         except Exception:
             return False
 

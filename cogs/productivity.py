@@ -540,6 +540,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         embed: Optional[discord.Embed] = None,
         ephemeral: bool = True,
         wait: bool = False,
+        view: Optional[discord.ui.View] = None,
     ):
         interaction = getattr(ctx, "interaction", None)
         if interaction:
@@ -548,6 +549,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 base_kwargs["embed"] = embed
             if content is not None:
                 base_kwargs["content"] = content
+            if view is not None:
+                base_kwargs["view"] = view
 
             # If this is the first response, use response.send_message(). If the caller needs
             # a Message object, fetch it via original_response().
@@ -572,6 +575,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             kwargs2["content"] = content
         if embed is not None:
             kwargs2["embed"] = embed
+        if view is not None:
+            kwargs2["view"] = view
         return await ctx.send(**kwargs2)
 
     async def _is_user_in_dnd(self, user_id: int) -> bool:
@@ -602,9 +607,12 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 end_t = dtime(0, 0)
 
             now_t = datetime.now().time()
-            if start_t <= end_t:
-                return start_t <= now_t <= end_t
-            return now_t >= start_t or now_t <= end_t
+            # Treat DND as a half-open interval [start, end) so the "end" time is not suppressed.
+            if start_t == end_t:
+                return False
+            if start_t < end_t:
+                return start_t <= now_t < end_t
+            return now_t >= start_t or now_t < end_t
         except Exception:
             return False
 
@@ -1437,15 +1445,144 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
-        if is_dm and hasattr(self.db_manager, "delete_habit_any_scope"):
-            ok = await self.bot.loop.run_in_executor(None, self.db_manager.delete_habit_any_scope, ctx.author.id, int(habit_id))
-        else:
-            guild_id = _scope_guild_id_from_ctx(ctx)
-            ok = await self.bot.loop.run_in_executor(None, self.db_manager.delete_habit, guild_id, ctx.author.id, int(habit_id))
-        if not ok:
+        habit, resolved_guild_id = await self._load_habit_for_ctx(ctx, int(habit_id))
+        if not habit:
             await self.send_response(ctx, "Could not find that habit (or it’s not yours).", ephemeral=not is_dm)
             return
-        await self.send_response(ctx, f"🗑️ Removed habit **#{habit_id}**.", ephemeral=not is_dm)
+
+        habit_name = str(habit.get("name") or "Habit")
+
+        # Interactive confirmation (buttons) for slash/hybrid invocations.
+        # For prefix commands (no interaction), fall back to reactions.
+        class _HabitRemoveView(discord.ui.View):
+            def __init__(self, *, timeout: int = 45):
+                super().__init__(timeout=timeout)
+                self.choice: Optional[str] = None  # "archive" | "purge" | "cancel"
+
+            async def interaction_check(self, interaction: discord.Interaction) -> bool:
+                if interaction.user.id != ctx.author.id:
+                    await interaction.response.send_message("This isn't for you.", ephemeral=True)
+                    return False
+                return True
+
+            @discord.ui.button(label="Remove (keep stats)", style=discord.ButtonStyle.primary, emoji="📦")
+            async def archive_btn(self, interaction: discord.Interaction, button: discord.ui.Button):  # type: ignore[override]
+                self.choice = "archive"
+                for child in self.children:
+                    if isinstance(child, discord.ui.Button):
+                        child.disabled = True
+                await interaction.response.edit_message(view=self)
+                self.stop()
+
+            @discord.ui.button(label="Remove + delete stats", style=discord.ButtonStyle.danger, emoji="🗑️")
+            async def purge_btn(self, interaction: discord.Interaction, button: discord.ui.Button):  # type: ignore[override]
+                self.choice = "purge"
+                for child in self.children:
+                    if isinstance(child, discord.ui.Button):
+                        child.disabled = True
+                await interaction.response.edit_message(view=self)
+                self.stop()
+
+            @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="❌")
+            async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):  # type: ignore[override]
+                self.choice = "cancel"
+                for child in self.children:
+                    if isinstance(child, discord.ui.Button):
+                        child.disabled = True
+                await interaction.response.edit_message(view=self)
+                self.stop()
+
+        prompt = (
+            f"You're removing habit **#{habit_id}**: **{habit_name}**\n\n"
+            f"- **Remove (keep stats)**: hides it from `/habit_list`, stops reminders, but keeps history for `/habit_stats {habit_id}`.\n"
+            f"- **Remove + delete stats**: permanently deletes the habit and its check-in history.\n"
+        )
+
+        # Button flow (preferred)
+        if getattr(ctx, "interaction", None):
+            view = _HabitRemoveView()
+            msg_obj = await self.send_response(ctx, prompt, ephemeral=not is_dm, wait=True, view=view)
+            try:
+                await view.wait()
+            except Exception:
+                pass
+
+            choice = getattr(view, "choice", None)
+            if choice not in ("archive", "purge"):
+                if msg_obj and view.is_finished():
+                    try:
+                        await msg_obj.edit(content=f"❌ Cancelled removing habit **#{habit_id}**.", view=None)
+                    except Exception:
+                        pass
+                else:
+                    await self.send_response(ctx, f"❌ Cancelled removing habit **#{habit_id}**.", ephemeral=not is_dm)
+                return
+
+            if choice == "archive":
+                if is_dm and hasattr(self.db_manager, "archive_habit_any_scope"):
+                    ok = await self.bot.loop.run_in_executor(None, self.db_manager.archive_habit_any_scope, ctx.author.id, int(habit_id))
+                else:
+                    ok = await self.bot.loop.run_in_executor(None, self.db_manager.archive_habit, int(resolved_guild_id), ctx.author.id, int(habit_id))
+                if ok:
+                    out = f"📦 Removed habit **#{habit_id}** (kept stats). You can still view: `/habit_stats {habit_id}`."
+                else:
+                    out = "Could not remove that habit (maybe it was already removed)."
+            else:
+                if is_dm and hasattr(self.db_manager, "purge_habit_any_scope"):
+                    ok = await self.bot.loop.run_in_executor(None, self.db_manager.purge_habit_any_scope, ctx.author.id, int(habit_id))
+                else:
+                    ok = await self.bot.loop.run_in_executor(None, self.db_manager.purge_habit, int(resolved_guild_id), ctx.author.id, int(habit_id))
+                out = f"🗑️ Removed habit **#{habit_id}** and deleted its stats/history." if ok else "Could not remove that habit."
+
+            if msg_obj:
+                try:
+                    await msg_obj.edit(content=out, view=None)
+                    return
+                except Exception:
+                    pass
+            await self.send_response(ctx, out, ephemeral=not is_dm)
+            return
+
+        # Reaction fallback for prefix usage
+        msg = await self.send_response(ctx, prompt + "\nReact with 📦 (keep stats), 🗑️ (delete stats), or ❌ (cancel).", ephemeral=False, wait=True)
+        if not isinstance(msg, discord.Message):
+            await self.send_response(ctx, "Could not open confirmation prompt. Please try again.", ephemeral=False)
+            return
+        try:
+            await msg.add_reaction("📦")
+            await msg.add_reaction("🗑️")
+            await msg.add_reaction("❌")
+        except Exception:
+            pass
+
+        def _check(reaction: discord.Reaction, user: discord.User) -> bool:
+            return (
+                user.id == ctx.author.id
+                and reaction.message.id == msg.id
+                and str(reaction.emoji) in ("📦", "🗑️", "❌")
+            )
+
+        choice_emoji = None
+        try:
+            reaction, _user = await self.bot.wait_for("reaction_add", timeout=45.0, check=_check)
+            choice_emoji = str(reaction.emoji)
+        except Exception:
+            choice_emoji = "❌"
+
+        if choice_emoji == "📦":
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.archive_habit, int(resolved_guild_id), ctx.author.id, int(habit_id))
+            out = f"📦 Removed habit **#{habit_id}** (kept stats). You can still view: `/habit_stats {habit_id}`." if ok else "Could not remove that habit."
+        elif choice_emoji == "🗑️":
+            ok = await self.bot.loop.run_in_executor(None, self.db_manager.purge_habit, int(resolved_guild_id), ctx.author.id, int(habit_id))
+            out = f"🗑️ Removed habit **#{habit_id}** and deleted its stats/history." if ok else "Could not remove that habit."
+        else:
+            out = f"❌ Cancelled removing habit **#{habit_id}**."
+
+        try:
+            await msg.edit(content=out)
+        except Exception:
+            await ctx.send(out)
+        return
 
     @commands.hybrid_command(name="habit_remind", description="Enable/disable reminders for a habit.")
     @discord.app_commands.describe(habit_id="The numeric id (from /habit_list).", enabled="Enable reminders (default: True).")
