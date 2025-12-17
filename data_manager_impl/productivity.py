@@ -15,25 +15,43 @@ except Exception:  # pragma: no cover
 
 class ProductivityMixin:
     _HABIT_STATS_MAX_DAYS = 3650
-    _HABIT_REMIND_PROFILES = {"gentle", "normal", "aggressive", "quiet"}
+    _HABIT_REMIND_PROFILES = {"catchup", "nag_gentle", "nag_normal", "nag_aggressive", "nag_daily"}
     _HABIT_SNOOZE_PERIODS = {"week", "month"}
 
     def _normalize_habit_remind_profile(self, profile: Optional[str]) -> str:
         p = str(profile or "").strip().lower()
         if not p:
-            return "normal"
+            return "catchup"
         aliases = {
-            "low": "gentle",
-            "soft": "gentle",
-            "medium": "normal",
-            "default": "normal",
-            "high": "aggressive",
-            "hard": "aggressive",
-            "silent": "quiet",
-            "daily": "quiet",
+            # New naming
+            "catchup": "catchup",
+            "catch-up": "catchup",
+            "digest": "catchup",
+            "summary": "catchup",
+            # Nagging (opt-in)
+            "nag": "nag_normal",
+            "nudge": "nag_normal",
+            "nag_normal": "nag_normal",
+            "nag_gentle": "nag_gentle",
+            "nag_aggressive": "nag_aggressive",
+            "nag_daily": "nag_daily",
+            # Backwards compatibility (old names)
+            "normal": "nag_normal",
+            "gentle": "nag_gentle",
+            "aggressive": "nag_aggressive",
+            "quiet": "nag_daily",
+            # Legacy aliases
+            "low": "nag_gentle",
+            "soft": "nag_gentle",
+            "medium": "nag_normal",
+            "default": "catchup",
+            "high": "nag_aggressive",
+            "hard": "nag_aggressive",
+            "silent": "nag_daily",
+            "daily": "nag_daily",
         }
         p = aliases.get(p, p)
-        return p if p in self._HABIT_REMIND_PROFILES else "normal"
+        return p if p in self._HABIT_REMIND_PROFILES else "catchup"
 
     def _normalize_habit_snooze_period(self, period: Optional[str]) -> str:
         p = str(period or "").strip().lower()
@@ -1480,7 +1498,14 @@ class ProductivityMixin:
                 except Exception:
                     pass
 
-    def record_habit_checkin_any_scope(self, user_id: int, habit_id: int, note: Optional[str] = None, next_due_at_utc: Optional[str] = None) -> bool:
+    def record_habit_checkin_any_scope(
+        self,
+        user_id: int,
+        habit_id: int,
+        note: Optional[str] = None,
+        next_due_at_utc: Optional[str] = None,
+        checked_in_at_utc: Optional[str] = None,
+    ) -> bool:
         """
         Record a check-in by (user_id, id) regardless of guild scope.
         Internally resolves the habit's guild_id to keep history rows consistent.
@@ -1492,7 +1517,14 @@ class ProductivityMixin:
             guild_id = int(habit.get("guild_id") or 0)
         except Exception:
             guild_id = 0
-        return self.record_habit_checkin(guild_id, user_id, habit_id, note, next_due_at_utc)
+        return self.record_habit_checkin(
+            guild_id,
+            user_id,
+            habit_id,
+            note,
+            next_due_at_utc,
+            checked_in_at_utc,
+        )
 
     def delete_habit(self, guild_id: int, user_id: int, habit_id: int) -> bool:
         """
@@ -1688,42 +1720,80 @@ class ProductivityMixin:
         habit_id: int,
         note: Optional[str] = None,
         next_due_at_utc: Optional[str] = None,
+        checked_in_at_utc: Optional[str] = None,
     ) -> bool:
         # Insert history row (best-effort) and update habit fields.
+        checked_ts = None
+        if isinstance(checked_in_at_utc, str) and len(checked_in_at_utc.strip()) >= 19:
+            checked_ts = checked_in_at_utc.strip()
+
         conn = self._get_connection()
         cur = None
         with self._lock:
             try:
                 cur = conn.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO habit_checkins (habit_id, guild_id, user_id, note)
-                    VALUES (:habit_id, :guild_id, :user_id, :note)
-                    """,
-                    {
-                        "habit_id": int(habit_id),
-                        "guild_id": str(int(guild_id)),
-                        "user_id": str(int(user_id)),
-                        "note": note.strip() if isinstance(note, str) and note.strip() else None,
-                    },
-                )
-                cur.execute(
-                    """
-                    UPDATE habits
-                    SET last_checkin_at = CURRENT_TIMESTAMP,
-                        remind_level = 0,
-                        next_remind_at = NULL,
-                        snoozed_until = NULL,
-                        next_due_at = :next_due_at
-                    WHERE guild_id = :guild_id AND user_id = :user_id AND id = :habit_id
-                    """,
-                    {
-                        "next_due_at": next_due_at_utc,
-                        "guild_id": str(int(guild_id)),
-                        "user_id": str(int(user_id)),
-                        "habit_id": int(habit_id),
-                    },
-                )
+                if checked_ts:
+                    cur.execute(
+                        """
+                        INSERT INTO habit_checkins (habit_id, guild_id, user_id, checked_in_at, note)
+                        VALUES (:habit_id, :guild_id, :user_id, :checked_in_at, :note)
+                        """,
+                        {
+                            "habit_id": int(habit_id),
+                            "guild_id": str(int(guild_id)),
+                            "user_id": str(int(user_id)),
+                            "checked_in_at": checked_ts,
+                            "note": note.strip() if isinstance(note, str) and note.strip() else None,
+                        },
+                    )
+                    cur.execute(
+                        """
+                        UPDATE habits
+                        SET last_checkin_at = :checked_in_at,
+                            remind_level = 0,
+                            next_remind_at = NULL,
+                            snoozed_until = NULL,
+                            next_due_at = :next_due_at
+                        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :habit_id
+                        """,
+                        {
+                            "checked_in_at": checked_ts,
+                            "next_due_at": next_due_at_utc,
+                            "guild_id": str(int(guild_id)),
+                            "user_id": str(int(user_id)),
+                            "habit_id": int(habit_id),
+                        },
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO habit_checkins (habit_id, guild_id, user_id, note)
+                        VALUES (:habit_id, :guild_id, :user_id, :note)
+                        """,
+                        {
+                            "habit_id": int(habit_id),
+                            "guild_id": str(int(guild_id)),
+                            "user_id": str(int(user_id)),
+                            "note": note.strip() if isinstance(note, str) and note.strip() else None,
+                        },
+                    )
+                    cur.execute(
+                        """
+                        UPDATE habits
+                        SET last_checkin_at = CURRENT_TIMESTAMP,
+                            remind_level = 0,
+                            next_remind_at = NULL,
+                            snoozed_until = NULL,
+                            next_due_at = :next_due_at
+                        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :habit_id
+                        """,
+                        {
+                            "next_due_at": next_due_at_utc,
+                            "guild_id": str(int(guild_id)),
+                            "user_id": str(int(user_id)),
+                            "habit_id": int(habit_id),
+                        },
+                    )
                 updated = int(cur.rowcount or 0)
                 conn.commit()
                 return updated > 0
@@ -1918,7 +1988,8 @@ class ProductivityMixin:
     def set_habit_reminder_profile(self, guild_id: int, user_id: int, habit_id: int, profile: str) -> bool:
         """
         Sets how often reminders are sent for a habit.
-        Allowed profiles: gentle|normal|aggressive|quiet
+        Allowed profiles: catchup | nag_gentle | nag_normal | nag_aggressive | nag_daily
+        (Older values like normal/aggressive/gentle/quiet/digest are accepted and normalized.)
         """
         p = self._normalize_habit_remind_profile(profile)
         query = """

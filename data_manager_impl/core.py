@@ -466,7 +466,7 @@ class DataManagerCore:
             tz_name TEXT NOT NULL DEFAULT 'Europe/Warsaw', -- IANA tz (CET/CEST), e.g. Europe/Warsaw
             due_time_utc TEXT NOT NULL DEFAULT '18:00', -- legacy: previously interpreted as UTC
             remind_enabled INTEGER NOT NULL DEFAULT 1 CHECK (remind_enabled IN (0,1)),
-            remind_profile TEXT NOT NULL DEFAULT 'normal', -- gentle|normal|aggressive|quiet
+            remind_profile TEXT NOT NULL DEFAULT 'catchup', -- catchup (default) | nag_* (opt-in)
             snoozed_until TIMESTAMP, -- when set, reminders/due are suppressed until this UTC timestamp
             last_snooze_at TIMESTAMP, -- UTC timestamp of last snooze action
             last_snooze_period TEXT NOT NULL DEFAULT 'week', -- 'week' or 'month'
@@ -497,7 +497,7 @@ class DataManagerCore:
                 if "remind_profile" not in col_names:
                     # Safe: SQLite will backfill existing rows with DEFAULT on ADD COLUMN.
                     self._execute_query(
-                        "ALTER TABLE habits ADD COLUMN remind_profile TEXT NOT NULL DEFAULT 'normal';",
+                        "ALTER TABLE habits ADD COLUMN remind_profile TEXT NOT NULL DEFAULT 'catchup';",
                         commit=True,
                     )
                     logger.info("Column 'remind_profile' added successfully to habits.")
@@ -532,6 +532,38 @@ class DataManagerCore:
             self._execute_query("CREATE INDEX IF NOT EXISTS idx_habits_user_due ON habits(user_id, guild_id, next_due_at);", commit=True)
         except Exception as e:
             logger.warning(f"Could not create idx_habits_user_due: {e}")
+
+        # --- Habits profile migration (non-breaking) ---
+        # New semantics:
+        # - default profile is "catchup" (no nagging; handled by catch-up digest loop)
+        # - nagging is opt-in via "nag_*" profiles
+        try:
+            # Map legacy values to new names.
+            self._execute_query(
+                """
+                UPDATE habits
+                SET remind_profile = CASE LOWER(COALESCE(remind_profile, ''))
+                    WHEN '' THEN 'catchup'
+                    WHEN 'digest' THEN 'catchup'
+                    WHEN 'summary' THEN 'catchup'
+                    WHEN 'catch-up' THEN 'catchup'
+                    WHEN 'normal' THEN 'nag_normal'
+                    WHEN 'gentle' THEN 'nag_gentle'
+                    WHEN 'aggressive' THEN 'nag_aggressive'
+                    WHEN 'quiet' THEN 'nag_daily'
+                    WHEN 'nag' THEN 'nag_normal'
+                    WHEN 'nudge' THEN 'nag_normal'
+                    ELSE CASE
+                        WHEN LOWER(COALESCE(remind_profile, '')) IN ('catchup','nag_gentle','nag_normal','nag_aggressive','nag_daily')
+                            THEN LOWER(remind_profile)
+                        ELSE 'catchup'
+                    END
+                END
+                """,
+                commit=True,
+            )
+        except Exception as e:
+            logger.warning(f"Could not migrate habits remind_profile values: {e}")
 
         create_habit_checkins_sql = """
         CREATE TABLE IF NOT EXISTS habit_checkins (

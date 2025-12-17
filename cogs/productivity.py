@@ -276,23 +276,52 @@ def _next_due_datetime_utc(now: datetime, days_of_week: List[int], due_hhmm_utc:
     return now + timedelta(days=1)
 
 
-def _escalation_interval_minutes(level: int, profile: str = "normal") -> int:
+_HABIT_REMIND_PROFILES = {"catchup", "nag_gentle", "nag_normal", "nag_aggressive", "nag_daily"}
+_HABIT_REMIND_PROFILE_ALIASES = {
+    # Canonical
+    "catchup": "catchup",
+    "nag_gentle": "nag_gentle",
+    "nag_normal": "nag_normal",
+    "nag_aggressive": "nag_aggressive",
+    "nag_daily": "nag_daily",
+    # Friendly
+    "catch-up": "catchup",
+    "nag": "nag_normal",
+    "nudge": "nag_normal",
+    # Back-compat (old naming)
+    "digest": "catchup",
+    "summary": "catchup",
+    "normal": "nag_normal",
+    "gentle": "nag_gentle",
+    "aggressive": "nag_aggressive",
+    "quiet": "nag_daily",
+}
+
+
+def _normalize_habit_remind_profile(profile: Optional[str]) -> str:
+    p = str(profile or "").strip().lower()
+    if not p:
+        return "catchup"
+    p = _HABIT_REMIND_PROFILE_ALIASES.get(p, p)
+    return p if p in _HABIT_REMIND_PROFILES else "catchup"
+
+
+def _escalation_interval_minutes(level: int, profile: str = "catchup") -> int:
     """
     Increasing frequency as level grows.
     level starts at 0.
     """
-    p = str(profile or "normal").strip().lower()
+    p = _normalize_habit_remind_profile(profile)
     schedules = {
-        # Less annoying: starts at 12h, then every 6h
-        "gentle": [720, 360, 360, 360, 360],
-        # Current behavior (backwards compatible default)
-        "normal": [240, 120, 60, 30, 15],
-        # More annoying: ramps quickly to frequent nudges
-        "aggressive": [60, 30, 15, 10, 5],
-        # Very low frequency: once per day while overdue
-        "quiet": [1440, 1440, 1440, 1440, 1440],
+        # No nagging: handled by next-day catch-up loop.
+        "catchup": [1440, 1440, 1440, 1440, 1440],
+        # Nagging (opt-in)
+        "nag_gentle": [720, 360, 360, 360, 360],
+        "nag_normal": [240, 120, 60, 30, 15],
+        "nag_aggressive": [60, 30, 15, 10, 5],
+        "nag_daily": [1440, 1440, 1440, 1440, 1440],
     }
-    schedule = schedules.get(p) or schedules["normal"]
+    schedule = schedules.get(p) or schedules["catchup"]
     idx = max(0, min(len(schedule) - 1, int(level)))
     return schedule[idx]
 
@@ -304,11 +333,13 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
     async def cog_load(self):
         self.reminder_loop.start()
+        self.habit_catchup_loop.start()
         self.monthly_report_loop.start()
         logger.info("ProductivityCog loaded and reminder loop started.")
 
     async def cog_unload(self):
         self.reminder_loop.cancel()
+        self.habit_catchup_loop.cancel()
         self.monthly_report_loop.cancel()
         logger.info("ProductivityCog unloaded and reminder loop cancelled.")
 
@@ -969,7 +1000,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         days="New schedule days (optional, e.g. 'mon-fri', 'mon,wed,fri').",
         due_time="New due time HH:MM (optional). Interpreted in tz_name.",
         tz_name="Timezone name (optional). Use 'UTC' or an IANA name like 'Europe/Warsaw'.",
-        remind_profile="gentle | normal | aggressive | quiet (optional).",
+        remind_profile="catchup (default) | nag_gentle | nag_normal | nag_aggressive | nag_daily (optional).",
     )
     async def habit_edit(
         self,
@@ -1097,7 +1128,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                     if schedule_changed
                     else ""
                 )
-                + (f" Reminders: `{str(remind_profile).strip().lower()}`." if profile_changed else "")
+                + (f" Reminders: `{_normalize_habit_remind_profile(remind_profile)}`." if profile_changed else "")
             ),
             ephemeral=not is_dm,
         )
@@ -1129,7 +1160,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             tz_name = h.get("tz_name")
             due_time = h.get("due_time_local") or h.get("due_time_utc") or "18:00"
             remind_enabled = bool(h.get("remind_enabled"))
-            remind_profile = str(h.get("remind_profile") or "normal").strip().lower()
+            remind_profile = _normalize_habit_remind_profile(h.get("remind_profile"))
             next_due = h.get("next_due_at")
             last = h.get("last_checkin_at")
             rflag = "🔔" if remind_enabled else "🔕"
@@ -1606,13 +1637,13 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
     @commands.hybrid_command(
         name="habit_remind_profile",
-        description="Set how often I remind you for a habit (less/more annoying).",
+        description="Set habit reminders: default is catch-up; nagging is opt-in.",
     )
     @discord.app_commands.describe(
         habit_id="The numeric id (from /habit_list).",
-        profile="gentle | normal | aggressive | quiet",
+        profile="catchup | nag_gentle | nag_normal | nag_aggressive | nag_daily",
     )
-    async def habit_remind_profile(self, ctx: commands.Context, habit_id: int, profile: str = "normal"):
+    async def habit_remind_profile(self, ctx: commands.Context, habit_id: int, profile: str = "catchup"):
         is_dm = ctx.guild is None
         await self._defer_if_interaction(ctx, ephemeral=not is_dm)
         if not self.db_manager:
@@ -1633,10 +1664,19 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Could not update that habit (or it’s not yours).", ephemeral=not is_dm)
             return
 
-        p = str(profile or "normal").strip().lower()
-        if p not in {"gentle", "normal", "aggressive", "quiet"}:
-            p = "normal"
-        await self.send_response(ctx, f"✅ Reminder frequency set to **{p}** for habit **#{habit_id}**.", ephemeral=not is_dm)
+        # Accept aliases; DB layer normalizes (back-compat for old names like "normal", "aggressive", "digest").
+        p_raw = str(profile or "catchup").strip().lower()
+        allowed = _HABIT_REMIND_PROFILES
+        aliases = set(_HABIT_REMIND_PROFILE_ALIASES.keys())
+        # If the user uses an alias, let it through; DB will normalize. Otherwise: fall back to catchup.
+        if p_raw not in allowed and p_raw not in aliases:
+            p_raw = "catchup"
+
+        # Prefer DB normalization (single source of truth); fall back to local normalization for safety.
+        normalizer = getattr(self.db_manager, "_normalize_habit_remind_profile", None)
+        p_effective = normalizer(p_raw) if callable(normalizer) else _normalize_habit_remind_profile(p_raw)
+
+        await self.send_response(ctx, f"✅ Reminder mode set to **{p_effective}** for habit **#{habit_id}**.", ephemeral=not is_dm)
 
     @commands.hybrid_command(
         name="habit_snooze",
@@ -1726,6 +1766,241 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         )
 
     # -------------------------
+    # Habit catch-up (DM)
+    # -------------------------
+    @tasks.loop(minutes=5)
+    async def habit_catchup_loop(self):
+        """
+        Next-day catch-up for habits with remind_profile='catchup'.
+
+        Sends once per day per user (after a configured local time, default 09:00 in user's timezone):
+        "Did you complete these habits yesterday?"
+
+        This avoids repeated/nagging reminders and lets users confirm yesterday's completion while keeping stats accurate.
+        """
+        if not self.db_manager:
+            return
+
+        now_utc = _utc_now()
+
+        # Users with any productivity data.
+        user_ids = await self.bot.loop.run_in_executor(None, self.db_manager.list_users_with_productivity_data)
+        for uid in user_ids or []:
+            try:
+                uid_i = int(uid)
+            except Exception:
+                continue
+
+            # Respect DND
+            try:
+                if await self._is_user_in_dnd(uid_i):
+                    continue
+            except Exception:
+                pass
+
+            # User timezone for "send time" gating + once-per-day tracking.
+            tz_name = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, uid_i, "timezone", "Europe/Warsaw")
+            tz = _tzinfo_from_name(str(tz_name or "Europe/Warsaw"))
+            now_local = now_utc.astimezone(tz)
+            today_iso = now_local.date().isoformat()
+
+            last_day = await self.bot.loop.run_in_executor(
+                None, self.db_manager.get_user_preference, uid_i, "habit_catchup_last_sent_day", ""
+            )
+            # Backwards-compatible fallback (pre-rename)
+            if not last_day:
+                last_day = await self.bot.loop.run_in_executor(
+                    None, self.db_manager.get_user_preference, uid_i, "habit_digest_last_sent_day", ""
+                )
+            if isinstance(last_day, str) and last_day == today_iso:
+                continue
+
+            # After this local time, we send the catch-up.
+            digest_time = await self.bot.loop.run_in_executor(
+                None, self.db_manager.get_user_preference, uid_i, "habit_catchup_time", "09:00"
+            )
+            if not digest_time:
+                digest_time = await self.bot.loop.run_in_executor(
+                    None, self.db_manager.get_user_preference, uid_i, "habit_digest_time", "09:00"
+                )
+            try:
+                dtm = datetime.strptime(str(digest_time), "%H:%M").time()
+            except Exception:
+                dtm = dtime(9, 0)
+            if (now_local.hour * 60 + now_local.minute) < (dtm.hour * 60 + dtm.minute):
+                continue
+
+            habits = await self.bot.loop.run_in_executor(None, self.db_manager.list_habits_any_scope, uid_i, 200)
+            digest_habits = []
+            for h in habits or []:
+                try:
+                    p = _normalize_habit_remind_profile(h.get("remind_profile"))
+                except Exception:
+                    p = "catchup"
+                if p == "catchup" and bool(h.get("remind_enabled", True)):
+                    digest_habits.append(h)
+            if not digest_habits:
+                continue
+
+            missed: list[dict] = []
+            for h in digest_habits[:200]:
+                try:
+                    hid = int(h.get("id"))
+                except Exception:
+                    continue
+                try:
+                    gid = int(h.get("guild_id") or 0)
+                except Exception:
+                    gid = 0
+
+                htz = _tzinfo_from_name(str(h.get("tz_name") or tz_name or "UTC"))
+                now_hlocal = now_utc.astimezone(htz)
+                yday = now_hlocal.date() - timedelta(days=1)
+
+                # Skip if habit didn't exist yet yesterday (local).
+                created_dt = _parse_sqlite_utc_timestamp(h.get("created_at"))
+                if created_dt is not None:
+                    if created_dt.astimezone(htz).date() > yday:
+                        continue
+
+                # Was it scheduled yesterday?
+                try:
+                    days_list = json.loads(h.get("days_of_week") or "[]")
+                    days_set = {int(x) for x in (days_list or []) if 0 <= int(x) <= 6}
+                except Exception:
+                    days_set = {0, 1, 2, 3, 4}
+                if yday.weekday() not in days_set:
+                    continue
+
+                # Check if there is any check-in on that local date.
+                since_local = datetime.combine(yday, dtime(0, 0)).replace(tzinfo=htz)
+                since_utc_s = _sqlite_utc_timestamp(since_local.astimezone(timezone.utc) - timedelta(days=2))
+                checkins = await self.bot.loop.run_in_executor(
+                    None, self.db_manager.list_habit_checkins, gid, uid_i, hid, since_utc_s, 5000
+                )
+                completed = False
+                for r in checkins or []:
+                    dt_utc = _parse_sqlite_utc_timestamp(r.get("checked_in_at") if isinstance(r, dict) else None)
+                    if dt_utc is None:
+                        continue
+                    if dt_utc.astimezone(htz).date() == yday:
+                        completed = True
+                        break
+                if completed:
+                    continue
+
+                # Precompute a backdated timestamp (at the habit's due time) for accurate stats.
+                due_local_str = str(h.get("due_time_local") or h.get("due_time_utc") or "18:00")
+                due_local = _parse_hhmm_local(due_local_str) or dtime(18, 0)
+                checked_local = datetime.combine(yday, due_local).replace(tzinfo=htz)
+                checked_utc_s = _sqlite_utc_timestamp(checked_local.astimezone(timezone.utc))
+
+                missed.append(
+                    {
+                        "habit_id": hid,
+                        "guild_id": gid,
+                        "name": str(h.get("name") or "Habit"),
+                        "tz_name": str(h.get("tz_name") or "UTC"),
+                        "yday": yday.isoformat(),
+                        "checked_in_at_utc": checked_utc_s,
+                        "days_of_week": h.get("days_of_week"),
+                        "due_time_local": due_local_str,
+                    }
+                )
+
+            if not missed:
+                # Still mark as sent so we don't spam if the user has only catch-up habits but none were scheduled yesterday.
+                await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, uid_i, "habit_catchup_last_sent_day", today_iso)
+                continue
+
+            # Create a small button UI (up to 10) to confirm yesterday's completion.
+            user = self.bot.get_user(uid_i)
+            if not user:
+                try:
+                    user = await self.bot.fetch_user(uid_i)
+                except (discord.NotFound, discord.HTTPException):
+                    continue
+
+            title_day = (now_local.date() - timedelta(days=1)).isoformat()
+            msg_lines = [f"🧾 Habit catch-up for **{title_day}**:"]
+            for it in missed[:10]:
+                msg_lines.append(f"- **{it['name']}** (#{it['habit_id']})")
+            if len(missed) > 10:
+                msg_lines.append(f"...and **{len(missed) - 10}** more. (Use `/habit_checkin <id>` manually.)")
+            msg_lines.append("\nTap a button to mark it done for yesterday (this will backdate the check-in so stats stay accurate).")
+            content = "\n".join(msg_lines)
+
+            class HabitDigestView(discord.ui.View):
+                def __init__(self, items: list[dict], timeout: int = 120):
+                    super().__init__(timeout=timeout)
+                    self.items = items[:10]
+                    for it in self.items:
+                        hid2 = int(it["habit_id"])
+                        label = f"✅ #{hid2}"
+                        btn = discord.ui.Button(style=discord.ButtonStyle.success, label=label)
+
+                        async def _cb(interaction: discord.Interaction, _it=it):
+                            if interaction.user.id != uid_i:
+                                await interaction.response.send_message("This isn't for you.", ephemeral=True)
+                                return
+
+                            # Compute next due (from now) using the stored schedule.
+                            try:
+                                days_list2 = json.loads(_it.get("days_of_week") or "[]")
+                            except Exception:
+                                days_list2 = [0, 1, 2, 3, 4]
+                            htz2 = _tzinfo_from_name(_it.get("tz_name"))
+                            due_local_str2 = str(_it.get("due_time_local") or "18:00")
+                            if htz2 == timezone.utc:
+                                due_utc2 = _parse_hhmm_utc(due_local_str2) or dtime(18, 0, tzinfo=timezone.utc)
+                                next_due2 = _next_due_datetime_utc(_utc_now(), days_list2, due_utc2)
+                            else:
+                                due_local2 = _parse_hhmm_local(due_local_str2) or dtime(18, 0)
+                                next_due2 = _next_due_datetime_cet_to_utc(_utc_now(), days_list2, due_local2, htz2)
+
+                            ok2 = await self.bot.loop.run_in_executor(
+                                None,
+                                self.db_manager.record_habit_checkin,
+                                int(_it.get("guild_id") or 0),
+                                uid_i,
+                                int(_it.get("habit_id")),
+                                "catch-up",
+                                _sqlite_utc_timestamp(next_due2),
+                                str(_it.get("checked_in_at_utc") or ""),
+                            )
+                            if ok2:
+                                btn.disabled = True
+                                try:
+                                    await interaction.response.edit_message(view=self)
+                                except Exception:
+                                    try:
+                                        await interaction.response.send_message("✅ Saved.", ephemeral=True)
+                                    except Exception:
+                                        pass
+                            else:
+                                try:
+                                    await interaction.response.send_message("❌ Could not save that check-in.", ephemeral=True)
+                                except Exception:
+                                    pass
+
+                        btn.callback = _cb  # type: ignore[assignment]
+                        self.add_item(btn)
+
+            view = HabitDigestView(missed)
+            try:
+                await user.send(content=content, view=view)
+            except discord.Forbidden:
+                continue
+            except discord.HTTPException:
+                continue
+
+            await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, uid_i, "habit_catchup_last_sent_day", today_iso)
+
+    @habit_catchup_loop.before_loop
+    async def before_habit_catchup_loop(self):
+        await self.bot.wait_until_ready()
+
+    # -------------------------
     # Reminder loop (DM)
     # -------------------------
     @tasks.loop(minutes=1)
@@ -1761,8 +2036,23 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
                 hid = h.get("id")
                 name = h.get("name") or "Habit"
-                profile = h.get("remind_profile") or "normal"
+                profile = h.get("remind_profile") or "catchup"
+                profile_n = _normalize_habit_remind_profile(profile)
                 level = int(h.get("remind_level") or 0)
+
+                # Catch-up mode: don't nag; just back off so we don't re-process every minute.
+                if profile_n == "catchup":
+                    next_rem = _sqlite_utc_timestamp(now + timedelta(days=1))
+                    await self.bot.loop.run_in_executor(
+                        None,
+                        self.db_manager.bump_habit_reminder,
+                        int(h.get("guild_id") or 0),
+                        uid,
+                        int(hid),
+                        0,
+                        next_rem,
+                    )
+                    continue
 
                 tpl = habit_messages[level % len(habit_messages)]
                 sent = await self._dm_user(
@@ -1783,7 +2073,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                     )
                     continue
 
-                next_minutes = _escalation_interval_minutes(level + 1, profile)
+                next_minutes = _escalation_interval_minutes(level + 1, profile_n)
                 next_rem = _sqlite_utc_timestamp(now + timedelta(minutes=next_minutes))
                 await self.bot.loop.run_in_executor(
                     None,

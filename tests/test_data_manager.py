@@ -125,17 +125,91 @@ def test_habit_reminder_profile_default_and_set(db_manager):
 
     h = db_manager.get_habit(guild_id, user_id, habit_id)
     assert h is not None
-    assert (h.get("remind_profile") or "normal") == "normal"
+    # New default: catch-up (no nagging)
+    assert (h.get("remind_profile") or "catchup") == "catchup"
 
+    # Backwards-compatible: old value maps to new nagging profile.
     ok = db_manager.set_habit_reminder_profile(guild_id, user_id, habit_id, "aggressive")
     assert ok is True
     h2 = db_manager.get_habit(guild_id, user_id, habit_id)
     assert h2 is not None
-    assert (h2.get("remind_profile") or "").lower() == "aggressive"
+    assert (h2.get("remind_profile") or "").lower() == "nag_aggressive"
 
     due = db_manager.list_due_habit_reminders("2100-01-01 00:00:00", 50)
     # Our habit is due (next_due_at is ancient), so it should show up and include profile.
-    assert any((r.get("id") == habit_id and (r.get("remind_profile") or "").lower() == "aggressive") for r in due)
+    assert any((r.get("id") == habit_id and (r.get("remind_profile") or "").lower() == "nag_aggressive") for r in due)
+
+
+def test_habit_reminder_profile_catchup_aliases(db_manager):
+    guild_id = 0
+    user_id = 124
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Digest habit",
+        [0, 1, 2, 3, 4],
+        "18:00",
+        "UTC",
+        True,
+        "2000-01-01 00:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    ok = db_manager.set_habit_reminder_profile(guild_id, user_id, habit_id, "summary")
+    assert ok is True
+    h = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h is not None
+    assert (h.get("remind_profile") or "").lower() == "catchup"
+
+
+def test_habit_reminder_profile_normal_maps_to_nag_normal(db_manager):
+    guild_id = 0
+    user_id = 125
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Nag habit",
+        [0, 1, 2, 3, 4],
+        "18:00",
+        "UTC",
+        True,
+        "2000-01-01 00:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    ok = db_manager.set_habit_reminder_profile(guild_id, user_id, habit_id, "normal")
+    assert ok is True
+    h = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h is not None
+    assert (h.get("remind_profile") or "").lower() == "nag_normal"
+
+
+def test_record_habit_checkin_at_timestamp(db_manager):
+    guild_id = 0
+    user_id = 555
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Backdate",
+        [0, 1, 2, 3, 4, 5, 6],
+        "18:00",
+        "UTC",
+        True,
+        "2000-01-01 00:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    checked_at = "2025-01-02 12:34:56"
+    ok = db_manager.record_habit_checkin(guild_id, user_id, habit_id, "note", None, checked_at)
+    assert ok is True
+
+    row = db_manager._execute_query(
+        "SELECT checked_in_at, note FROM habit_checkins WHERE habit_id = :hid AND user_id = :uid ORDER BY checked_in_at DESC LIMIT 1",
+        {"hid": int(habit_id), "uid": str(int(user_id))},
+        fetch_one=True,
+    )
+    assert row is not None
+    assert (row.get("checked_in_at") or "")[:19] == checked_at
 
 
 def test_habit_reminder_profile_migration_from_old_schema(tmp_path, monkeypatch):
@@ -186,7 +260,8 @@ def test_habit_reminder_profile_migration_from_old_schema(tmp_path, monkeypatch)
 
         row = mgr._execute_query("SELECT remind_profile FROM habits WHERE user_id = '999' AND id = 1;", fetch_one=True)
         assert row is not None
-        assert (row.get("remind_profile") or "").lower() == "normal"
+        # New default after migration: catch-up (no nagging).
+        assert (row.get("remind_profile") or "").lower() == "catchup"
     finally:
         mgr.close()
 
@@ -344,7 +419,8 @@ def test_habit_edit_can_update_remind_profile_via_set_habit_schedule_and_due(db_
     assert ok is True
     h = db_manager.get_habit(guild_id, user_id, habit_id)
     assert h is not None
-    assert (h.get("remind_profile") or "").lower() == "aggressive"
+    # Backwards-compatible input maps to new opt-in nag profile.
+    assert (h.get("remind_profile") or "").lower() == "nag_aggressive"
 
 
 def test_habit_stats_streak_and_completion_rate(db_manager):
