@@ -1,6 +1,7 @@
 # tests/test_data_manager.py
 import pytest
 from data_manager import DataManager
+from api_clients import steam_client
 
 # Tests for Tracked Stocks
 def test_add_tracked_stock(db_manager):
@@ -81,6 +82,36 @@ def test_tv_subscriptions(db_manager):
     success = db_manager.remove_tv_show_subscription(user_id, show_id)
     assert success is True
     assert len(db_manager.get_user_tv_subscriptions(user_id)) == 0
+
+
+def test_games_duplicate_guard_by_steam_appid(db_manager):
+    user_id = 7777
+    first = db_manager.create_game_item(
+        user_id,
+        "Kingdom Come: Deliverance II",
+        status="backlog",
+        steam_appid=123,
+        steam_url="https://store.steampowered.com/app/123",
+    )
+    assert isinstance(first, int)
+
+    second = db_manager.create_game_item(
+        user_id,
+        "Kingdom Come Deliverance 2",
+        status="backlog",
+        steam_appid=123,
+        steam_url="https://store.steampowered.com/app/123",
+    )
+    assert int(second) == int(first)
+
+
+def test_games_duplicate_guard_by_exact_title_case_insensitive(db_manager):
+    user_id = 8888
+    first = db_manager.create_game_item(user_id, "ELDEN RING", status="backlog")
+    assert isinstance(first, int)
+
+    second = db_manager.create_game_item(user_id, "elden ring", status="backlog")
+    assert int(second) == int(first)
 
 
 def test_book_author_subscriptions(db_manager):

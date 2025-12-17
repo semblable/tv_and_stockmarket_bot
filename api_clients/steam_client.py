@@ -1,6 +1,9 @@
 import logging
 import random
 import time
+import re
+import unicodedata
+import difflib
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -30,6 +33,187 @@ def app_url(appid: int) -> str:
     except (TypeError, ValueError):
         a = appid
     return f"https://store.steampowered.com/app/{a}"
+
+
+_ROMAN_SMALL = {
+    "i": "1",
+    "ii": "2",
+    "iii": "3",
+    "iv": "4",
+    "v": "5",
+    "vi": "6",
+    "vii": "7",
+    "viii": "8",
+    "ix": "9",
+    "x": "10",
+    "xi": "11",
+    "xii": "12",
+    "xiii": "13",
+    "xiv": "14",
+    "xv": "15",
+}
+
+_TITLE_STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "of",
+    "and",
+}
+
+
+def normalize_title(title: str) -> str:
+    """
+    Normalize a game title for matching:
+    - lowercase
+    - strip accents/diacritics
+    - remove most punctuation
+    - collapse whitespace
+    """
+    if not isinstance(title, str):
+        return ""
+    s = title.strip()
+    if not s:
+        return ""
+
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower()
+    s = s.replace("&", " and ")
+    s = re.sub(r"[’'`]", "", s)  # normalize apostrophes away
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _tokens(title: str) -> List[str]:
+    norm = normalize_title(title)
+    if not norm:
+        return []
+    toks: List[str] = []
+    for t in norm.split():
+        if t in _ROMAN_SMALL:
+            t = _ROMAN_SMALL[t]
+        if t in _TITLE_STOPWORDS:
+            continue
+        toks.append(t)
+    return toks
+
+
+def title_match_score(query: str, candidate: str) -> int:
+    """
+    Returns 0..100 similarity score between query and candidate title.
+    Uses a blend of sequence and token-based similarity (stdlib only).
+    """
+    qn = normalize_title(query)
+    cn = normalize_title(candidate)
+    if not qn or not cn:
+        return 0
+    if qn == cn:
+        return 100
+
+    qt = _tokens(qn)
+    ct = _tokens(cn)
+    qset = set(qt)
+    cset = set(ct)
+
+    ratio_raw = difflib.SequenceMatcher(a=qn, b=cn).ratio()
+    ratio_tok = difflib.SequenceMatcher(a=" ".join(sorted(qt)), b=" ".join(sorted(ct))).ratio() if qt and ct else 0.0
+
+    jacc = (len(qset & cset) / len(qset | cset)) if (qset or cset) else 0.0
+    contain = (len(qset & cset) / max(1, len(qset))) if qset else 0.0
+
+    # Weighted blend. Ratios/jacc/contain are in 0..1.
+    score = (max(ratio_raw, ratio_tok) * 70.0) + (jacc * 20.0) + (contain * 10.0)
+
+    # If all query tokens are contained, bump slightly (helps with punctuation/ordering).
+    if qset and qset.issubset(cset):
+        score += 3.0
+
+    return int(max(0.0, min(100.0, round(score))))
+
+
+def rank_store_results(query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Adds a `_match_score` (0..100) to each result and returns them sorted best-first.
+    Prefer actual games over DLC/tools/bundles by applying a small penalty.
+    """
+    ranked: List[Dict[str, Any]] = []
+    for r in results or []:
+        if not isinstance(r, dict):
+            continue
+        nm = r.get("name")
+        if not isinstance(nm, str) or not nm.strip():
+            continue
+        score = title_match_score(query, nm)
+        typ = r.get("type")
+        if isinstance(typ, str):
+            t = typ.strip().lower()
+            if t and t != "game":
+                # Prefer actual game entries (common Steam results include DLC, demos, tools).
+                score = max(0, score - (6 if t in {"dlc", "demo", "tool"} else 3))
+        rr = dict(r)
+        rr["_match_score"] = int(score)
+        ranked.append(rr)
+
+    ranked.sort(key=lambda x: (int(x.get("_match_score") or 0), int(x.get("appid") or 0)), reverse=True)
+    return ranked
+
+
+def pick_best_store_match(query: str, results: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Picks a Steam store result automatically when confidence is high enough.
+    Returns the chosen result (with `_match_score`) or None.
+    """
+    ranked = rank_store_results(query, results)
+    if not ranked:
+        return None
+
+    best = ranked[0]
+    best_score = int(best.get("_match_score") or 0)
+    second_score = int(ranked[1].get("_match_score") or 0) if len(ranked) > 1 else 0
+    gap = best_score - second_score
+
+    # Conservative auto-pick rules:
+    # - very high score -> auto
+    # - strong score with a clear gap -> auto
+    # - decent score if query tokens are contained -> auto
+    if best_score >= 92:
+        return best
+    if best_score >= 86 and gap >= 5:
+        return best
+
+    qset = set(_tokens(query))
+    cset = set(_tokens(str(best.get("name") or "")))
+    if best_score >= 82 and qset and qset.issubset(cset):
+        return best
+
+    return None
+
+
+def search_store_best_effort(query: str, *, limit: int = 10, cc: str = "us", l: str = "english") -> List[Dict[str, Any]]:
+    """
+    Like `search_store`, but tries a couple cheap query normalizations if Steam returns no hits.
+    """
+    out = search_store(query, limit=limit, cc=cc, l=l)
+    if out:
+        return out
+
+    qn = normalize_title(query)
+    if qn and qn != (query or "").strip().lower():
+        out = search_store(qn, limit=limit, cc=cc, l=l)
+        if out:
+            return out
+
+    # Remove common stopwords as a last try.
+    toks = [t for t in qn.split() if t and t not in _TITLE_STOPWORDS]
+    q2 = " ".join(toks).strip()
+    if len(q2) >= 2 and q2 != qn:
+        out = search_store(q2, limit=limit, cc=cc, l=l)
+        if out:
+            return out
+
+    return []
 
 
 def _request_json(
@@ -231,5 +415,6 @@ def get_app_details(appid: int, *, cc: str = "us", l: str = "english") -> Option
         "metacritic_score": metacritic_score,
         "platforms": platforms_out,
     }
+
 
 

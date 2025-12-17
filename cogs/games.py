@@ -1,6 +1,6 @@
 import logging
 from functools import partial
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import discord
 from discord.ext import commands
@@ -168,37 +168,88 @@ class GamesCog(commands.Cog, name="Games"):
 
     async def _steam_pick(self, ctx: commands.Context, query: str, *, is_dm: bool) -> Optional[dict]:
         try:
-            results = await self.bot.loop.run_in_executor(None, partial(steam_client.search_store, query, limit=10))
+            results = await self.bot.loop.run_in_executor(
+                None, partial(steam_client.search_store_best_effort, query, limit=10)
+            )
         except Exception:
             return None
 
         if not results:
             return None
 
-        # Prefer exact-ish match
-        ql = query.strip().lower()
-        exact = [r for r in results if isinstance(r.get("name"), str) and r["name"].lower() == ql]
-        if len(exact) == 1:
-            return exact[0]
+        # Auto-pick a high-confidence fuzzy match (handles punctuation/typos).
+        try:
+            auto = steam_client.pick_best_store_match(query, results)
+        except Exception:
+            auto = None
+        if auto:
+            return auto
 
-        if len(results) == 1:
-            return results[0]
+        ranked = []
+        try:
+            ranked = steam_client.rank_store_results(query, results)
+        except Exception:
+            ranked = results
 
-        display = results[:5]
+        if len(ranked) == 1:
+            return ranked[0]
+
+        display = ranked[:5]
         embed_pick = discord.Embed(title="Which Steam game?", color=discord.Color.blurple())
         lines = []
         for i, r in enumerate(display):
             nm = r.get("name") or "Unknown"
             typ = r.get("type")
             tag = f" ({typ})" if isinstance(typ, str) and typ else ""
-            lines.append(f"{NUMBER_EMOJIS[i]} **{nm}**{tag}")
+            score = r.get("_match_score")
+            score_tag = f" — {int(score)}%" if isinstance(score, int) else ""
+            lines.append(f"{NUMBER_EMOJIS[i]} **{nm}**{tag}{score_tag}")
         embed_pick.description = "\n".join(lines)
 
         view = GameSelectionView(ctx, display)
         msg = await self._send(ctx, embed=embed_pick, ephemeral=not is_dm, view=view, wait=True)
         view.message = msg
         await view.wait()
-        return view.selected_result
+
+        if view.selected_result:
+            return view.selected_result
+
+        # If user doesn't pick in time, still avoid "adding as-is" when we're pretty confident.
+        try:
+            best = display[0] if display else None
+            if best and isinstance(best.get("_match_score"), int) and int(best["_match_score"]) >= 86:
+                return best
+        except Exception:
+            pass
+        return None
+
+    def _find_local_duplicate(self, user_items: List[dict], title: str, steam_appid: Optional[int]) -> Optional[dict]:
+        """
+        Best-effort duplicate detection against user's existing items.
+        - Prefer exact steam_appid match
+        - Otherwise use normalized title match (handles punctuation/case)
+        """
+        try:
+            if steam_appid is not None:
+                for it in user_items or []:
+                    try:
+                        if int(it.get("steam_appid") or 0) == int(steam_appid):
+                            return it
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        tnorm = steam_client.normalize_title(title)
+        if not tnorm:
+            return None
+        for it in user_items or []:
+            try:
+                if steam_client.normalize_title(str(it.get("title") or "")) == tnorm:
+                    return it
+            except Exception:
+                continue
+        return None
 
     @commands.hybrid_group(name="games", aliases=["game"], description="Track your games backlog / now playing.")
     async def games_group(self, ctx: commands.Context):
@@ -270,6 +321,27 @@ class GamesCog(commands.Cog, name="Games"):
             steam_url = steam_match.get("steam_url")
             cover_url = steam_match.get("tiny_image")
 
+        # Duplicate guard: if you're already tracking it, don't create another entry.
+        try:
+            existing_items = await self.bot.loop.run_in_executor(
+                None, partial(self.db_manager.list_game_items_all, ctx.author.id, 500)
+            )
+        except Exception:
+            existing_items = []
+
+        dup = self._find_local_duplicate(existing_items or [], final_title, steam_appid if isinstance(steam_appid, int) else None)
+        if dup and dup.get("id") is not None:
+            try:
+                dup_id = int(dup.get("id"))
+                await self.bot.loop.run_in_executor(None, self.db_manager.set_current_game_item_id, ctx.author.id, dup_id)
+            except Exception:
+                dup_id = dup.get("id")
+
+            embed = self._game_embed(dup, title="ℹ️ Already tracking that game")
+            embed.set_footer(text="Tip: /games status playing  |  /games note ...")
+            await self._send(ctx, embed=embed, ephemeral=not is_dm)
+            return
+
         item_id = await self.bot.loop.run_in_executor(
             None,
             partial(
@@ -302,6 +374,38 @@ class GamesCog(commands.Cog, name="Games"):
         embed = self._game_embed(item, title="✅ Game added")
         embed.set_footer(text="Tip: /games status playing  |  /games note ...")
         await self._send(ctx, embed=embed, ephemeral=not is_dm)
+
+    @games_group.command(name="random", description="Pick a random game from your backlog/paused list.")
+    @discord.app_commands.describe(statuses="Comma-separated statuses (default: backlog,paused)")
+    async def games_random(self, ctx: commands.Context, statuses: Optional[str] = None):
+        is_dm = self._is_dm_ctx(ctx)
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self._send(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        st = ["backlog", "paused"]
+        if isinstance(statuses, str) and statuses.strip():
+            st = [s.strip().lower() for s in statuses.split(",") if s.strip()]
+            if not st:
+                st = ["backlog", "paused"]
+
+        items = await self.bot.loop.run_in_executor(None, partial(self.db_manager.list_game_items, ctx.author.id, st, 200))
+        if not items:
+            await self._send(ctx, "No games found for that filter.", ephemeral=not is_dm)
+            return
+
+        # Choose pseudo-randomly but deterministically per-invocation (no extra deps).
+        import random as _random
+
+        pick = _random.choice(items)
+        try:
+            gid = int(pick.get("id"))
+            await self.bot.loop.run_in_executor(None, self.db_manager.set_current_game_item_id, ctx.author.id, gid)
+        except Exception:
+            pass
+
+        await self._send(ctx, embed=self._game_embed(pick, title="🎲 Random pick"), ephemeral=not is_dm)
 
     @games_group.command(name="now", description="Show your current game.")
     async def games_now(self, ctx: commands.Context):
@@ -588,5 +692,6 @@ class GamesCog(commands.Cog, name="Games"):
 async def setup(bot: commands.Bot):
     await bot.add_cog(GamesCog(bot, db_manager=bot.db_manager))
     logger.info("GamesCog has been loaded.")
+
 
 

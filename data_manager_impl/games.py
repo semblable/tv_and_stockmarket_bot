@@ -7,6 +7,56 @@ logger = logging.getLogger(__name__)
 
 
 class GamesMixin:
+    def get_game_item_by_steam_appid(self, user_id: int, steam_appid: int) -> Optional[Dict[str, Any]]:
+        """
+        Returns an existing game item for this user by Steam appid (if any).
+        """
+        try:
+            appid = int(steam_appid)
+        except (TypeError, ValueError):
+            return None
+
+        query = """
+        SELECT *
+        FROM game_items
+        WHERE user_id = :user_id AND steam_appid = :steam_appid
+        ORDER BY id DESC
+        LIMIT 1
+        """
+        row = self._execute_query(query, {"user_id": str(user_id), "steam_appid": int(appid)}, fetch_one=True)
+        if not isinstance(row, dict):
+            return None
+        if row.get("genres"):
+            try:
+                row["genres"] = json.loads(row["genres"])
+            except Exception:
+                pass
+        return row
+
+    def get_game_item_by_title(self, user_id: int, title: str) -> Optional[Dict[str, Any]]:
+        """
+        Returns an existing game item for this user by exact stored title (case-insensitive).
+        """
+        t = str(title or "").strip()
+        if not t:
+            return None
+        query = """
+        SELECT *
+        FROM game_items
+        WHERE user_id = :user_id AND LOWER(title) = LOWER(:title)
+        ORDER BY id DESC
+        LIMIT 1
+        """
+        row = self._execute_query(query, {"user_id": str(user_id), "title": t}, fetch_one=True)
+        if not isinstance(row, dict):
+            return None
+        if row.get("genres"):
+            try:
+                row["genres"] = json.loads(row["genres"])
+            except Exception:
+                pass
+        return row
+
     def create_game_item(
         self,
         user_id: int,
@@ -28,6 +78,23 @@ class GamesMixin:
         """
         if not title or not str(title).strip():
             return None
+
+        # Duplicate guard (best-effort): avoid double-adding the same Steam app,
+        # and avoid exact duplicate titles for manual entries.
+        if steam_appid is not None:
+            try:
+                existing = self.get_game_item_by_steam_appid(user_id, int(steam_appid))
+                if existing and existing.get("id") is not None:
+                    return int(existing["id"])
+            except Exception:
+                pass
+        else:
+            try:
+                existing_t = self.get_game_item_by_title(user_id, str(title))
+                if existing_t and existing_t.get("id") is not None:
+                    return int(existing_t["id"])
+            except Exception:
+                pass
 
         status_norm = (status or "backlog").strip().lower()
         if status_norm not in ("backlog", "playing", "paused", "completed", "dropped"):
