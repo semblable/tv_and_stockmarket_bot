@@ -179,7 +179,8 @@ def _parse_days_spec(spec: str) -> List[int]:
       - "mon-fri", "tue-thu"
       - "weekdays", "weekends", "daily"
       - "mon,wed,fri"
-      - "1,2,3" (Mon=1 .. Sun=7) or "0..6" (Mon=0 .. Sun=6)
+      - numbers "1-7" for Mon-Sun (e.g. "1-5", "1,3,5", "7")
+      - (also accepts "0-6" for Mon-Sun, but "1-7" is recommended)
     Returns list of ints 0=Mon..6=Sun (deduped, sorted).
     """
     if not isinstance(spec, str) or not spec.strip():
@@ -954,7 +955,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
     @commands.hybrid_command(name="habit_add", description="Create a recurring habit (with escalating reminders via DM).")
     @discord.app_commands.describe(
         name="Habit name (e.g. 'Programming').",
-        days="Schedule days (e.g. 'mon-fri', 'weekdays', 'mon,wed,fri').",
+        days="Schedule days (e.g. 'mon-fri', 'weekdays', 'mon,wed,fri', or numbers 1-7 for Mon-Sun like '1-5', '1,3,5').",
         due_time_cet="Due time in CET/CEST (HH:MM, default 18:00).",
         remind="Whether reminders are enabled (default: True).",
     )
@@ -997,7 +998,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
     @discord.app_commands.describe(
         habit_id="The numeric id (from /habit_list).",
         name="New name (optional).",
-        days="New schedule days (optional, e.g. 'mon-fri', 'mon,wed,fri').",
+        days="New schedule days (optional, e.g. 'mon-fri', 'mon,wed,fri', or numbers 1-7 for Mon-Sun like '1-5', '1,3,5').",
         due_time="New due time HH:MM (optional). Interpreted in tz_name.",
         tz_name="Timezone name (optional). Use 'UTC' or an IANA name like 'Europe/Warsaw'.",
         remind_profile="catchup (default) | nag_gentle | nag_normal | nag_aggressive | nag_daily (optional).",
