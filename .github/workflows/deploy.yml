@@ -100,45 +100,47 @@ jobs:
         run: |
           echo "REPO_LC=${GITHUB_REPOSITORY,,}" >>${GITHUB_ENV}
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
+      # Avoid Docker-based ssh actions (they can fail building/pulling on runners).
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.OCI_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.OCI_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Create .env file from secret
+        env:
+          ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
+        run: |
+          # Preserve content exactly (including newlines)
+          printf '%s' "$ENV_FILE_CONTENT" > .env
+
+      - name: Copy .env to server
+        run: |
+          scp .env "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}:~/.env"
+
+      - name: Deploy over SSH (no action container)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE: ${{ env.REGISTRY }}/${{ env.REPO_LC }}:latest
-        with:
-          host: ${{ secrets.OCI_HOST }}
-          username: ${{ secrets.OCI_USERNAME }}
-          key: ${{ secrets.OCI_SSH_KEY }}
-          envs: GITHUB_TOKEN,ENV_FILE_CONTENT,REGISTRY,IMAGE
-          script: |
-            # 1. Login to Registry
-            echo "$GITHUB_TOKEN" | docker login $REGISTRY -u ${{ github.actor }} --password-stdin
-
-            # 2. Create .env file safely
-            echo "$ENV_FILE_CONTENT" > .env
-
-            # 3. Pull new image
-            docker pull $IMAGE
-
-            # 4. Stop and remove old container (if exists)
-            docker stop bot-container || true
-            docker rm bot-container || true
-            
-            # 5. Ensure host data directory exists
-            mkdir -p $HOME/data
-
-            # 6. Run new container
-            # CRITICAL: The -v maps the HOST folder ($HOME/data) to the CONTAINER folder (/app/data)
-            # This is what persists your database (app.db)
-            docker run -d \
-              --name bot-container \
-              --restart unless-stopped \
-              -v $HOME/data:/app/data \
-              --env-file .env \
-              $IMAGE
-
-            # 7. Cleanup unused images to save disk space on VM
-            docker image prune -f
+          ACTOR: ${{ github.actor }}
+        run: |
+          ssh "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}" "bash -lc 'set -euo pipefail
+          echo \"\$GITHUB_TOKEN\" | docker login \"\$REGISTRY\" -u \"\$ACTOR\" --password-stdin
+          docker pull \"\$IMAGE\"
+          docker stop bot-container || true
+          docker rm bot-container || true
+          mkdir -p \"\$HOME/data\"
+          docker run -d \
+            --name bot-container \
+            --restart unless-stopped \
+            -v \"\$HOME/data:/app/data\" \
+            --env-file \"\$HOME/.env\" \
+            \"\$IMAGE\"
+          docker image prune -f
+          '"
 
