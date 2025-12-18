@@ -129,9 +129,11 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ env.REPO_LC }}:latest
           ACTOR: ${{ github.actor }}
         run: |
-          ssh "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}" "bash -lc 'set -euo pipefail
-          echo \"\$GITHUB_TOKEN\" | docker login \"\$REGISTRY\" -u \"\$ACTOR\" --password-stdin
-          docker pull \"\$IMAGE\"
+          # Pipe token via stdin so it never needs to exist as a remote env var.
+          # REGISTRY/IMAGE/ACTOR expand locally; $HOME expands remotely.
+          printf '%s' "$GITHUB_TOKEN" | ssh "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}" "bash -lc 'set -euo pipefail
+          docker login \"$REGISTRY\" -u \"$ACTOR\" --password-stdin
+          docker pull \"$IMAGE\"
           docker stop bot-container || true
           docker rm bot-container || true
           mkdir -p \"\$HOME/data\"
@@ -140,7 +142,7 @@ jobs:
             --restart unless-stopped \
             -v \"\$HOME/data:/app/data\" \
             --env-file \"\$HOME/.env\" \
-            \"\$IMAGE\"
+            \"$IMAGE\"
           docker image prune -f
           '"
 
