@@ -16,7 +16,13 @@ from api_clients import google_news_rss_client
 from utils.chart_utils import generate_stock_chart_url, get_stock_chart_image # Added
 from data_manager import DataManager # Import DataManager class
 import config
-from utils.article_utils import extract_readable_text_from_html, clamp_text, looks_like_html
+from utils.article_utils import (
+    extract_readable_text_from_html,
+    clamp_text,
+    looks_like_html,
+    extract_canonical_url_from_html,
+    is_probably_cookie_wall,
+)
 # Individual function imports from data_manager are no longer needed if using an instance
 
 # Gemini (google-genai)
@@ -164,6 +170,7 @@ class Stocks(commands.Cog):
         u = url.strip()
         try:
             import requests
+            from urllib.parse import urlparse
 
             headers = {
                 "User-Agent": (
@@ -171,18 +178,65 @@ class Stocks(commands.Cog):
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
                 ),
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
             }
-            r = requests.get(u, headers=headers, timeout=timeout_s, allow_redirects=True)
-            ct = r.headers.get("content-type", "") if hasattr(r, "headers") else ""
-            text = r.text if getattr(r, "text", None) is not None else ""
+
+            def _fetch_text(target_url: str) -> tuple[str, str, str]:
+                rr = requests.get(target_url, headers=headers, timeout=timeout_s, allow_redirects=True)
+                ct2 = rr.headers.get("content-type", "") if hasattr(rr, "headers") else ""
+                txt2 = rr.text if getattr(rr, "text", None) is not None else ""
+                final2 = str(getattr(rr, "url", "") or target_url)
+                return final2, ct2, txt2
+
+            final_url, ct, text = _fetch_text(u)
+            if not text:
+                return ""
+
+            # If this is a Google News wrapper page, try to jump to the publisher canonical URL.
+            try:
+                host = urlparse(final_url).netloc.lower()
+            except Exception:
+                host = ""
+
+            if "news.google." in host and looks_like_html(ct, text):
+                canon = extract_canonical_url_from_html(text)
+                if canon and canon != final_url:
+                    try:
+                        canon_host = urlparse(canon).netloc.lower()
+                    except Exception:
+                        canon_host = ""
+                    # Only refetch if it's not still a Google News URL.
+                    if canon_host and ("news.google." not in canon_host):
+                        final_url, ct, text = _fetch_text(canon)
+
             if not text:
                 return ""
 
             if not looks_like_html(ct, text):
-                return clamp_text(text, max_chars=12000)
+                plain = clamp_text(text, max_chars=12000)
+                return "" if is_probably_cookie_wall(plain) else plain
 
             extracted = extract_readable_text_from_html(text)
-            return extracted
+            if extracted and not is_probably_cookie_wall(extracted):
+                return extracted
+
+            # Fallback: use a lightweight reader proxy (often bypasses heavy JS/cookie banners).
+            # This is best-effort; if it fails we return "" so the caller uses RSS summary.
+            try:
+                reader_url = ""
+                if final_url.startswith("https://"):
+                    reader_url = "https://r.jina.ai/https://" + final_url[len("https://") :]
+                elif final_url.startswith("http://"):
+                    reader_url = "https://r.jina.ai/http://" + final_url[len("http://") :]
+                if reader_url:
+                    final2, ct2, txt2 = _fetch_text(reader_url)
+                    if txt2:
+                        txt2c = clamp_text(txt2, max_chars=12000)
+                        return "" if is_probably_cookie_wall(txt2c) else txt2c
+            except Exception:
+                pass
+
+            return ""
         except Exception:
             return ""
 
