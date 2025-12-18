@@ -52,11 +52,13 @@ class GeminiAI(commands.Cog):
             # Gemini Developer API key
             self.client = genai.Client(api_key=config.GEMINI_API_KEY)
             # Default per request: Gemini 3 Flash
-            self.primary_model_name = "gemini-3-flash"
+            # NOTE: On v1beta, the stable name may not be available for generateContent.
+            # Use the preview model name, matching official docs/pricing.
+            self.primary_model_name = "gemini-3-flash-preview"
             self.fallback_model_name = "gemini-2.5-flash"
         else:
             self.client = None
-            self.primary_model_name = "gemini-3-flash"
+            self.primary_model_name = "gemini-3-flash-preview"
             self.fallback_model_name = "gemini-2.5-flash"
 
         self.logger = logging.getLogger(__name__)
@@ -279,20 +281,20 @@ class GeminiAI(commands.Cog):
             await self._send_simple(ctx, "❌ Gemini AI is not configured by the bot owner.")
             return
         try:
-            self._switch_primary_model("gemini-3-pro-preview", "gemini-3-flash")
+            self._switch_primary_model("gemini-3-pro-preview", "gemini-3-flash-preview")
             await self._send_simple(ctx, "✅ Default Gemini model set to **gemini-3-pro-preview**. New conversations will use this model.")
         except Exception as e:
             await self._send_simple(ctx, f"⚠️ Failed to switch model: {e}")
 
     @gemini.command(name="fast", description="Switch the default Gemini model to the faster 2.5-flash.")
     async def fast(self, ctx: commands.Context):
-        """Alias: !gemini fast – sets primary model to gemini-3-flash."""
+        """Alias: !gemini fast – sets primary model to gemini-3-flash-preview."""
         if not self._configured:
             await self._send_simple(ctx, "❌ Gemini AI is not configured by the bot owner.")
             return
         try:
-            self._switch_primary_model("gemini-3-flash", "gemini-2.5-flash")
-            await self._send_simple(ctx, "✅ Default Gemini model set to **gemini-3-flash**. New conversations will use this model.")
+            self._switch_primary_model("gemini-3-flash-preview", "gemini-2.5-flash")
+            await self._send_simple(ctx, "✅ Default Gemini model set to **gemini-3-flash-preview**. New conversations will use this model.")
         except Exception as e:
             await self._send_simple(ctx, f"⚠️ Failed to switch model: {e}")
 
@@ -307,7 +309,7 @@ class GeminiAI(commands.Cog):
             await self._send_simple(ctx, "❌ Gemini AI is not configured by the bot owner.")
             return
         try:
-            self._switch_primary_model("gemini-2.5-flash-lite", "gemini-3-flash")
+            self._switch_primary_model("gemini-2.5-flash-lite", "gemini-3-flash-preview")
             await self._send_simple(ctx, "✅ Default Gemini model set to **gemini-2.5-flash-lite**. New conversations will use this model.")
         except Exception as e:
             await self._send_simple(ctx, f"⚠️ Failed to switch model: {e}")

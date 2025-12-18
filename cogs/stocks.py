@@ -239,7 +239,7 @@ class Stocks(commands.Cog):
         resp = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: self._gemini_client.models.generate_content(
-                model="gemini-3-flash",
+                model="gemini-3-flash-preview",
                 contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
                 config=cfg,
             ),
