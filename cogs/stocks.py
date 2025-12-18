@@ -7,6 +7,7 @@ import logging # For background task logging
 import typing # For type hinting
 import re
 import datetime
+import io
 from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
 from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series # Added
@@ -1170,13 +1171,22 @@ class Stocks(commands.Cog):
     @discord.app_commands.describe(
         symbol="Optional stock symbol. If omitted, analyzes your tracked stocks.",
         limit="Max articles per stock (default 5, max 10).",
+        public="Post analysis publicly in the channel (default: False).",
     )
-    async def stock_analyze(self, ctx: commands.Context, symbol: typing.Optional[str] = None, limit: int = 5):
-        await ctx.defer(ephemeral=True)
+    async def stock_analyze(
+        self,
+        ctx: commands.Context,
+        symbol: typing.Optional[str] = None,
+        limit: int = 5,
+        public: bool = False,
+    ):
+        is_dm = ctx.guild is None
+        ephemeral = (not public) if not is_dm else False
+        await ctx.defer(ephemeral=ephemeral)
         limit = max(1, min(10, int(limit)))
 
         if self._gemini_client is None:
-            await ctx.send("❌ Gemini is not configured by the bot owner (missing `GEMINI_API_KEY`).", ephemeral=True)
+            await ctx.send("❌ Gemini is not configured by the bot owner (missing `GEMINI_API_KEY`).", ephemeral=ephemeral)
             return
 
         user_id = ctx.author.id
@@ -1190,7 +1200,7 @@ class Stocks(commands.Cog):
             if not symbols:
                 await ctx.send(
                     "You are not tracking any stocks. Use `/track_stock <symbol>` first, or pass a `symbol` to `/stock_analyze`.",
-                    ephemeral=True,
+                    ephemeral=ephemeral,
                 )
                 return
 
@@ -1231,22 +1241,34 @@ class Stocks(commands.Cog):
         try:
             text = await self._gemini_summarize(prompt)
         except Exception as e:
-            await ctx.send(f"⚠️ Could not run Gemini analysis right now: {e}", ephemeral=True)
+            await ctx.send(f"⚠️ Could not run Gemini analysis right now: {e}", ephemeral=ephemeral)
             return
 
         if not text:
-            await ctx.send("⚠️ Gemini returned an empty response.", ephemeral=True)
+            await ctx.send("⚠️ Gemini returned an empty response.", ephemeral=ephemeral)
             return
 
-        header = "🧠 **Stock analysis (Gemini 3 Flash)**\n_Not financial advice._"
+        title_model = "Gemini 3 Flash (preview)"
+        title = "🧠 Stock analysis"
+        embed = discord.Embed(
+            title=title,
+            description=(text[:3900] + ("…" if len(text) > 3900 else "")),
+            color=discord.Color.dark_gold(),
+        )
+        embed.add_field(name="Model", value=title_model, inline=True)
+        embed.add_field(name="Scope", value=("single" if symbol else "portfolio"), inline=True)
+        embed.add_field(name="Symbols", value=(", ".join(symbols)[:1024] or "n/a"), inline=False)
+        footer = "Not financial advice."
         if trimmed:
-            header += "\n_(Only the first 8 symbols were analyzed to limit cost/DM size.)_"
+            footer += " Only the first 8 symbols were analyzed."
+        embed.set_footer(text=footer)
 
-        # Discord chunking
-        chunks = [text[i : i + 1900] for i in range(0, len(text), 1900)]
-        await ctx.send(header, ephemeral=False)
-        for ch in chunks[:5]:
-            await ctx.send(ch, ephemeral=False)
+        files = []
+        if len(text) > 3900:
+            buf = io.BytesIO(text.encode("utf-8", errors="ignore"))
+            files.append(discord.File(fp=buf, filename="stock_analysis.txt"))
+
+        await ctx.send(embed=embed, files=files, ephemeral=ephemeral)
 
     @commands.hybrid_command(name="set_portfolio_currency", description="Set your preferred currency for portfolio display.")
     @discord.app_commands.describe(currency="The currency code (e.g., USD, EUR, PLN)")
