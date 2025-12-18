@@ -180,3 +180,47 @@ def is_probably_cookie_wall(text: str) -> bool:
         return True
 
     return False
+
+
+def is_probably_block_page(text: str) -> bool:
+    """
+    Detect common anti-bot / access-denied pages so we don't include them as \"ARTICLE\" text.
+    """
+    if not isinstance(text, str):
+        return False
+    t = text.strip()
+    if not t:
+        return False
+    low = t.lower()
+
+    # Very common patterns across WAF/CDN blocks
+    block_hints = [
+        "403 forbidden",
+        "access denied",
+        "request blocked",
+        "not authorized",
+        "permission denied",
+        "temporarily unavailable",
+        "unusual traffic",
+        "verify you are human",
+        "captcha",
+        "cf-ray",
+        "cloudflare",
+        "akamai",
+        "imperva",
+        "incapsula",
+        "bot detection",
+        "security check",
+    ]
+    hits = 0
+    for h in block_hints:
+        if h in low:
+            hits += 1
+
+    if hits >= 2:
+        return True
+    # Strong single-signal
+    if "403 forbidden" in low or "verify you are human" in low or "captcha" in low:
+        return True
+
+    return False

@@ -16,13 +16,7 @@ from api_clients import google_news_rss_client
 from utils.chart_utils import generate_stock_chart_url, get_stock_chart_image # Added
 from data_manager import DataManager # Import DataManager class
 import config
-from utils.article_utils import (
-    extract_readable_text_from_html,
-    clamp_text,
-    looks_like_html,
-    extract_canonical_url_from_html,
-    is_probably_cookie_wall,
-)
+from utils.article_utils import clamp_text
 # Individual function imports from data_manager are no longer needed if using an instance
 
 # Gemini (google-genai)
@@ -160,90 +154,7 @@ class Stocks(commands.Cog):
                 lines.append(f"  - {summary}")
         return "\n".join(lines)
 
-    def _fetch_article_text_blocking(self, url: str, *, timeout_s: int = 12) -> str:
-        """
-        Blocking HTTP fetch + extraction. Run in executor.
-        Returns extracted article text or empty string.
-        """
-        if not isinstance(url, str) or not url.strip():
-            return ""
-        u = url.strip()
-        try:
-            import requests
-            from urllib.parse import urlparse
-
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-
-            def _fetch_text(target_url: str) -> tuple[str, str, str]:
-                rr = requests.get(target_url, headers=headers, timeout=timeout_s, allow_redirects=True)
-                ct2 = rr.headers.get("content-type", "") if hasattr(rr, "headers") else ""
-                txt2 = rr.text if getattr(rr, "text", None) is not None else ""
-                final2 = str(getattr(rr, "url", "") or target_url)
-                return final2, ct2, txt2
-
-            final_url, ct, text = _fetch_text(u)
-            if not text:
-                return ""
-
-            # If this is a Google News wrapper page, try to jump to the publisher canonical URL.
-            try:
-                host = urlparse(final_url).netloc.lower()
-            except Exception:
-                host = ""
-
-            if "news.google." in host and looks_like_html(ct, text):
-                canon = extract_canonical_url_from_html(text)
-                if canon and canon != final_url:
-                    try:
-                        canon_host = urlparse(canon).netloc.lower()
-                    except Exception:
-                        canon_host = ""
-                    # Only refetch if it's not still a Google News URL.
-                    if canon_host and ("news.google." not in canon_host):
-                        final_url, ct, text = _fetch_text(canon)
-
-            if not text:
-                return ""
-
-            if not looks_like_html(ct, text):
-                plain = clamp_text(text, max_chars=12000)
-                return "" if is_probably_cookie_wall(plain) else plain
-
-            extracted = extract_readable_text_from_html(text)
-            if extracted and not is_probably_cookie_wall(extracted):
-                return extracted
-
-            # Fallback: use a lightweight reader proxy (often bypasses heavy JS/cookie banners).
-            # This is best-effort; if it fails we return "" so the caller uses RSS summary.
-            try:
-                reader_url = ""
-                if final_url.startswith("https://"):
-                    reader_url = "https://r.jina.ai/https://" + final_url[len("https://") :]
-                elif final_url.startswith("http://"):
-                    reader_url = "https://r.jina.ai/http://" + final_url[len("http://") :]
-                if reader_url:
-                    final2, ct2, txt2 = _fetch_text(reader_url)
-                    if txt2:
-                        txt2c = clamp_text(txt2, max_chars=12000)
-                        return "" if is_probably_cookie_wall(txt2c) else txt2c
-            except Exception:
-                pass
-
-            return ""
-        except Exception:
-            return ""
-
-    async def _fetch_article_text(self, url: str) -> str:
-        return await asyncio.get_running_loop().run_in_executor(None, lambda: self._fetch_article_text_blocking(url))
-
-    async def _news_to_fulltext_context(
+    async def _news_to_snippet_context(
         self,
         symbol: str,
         items: typing.List[dict],
@@ -254,18 +165,6 @@ class Stocks(commands.Cog):
         sym = str(symbol or "").upper()
         out: list[str] = [f"### {sym}"]
         items2 = [it for it in (items or []) if isinstance(it, dict)][:max_articles]
-
-        # Fetch article texts concurrently but bounded, since this uses executor threads.
-        sem = asyncio.Semaphore(5)
-
-        async def _fetch_one(u: str) -> str:
-            if not u:
-                return ""
-            async with sem:
-                return await self._fetch_article_text(u)
-
-        urls = [str(it.get("url") or "").strip() for it in items2]
-        fetched = await asyncio.gather(*[_fetch_one(u) for u in urls], return_exceptions=True)
 
         for idx, it in enumerate(items2):
             title = str(it.get("title") or "Untitled").strip()
@@ -280,24 +179,12 @@ class Stocks(commands.Cog):
             if url:
                 out.append(f"  URL: {url}")
 
-            article_text = ""
-            try:
-                v = fetched[idx]
-                if isinstance(v, str):
-                    article_text = v
-            except Exception:
-                article_text = ""
-
-            if article_text:
-                article_text = clamp_text(article_text, max_chars=per_article_chars)
-                out.append("  ARTICLE:")
-                out.append("  " + article_text.replace("\n", "\n  "))
+            # We do NOT scrape article pages (too many cookie walls / 403 / anti-bot).
+            if summary:
+                out.append("  SUMMARY:")
+                out.append("  " + clamp_text(summary, max_chars=min(2000, per_article_chars)).replace("\n", " "))
             else:
-                if summary:
-                    out.append("  SUMMARY:")
-                    out.append("  " + clamp_text(summary, max_chars=min(2000, per_article_chars)).replace("\n", " "))
-                else:
-                    out.append("  SUMMARY: (unavailable)")
+                out.append("  SUMMARY: (unavailable)")
 
         return "\n".join(out).strip()
 
@@ -482,7 +369,7 @@ class Stocks(commands.Cog):
                 if not news:
                     briefs.append(f"### {sym}\n- No news found.")
                 else:
-                    briefs.append(await self._news_to_fulltext_context(sym, news, max_articles=5, per_article_chars=3500))
+                    briefs.append(await self._news_to_snippet_context(sym, news, max_articles=5, per_article_chars=3500))
 
             context = "\n\n".join(briefs)
             prompt = (
@@ -1227,7 +1114,7 @@ class Stocks(commands.Cog):
         public="Post analysis publicly in the channel (default: False).",
         detail="short|medium|long (controls depth + length; default: medium).",
         max_symbols="For portfolio mode: how many tracked symbols to include (default 25, max 50).",
-        include_sources="Attach a sources file (URLs + extracted text). Default: True.",
+        include_sources="Attach a sources file (headlines + snippets + URLs). Default: True.",
     )
     async def stock_analyze(
         self,
@@ -1291,7 +1178,7 @@ class Stocks(commands.Cog):
             if not news:
                 briefs.append(f"### {sym}\n- No news found.")
                 continue
-            briefs.append(await self._news_to_fulltext_context(sym, news, max_articles=limit, per_article_chars=per_article_chars))
+            briefs.append(await self._news_to_snippet_context(sym, news, max_articles=limit, per_article_chars=per_article_chars))
 
         context = "\n\n".join(briefs)
         scope_line = "single stock" if symbol else "portfolio"
@@ -1304,7 +1191,7 @@ class Stocks(commands.Cog):
             "- Keep it concise and structured.\n\n"
             f"Scope: {scope_line}\n"
             f"Symbols: {', '.join(symbols)}\n\n"
-            "News (includes full article text when accessible; otherwise fall back to provider summary):\n"
+            "News (headlines + snippets from providers; full articles are not fetched):\n"
             f"{context}\n\n"
             "Output format:\n"
             "1) Executive summary (3-6 bullets)\n"
@@ -1347,7 +1234,7 @@ class Stocks(commands.Cog):
         # Optionally attach sources (what Gemini read). Clamp to ~3MB to avoid Discord attachment limits.
         if include_sources:
             src_txt = (
-                "SOURCES (best-effort extracted article text; may be truncated)\n"
+                "SOURCES (headlines + snippets + URLs; no article scraping)\n"
                 f"Symbols: {', '.join(symbols)}\n\n"
                 + context
             )
