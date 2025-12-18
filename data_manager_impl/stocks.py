@@ -227,4 +227,35 @@ class StocksMixin:
             
         return active_alerts_to_monitor
 
+    # --- Portfolio analysis schedules (UTC HH:MM) ---
+    def add_portfolio_analysis_schedule(self, user_id: int, schedule_time: str) -> bool:
+        user_id_str = str(user_id)
+        query = """
+        INSERT INTO portfolio_analysis_schedules (user_id, schedule_time)
+        VALUES (:user_id, :time)
+        ON CONFLICT(user_id, schedule_time) DO NOTHING
+        """
+        return self._execute_query(query, {"user_id": user_id_str, "time": str(schedule_time).strip()}, commit=True)
+
+    def remove_portfolio_analysis_schedule(self, user_id: int, schedule_time: str) -> bool:
+        user_id_str = str(user_id)
+        query = "DELETE FROM portfolio_analysis_schedules WHERE user_id = :user_id AND schedule_time = :time"
+        return self._execute_query(query, {"user_id": user_id_str, "time": str(schedule_time).strip()}, commit=True)
+
+    def clear_portfolio_analysis_schedules(self, user_id: int) -> bool:
+        user_id_str = str(user_id)
+        query = "DELETE FROM portfolio_analysis_schedules WHERE user_id = :user_id"
+        return self._execute_query(query, {"user_id": user_id_str}, commit=True)
+
+    def get_user_portfolio_analysis_schedules(self, user_id: int) -> List[Dict[str, Any]]:
+        user_id_str = str(user_id)
+        query = "SELECT schedule_time FROM portfolio_analysis_schedules WHERE user_id = :user_id ORDER BY schedule_time ASC"
+        rows = self._execute_query(query, {"user_id": user_id_str}, fetch_all=True)
+        return rows if isinstance(rows, list) else []
+
+    def get_portfolio_analysis_schedules_for_time(self, schedule_time: str) -> List[Dict[str, Any]]:
+        query = "SELECT user_id FROM portfolio_analysis_schedules WHERE schedule_time = :time"
+        rows = self._execute_query(query, {"time": str(schedule_time).strip()}, fetch_all=True)
+        return rows if isinstance(rows, list) else []
+
     # --- User Preferences ---

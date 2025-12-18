@@ -309,6 +309,16 @@ class DataManagerCore:
         """
         create_table_if_not_exists("weather_schedules", create_weather_schedules_sql)
 
+        # Portfolio Analysis Schedules (Stocks) - UTC HH:MM per user
+        create_portfolio_analysis_schedules_sql = """
+        CREATE TABLE IF NOT EXISTS portfolio_analysis_schedules (
+            user_id TEXT NOT NULL,
+            schedule_time TEXT NOT NULL,
+            PRIMARY KEY (user_id, schedule_time)
+        )
+        """
+        create_table_if_not_exists("portfolio_analysis_schedules", create_portfolio_analysis_schedules_sql)
+
         # --- Book Author Subscriptions ---
         create_book_author_subscriptions_sql = """
         CREATE TABLE IF NOT EXISTS book_author_subscriptions (

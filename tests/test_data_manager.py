@@ -370,6 +370,24 @@ def test_habit_snooze_before_due_skips_next_occurrence(db_manager):
     assert any(r.get("id") == habit_id for r in due_next)
 
 
+def test_portfolio_analysis_schedule_crud(db_manager):
+    user_id = 9911
+    # add
+    ok = db_manager.add_portfolio_analysis_schedule(user_id, "08:00")
+    assert ok is True
+    # list
+    rows = db_manager.get_user_portfolio_analysis_schedules(user_id)
+    assert any(r.get("schedule_time") == "08:00" for r in rows)
+    # remove
+    ok2 = db_manager.remove_portfolio_analysis_schedule(user_id, "08:00")
+    assert ok2 is True
+    rows2 = db_manager.get_user_portfolio_analysis_schedules(user_id)
+    assert not any(r.get("schedule_time") == "08:00" for r in rows2)
+    # clear (no-op ok)
+    ok3 = db_manager.clear_portfolio_analysis_schedules(user_id)
+    assert ok3 is True
+
+
 def test_habit_snooze_migration_from_old_schema(tmp_path, monkeypatch):
     """
     Create an older `habits` table without snooze columns, then ensure DataManagerCore migrates it.

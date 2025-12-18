@@ -5,13 +5,25 @@ import asyncio # Added for rate limiting
 import functools # Added for partial
 import logging # For background task logging
 import typing # For type hinting
+import re
+import datetime
 from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
 from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series # Added
 from api_clients import yahoo_finance_client # Added Yahoo Finance support
 from utils.chart_utils import generate_stock_chart_url, get_stock_chart_image # Added
 from data_manager import DataManager # Import DataManager class
+import config
+from utils.article_utils import extract_readable_text_from_html, clamp_text, looks_like_html
 # Individual function imports from data_manager are no longer needed if using an instance
+
+# Gemini (google-genai)
+try:
+    from google import genai  # type: ignore
+    from google.genai import types  # type: ignore
+except Exception:  # pragma: no cover
+    genai = None
+    types = None
 
 # Configure logging for this cog
 logger = logging.getLogger(__name__)
@@ -39,14 +51,200 @@ class Stocks(commands.Cog):
         self.unique_stocks_queue = []
         self.current_queue_index = 0
         self.check_stock_alerts.start() # Start the background task
+        self.check_portfolio_analysis_schedules.start()
+
+        # Gemini client for analysis (optional)
+        self._gemini_client = None
+        if getattr(config, "GEMINI_API_KEY", None) and genai is not None:
+            try:
+                self._gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
+            except Exception:
+                self._gemini_client = None
 
     def cog_unload(self):
         self.check_stock_alerts.cancel() # Ensure the task is cancelled on cog unload
+        self.check_portfolio_analysis_schedules.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self):
         print("Stocks Cog is ready.")
         logger.info("Stocks Cog is ready and stock alert monitoring task is running.")
+
+    def _time_hhmm_pattern(self):
+        return re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+    async def _is_user_in_dnd(self, user_id: int) -> bool:
+        """
+        Best-effort DND check using existing preference keys.
+        """
+        if not self.db_manager:
+            return False
+        try:
+            dnd_enabled = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_enabled", False)
+            if not dnd_enabled:
+                return False
+            dnd_start_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_start_time", "00:00")
+            dnd_end_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_end_time", "00:00")
+            try:
+                start_t = datetime.datetime.strptime(str(dnd_start_str), "%H:%M").time()
+                end_t = datetime.datetime.strptime(str(dnd_end_str), "%H:%M").time()
+            except Exception:
+                return False
+            now_t = datetime.datetime.now().time()
+            if start_t == end_t:
+                return False
+            if start_t < end_t:
+                return start_t <= now_t < end_t
+            return now_t >= start_t or now_t < end_t
+        except Exception:
+            return False
+
+    async def _dm_user(self, user_id: int, *, embed: discord.Embed) -> bool:
+        user = self.bot.get_user(int(user_id))
+        if not user:
+            try:
+                user = await self.bot.fetch_user(int(user_id))
+            except Exception:
+                return False
+        try:
+            await user.send(embed=embed)
+            return True
+        except Exception:
+            return False
+
+    async def _fetch_stock_news_any_provider(self, symbol: str, limit: int = 5) -> typing.Optional[typing.List[dict]]:
+        """
+        Prefer Alpha Vantage news (has summaries + sentiment), fallback to Yahoo if AV is limited/unavailable.
+        """
+        sym = str(symbol or "").strip().upper()
+        limit = max(1, min(10, int(limit)))
+        if not sym:
+            return None
+
+        news = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_news, sym, limit)
+        if isinstance(news, list) and news:
+            return news
+        if isinstance(news, dict) and news.get("error") in {"api_limit", "config_error", "api_error"}:
+            yf_news = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_news, sym, limit)
+            return yf_news if isinstance(yf_news, list) and yf_news else None
+
+        yf_news = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_news, sym, limit)
+        return yf_news if isinstance(yf_news, list) and yf_news else None
+
+    def _news_to_brief_text(self, symbol: str, items: typing.List[dict]) -> str:
+        sym = str(symbol or "").upper()
+        lines = [f"### {sym}"]
+        for it in (items or [])[:10]:
+            if not isinstance(it, dict):
+                continue
+            title = str(it.get("title") or "Untitled").strip()
+            src = str(it.get("source") or "").strip()
+            ts = str(it.get("time_published") or "").strip()
+            sent = str(it.get("sentiment_label") or "").strip()
+            url = str(it.get("url") or "").strip()
+            summary = str(it.get("summary") or "").strip()
+            if len(summary) > 280:
+                summary = summary[:277] + "..."
+            meta = " | ".join([x for x in [src, ts, sent] if x])
+            if url:
+                lines.append(f"- {title} ({meta}) [{url}]")
+            else:
+                lines.append(f"- {title} ({meta})")
+            if summary:
+                lines.append(f"  - {summary}")
+        return "\n".join(lines)
+
+    def _fetch_article_text_blocking(self, url: str, *, timeout_s: int = 12) -> str:
+        """
+        Blocking HTTP fetch + extraction. Run in executor.
+        Returns extracted article text or empty string.
+        """
+        if not isinstance(url, str) or not url.strip():
+            return ""
+        u = url.strip()
+        try:
+            import requests
+
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+            r = requests.get(u, headers=headers, timeout=timeout_s, allow_redirects=True)
+            ct = r.headers.get("content-type", "") if hasattr(r, "headers") else ""
+            text = r.text if getattr(r, "text", None) is not None else ""
+            if not text:
+                return ""
+
+            if not looks_like_html(ct, text):
+                return clamp_text(text, max_chars=12000)
+
+            extracted = extract_readable_text_from_html(text)
+            return extracted
+        except Exception:
+            return ""
+
+    async def _fetch_article_text(self, url: str) -> str:
+        return await asyncio.get_running_loop().run_in_executor(None, lambda: self._fetch_article_text_blocking(url))
+
+    async def _news_to_fulltext_context(
+        self,
+        symbol: str,
+        items: typing.List[dict],
+        *,
+        max_articles: int,
+        per_article_chars: int,
+    ) -> str:
+        sym = str(symbol or "").upper()
+        out: list[str] = [f"### {sym}"]
+
+        for it in (items or [])[:max_articles]:
+            if not isinstance(it, dict):
+                continue
+            title = str(it.get("title") or "Untitled").strip()
+            src = str(it.get("source") or "").strip()
+            ts = str(it.get("time_published") or "").strip()
+            sent = str(it.get("sentiment_label") or "").strip()
+            url = str(it.get("url") or "").strip()
+            summary = str(it.get("summary") or "").strip()
+
+            meta = " | ".join([x for x in [src, ts, sent] if x])
+            out.append(f"- {title} ({meta})")
+            if url:
+                out.append(f"  URL: {url}")
+
+            article_text = ""
+            if url:
+                article_text = await self._fetch_article_text(url)
+
+            if article_text:
+                article_text = clamp_text(article_text, max_chars=per_article_chars)
+                out.append("  ARTICLE:")
+                out.append("  " + article_text.replace("\n", "\n  "))
+            else:
+                if summary:
+                    out.append("  SUMMARY:")
+                    out.append("  " + clamp_text(summary, max_chars=min(600, per_article_chars)).replace("\n", " "))
+                else:
+                    out.append("  SUMMARY: (unavailable)")
+
+        return "\n".join(out).strip()
+
+    async def _gemini_summarize(self, prompt: str) -> str:
+        if self._gemini_client is None or types is None:
+            raise RuntimeError("Gemini is not configured (missing GEMINI_API_KEY or google-genai)")
+        cfg = types.GenerateContentConfig(temperature=0.2, max_output_tokens=900)
+        resp = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: self._gemini_client.models.generate_content(
+                model="gemini-3-flash",
+                contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+                config=cfg,
+            ),
+        )
+        return str(getattr(resp, "text", "") or "").strip()
 
     @tasks.loop(minutes=STOCK_CHECK_INTERVAL_MINUTES)
     async def check_stock_alerts(self):
@@ -173,6 +371,80 @@ class Stocks(commands.Cog):
     async def before_check_stock_alerts(self):
         await self.bot.wait_until_ready()
         logger.info("Stock alert monitoring task is waiting for bot to be ready...")
+
+    # -------------------------
+    # Scheduled portfolio analysis (DM)
+    # -------------------------
+    @tasks.loop(minutes=1)
+    async def check_portfolio_analysis_schedules(self):
+        if not self.db_manager:
+            return
+        if self._gemini_client is None:
+            return
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        current_time = now.strftime("%H:%M")  # UTC HH:MM
+        rows = await self.bot.loop.run_in_executor(None, self.db_manager.get_portfolio_analysis_schedules_for_time, current_time)
+        if not rows:
+            return
+
+        for r in rows or []:
+            try:
+                uid = int(r.get("user_id"))
+            except Exception:
+                continue
+
+            try:
+                if await self._is_user_in_dnd(uid):
+                    continue
+            except Exception:
+                pass
+
+            tracked = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, uid)
+            symbols = [str(s.get("symbol") or "").upper() for s in (tracked or []) if isinstance(s, dict) and s.get("symbol")]
+            symbols = [s for s in symbols if s]
+            if not symbols:
+                continue
+
+            symbols = symbols[:8]
+            briefs: list[str] = []
+            for sym in symbols:
+                news = await self._fetch_stock_news_any_provider(sym, limit=5)
+                if not news:
+                    briefs.append(f"### {sym}\n- No news found.")
+                else:
+                    briefs.append(await self._news_to_fulltext_context(sym, news, max_articles=5, per_article_chars=3500))
+
+            context = "\n\n".join(briefs)
+            prompt = (
+                "You are a financial news assistant. Create a portfolio news briefing.\n"
+                "Rules:\n"
+                "- Do NOT provide investment advice. Do not tell the user to buy/sell.\n"
+                "- Focus on what changed in the news and what to watch next.\n"
+                "- Keep it short (<= 12 bullets total), and group by symbol.\n\n"
+                f"Portfolio symbols: {', '.join(symbols)}\n\n"
+                "Use the included full article text when present, otherwise use summaries.\n\n"
+                f"{context}\n"
+            )
+            try:
+                text = await self._gemini_summarize(prompt)
+            except Exception:
+                continue
+            if not text:
+                continue
+
+            embed = discord.Embed(
+                title="📬 Portfolio analysis (scheduled)",
+                description=(text[:3900] + ("…" if len(text) > 3900 else "")),
+                color=discord.Color.dark_gold(),
+                timestamp=now,
+            )
+            embed.set_footer(text="Gemini 3 Flash • Not financial advice • Data: Alpha Vantage/Yahoo Finance")
+            await self._dm_user(uid, embed=embed)
+
+    @check_portfolio_analysis_schedules.before_loop
+    async def before_check_portfolio_analysis_schedules(self):
+        await self.bot.wait_until_ready()
 
     @commands.hybrid_command(name="stock_price", description="Get the current price of a stock.")
     @discord.app_commands.describe(symbol="The stock symbol (e.g., AAPL, MSFT, LPP.WA)")
@@ -891,6 +1163,91 @@ class Stocks(commands.Cog):
             
         await ctx.send(embed=embed, ephemeral=False) # Send publicly if successful
 
+    @commands.hybrid_command(
+        name="stock_analyze",
+        description="Use Gemini to analyze and summarize recent stock news (or your whole tracked list).",
+    )
+    @discord.app_commands.describe(
+        symbol="Optional stock symbol. If omitted, analyzes your tracked stocks.",
+        limit="Max articles per stock (default 5, max 10).",
+    )
+    async def stock_analyze(self, ctx: commands.Context, symbol: typing.Optional[str] = None, limit: int = 5):
+        await ctx.defer(ephemeral=True)
+        limit = max(1, min(10, int(limit)))
+
+        if self._gemini_client is None:
+            await ctx.send("❌ Gemini is not configured by the bot owner (missing `GEMINI_API_KEY`).", ephemeral=True)
+            return
+
+        user_id = ctx.author.id
+        symbols: typing.List[str]
+        if symbol and str(symbol).strip():
+            symbols = [str(symbol).strip().upper()]
+        else:
+            tracked = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
+            symbols = [str(s.get("symbol") or "").upper() for s in (tracked or []) if isinstance(s, dict) and s.get("symbol")]
+            symbols = [s for s in symbols if s]
+            if not symbols:
+                await ctx.send(
+                    "You are not tracking any stocks. Use `/track_stock <symbol>` first, or pass a `symbol` to `/stock_analyze`.",
+                    ephemeral=True,
+                )
+                return
+
+        # Safety cap for cost + API load
+        max_symbols = 8
+        trimmed = False
+        if len(symbols) > max_symbols:
+            symbols = symbols[:max_symbols]
+            trimmed = True
+
+        briefs: list[str] = []
+        for sym in symbols:
+            news = await self._fetch_stock_news_any_provider(sym, limit=limit)
+            if not news:
+                briefs.append(f"### {sym}\n- No news found.")
+                continue
+            briefs.append(await self._news_to_fulltext_context(sym, news, max_articles=limit, per_article_chars=3500))
+
+        context = "\n\n".join(briefs)
+        scope_line = "single stock" if symbol else "portfolio"
+        prompt = (
+            "You are a financial news assistant. Summarize and analyze the following news headlines for the user.\n"
+            "Rules:\n"
+            "- Do NOT provide investment advice. Do not tell the user to buy/sell.\n"
+            "- Focus on: key events, catalysts, risks, and what to watch next.\n"
+            "- If sentiment labels are present, mention whether sentiment is broadly positive/negative/mixed.\n"
+            "- Keep it concise and structured.\n\n"
+            f"Scope: {scope_line}\n"
+            f"Symbols: {', '.join(symbols)}\n\n"
+            "News (includes full article text when accessible; otherwise fall back to provider summary):\n"
+            f"{context}\n\n"
+            "Output format:\n"
+            "1) Executive summary (3-6 bullets)\n"
+            "2) By symbol (2-4 bullets each)\n"
+            "3) Watchlist / questions to investigate next\n"
+        )
+
+        try:
+            text = await self._gemini_summarize(prompt)
+        except Exception as e:
+            await ctx.send(f"⚠️ Could not run Gemini analysis right now: {e}", ephemeral=True)
+            return
+
+        if not text:
+            await ctx.send("⚠️ Gemini returned an empty response.", ephemeral=True)
+            return
+
+        header = "🧠 **Stock analysis (Gemini 3 Flash)**\n_Not financial advice._"
+        if trimmed:
+            header += "\n_(Only the first 8 symbols were analyzed to limit cost/DM size.)_"
+
+        # Discord chunking
+        chunks = [text[i : i + 1900] for i in range(0, len(text), 1900)]
+        await ctx.send(header, ephemeral=False)
+        for ch in chunks[:5]:
+            await ctx.send(ch, ephemeral=False)
+
     @commands.hybrid_command(name="set_portfolio_currency", description="Set your preferred currency for portfolio display.")
     @discord.app_commands.describe(currency="The currency code (e.g., USD, EUR, PLN)")
     async def set_portfolio_currency(self, ctx: commands.Context, currency: str):
@@ -1497,6 +1854,53 @@ class Stocks(commands.Cog):
         except Exception as e:
             logger.error(f"Failed to sync commands: {e}")
             await ctx.send(f"❌ Failed to sync commands: {e}")
+
+    # -------------------------
+    # Schedule management commands
+    # -------------------------
+    @commands.hybrid_group(
+        name="stock_analysis_schedule",
+        invoke_without_command=True,
+        description="Manage scheduled portfolio analysis DMs (UTC).",
+    )
+    async def stock_analysis_schedule(self, ctx: commands.Context):
+        if ctx.invoked_subcommand is None:
+            await self.stock_analysis_schedule_list(ctx)
+
+    @stock_analysis_schedule.command(name="add", description="Add a UTC time (HH:MM) to receive a daily portfolio analysis DM.")
+    @discord.app_commands.describe(time="UTC time HH:MM (e.g., 08:00)")
+    async def stock_analysis_schedule_add(self, ctx: commands.Context, time: str):
+        await ctx.defer(ephemeral=True)
+        if not self._time_hhmm_pattern().match(str(time or "").strip()):
+            await ctx.send("❌ Invalid time format. Use HH:MM (e.g., 08:00).", ephemeral=True)
+            return
+        await self.bot.loop.run_in_executor(None, self.db_manager.add_portfolio_analysis_schedule, ctx.author.id, str(time).strip())
+        await ctx.send(f"✅ Scheduled portfolio analysis at **{str(time).strip()}** UTC.", ephemeral=True)
+
+    @stock_analysis_schedule.command(name="remove", description="Remove a UTC time (HH:MM) or 'all'.")
+    @discord.app_commands.describe(time="UTC time HH:MM or 'all'")
+    async def stock_analysis_schedule_remove(self, ctx: commands.Context, time: str):
+        await ctx.defer(ephemeral=True)
+        t = str(time or "").strip().lower()
+        if t in {"all", "*", "clear"}:
+            await self.bot.loop.run_in_executor(None, self.db_manager.clear_portfolio_analysis_schedules, ctx.author.id)
+            await ctx.send("✅ Removed **all** portfolio analysis schedules.", ephemeral=True)
+            return
+        if not self._time_hhmm_pattern().match(str(time or "").strip()):
+            await ctx.send("❌ Invalid time format. Use HH:MM (e.g., 08:00) or `all`.", ephemeral=True)
+            return
+        await self.bot.loop.run_in_executor(None, self.db_manager.remove_portfolio_analysis_schedule, ctx.author.id, str(time).strip())
+        await ctx.send(f"✅ Removed schedule for **{str(time).strip()}** UTC.", ephemeral=True)
+
+    @stock_analysis_schedule.command(name="list", description="List your scheduled portfolio analysis times (UTC).")
+    async def stock_analysis_schedule_list(self, ctx: commands.Context):
+        await ctx.defer(ephemeral=True)
+        rows = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_portfolio_analysis_schedules, ctx.author.id)
+        times = [r.get("schedule_time") for r in (rows or []) if isinstance(r, dict) and r.get("schedule_time")]
+        if not times:
+            await ctx.send("You have no scheduled portfolio analyses. Add one with `/stock_analysis_schedule add 08:00`.", ephemeral=True)
+            return
+        await ctx.send("🕒 Scheduled portfolio analysis times (UTC): " + ", ".join(f"`{t}`" for t in times), ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Stocks(bot))

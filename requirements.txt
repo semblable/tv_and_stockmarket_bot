@@ -5,5 +5,6 @@ Flask
 yfinance>=0.2.18
 urllib3>=1.26.0
 google-genai
+beautifulsoup4
 pydantic
 pydantic-settings

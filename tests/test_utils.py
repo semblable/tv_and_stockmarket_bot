@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from utils import chart_utils, paginator
+from utils.article_utils import extract_readable_text_from_html
 
 # --- Chart Utils Tests ---
 
@@ -95,5 +96,25 @@ async def test_paginator_button_states():
     assert view.prev_page_button.disabled is False
     assert view.next_page_button.disabled is True
     assert view.last_page_button.disabled is True
+
+
+def test_article_html_extraction_basic():
+    html = """
+    <html><head><title>x</title><script>var a=1;</script></head>
+    <body>
+      <nav>menu</nav>
+      <article>
+        <h1>Big headline</h1>
+        <p>This is the first paragraph of the article. It has enough length to be included.</p>
+        <p>Second paragraph with more details about the story. It should also be included.</p>
+      </article>
+      <footer>copyright</footer>
+    </body></html>
+    """
+    text = extract_readable_text_from_html(html)
+    assert "Big headline" in text
+    assert "first paragraph" in text
+    assert "Second paragraph" in text
+    assert "menu" not in text
 
 
