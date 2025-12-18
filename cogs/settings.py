@@ -28,6 +28,8 @@ def create_settings_embed(ctx, user_preferences, weather_schedules):
         value=f"Default Location: **{weather_loc}**\n"
               f"Active Schedules: **{schedules_count}**\n"
               f"`{ctx.prefix}settings weather_default <location>`\n"
+              f"`{ctx.prefix}settings weather_schedule add <HH:MM> [location]`\n"
+              f"`{ctx.prefix}settings weather_schedule remove <HH:MM|all>`\n"
               f"`{ctx.prefix}settings weather_schedule list`",
         inline=False
     )
@@ -83,6 +85,17 @@ class SettingsCog(commands.Cog, name="Settings"):
         self.bot = bot
         self.db_manager = db_manager # Injected dependency
 
+    async def _send_ctx(self, ctx: commands.Context, content: str, *, ephemeral: bool = True) -> None:
+        """
+        Send helper for hybrid commands:
+        - Uses ephemeral only for interactions
+        - Avoids passing ephemeral kwarg for prefix commands (would raise)
+        """
+        if getattr(ctx, "interaction", None):
+            await ctx.send(content, ephemeral=ephemeral)
+        else:
+            await ctx.send(content)
+
     @commands.hybrid_group(name="settings", aliases=["prefs"], fallback="view")
     async def settings_group(self, ctx: commands.Context):
         """Manage your notification preferences."""
@@ -128,8 +141,8 @@ class SettingsCog(commands.Cog, name="Settings"):
         # Validate time
         time_pattern = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
         if not time_pattern.match(time):
-             await ctx.send("❌ Invalid time format. Please use HH:MM (24-hour format, e.g., 08:00).", ephemeral=True)
-             return
+            await self._send_ctx(ctx, "❌ Invalid time format. Please use HH:MM (24-hour format, e.g., 08:00).", ephemeral=True)
+            return
         
         user_id = ctx.author.id
         await self.bot.loop.run_in_executor(None, self.db_manager.add_weather_schedule, user_id, time, location)
@@ -139,14 +152,34 @@ class SettingsCog(commands.Cog, name="Settings"):
             msg += f" (Location: {location})"
         else:
             msg += " (Using default location)"
-        await ctx.send(msg)
+        await self._send_ctx(ctx, msg, ephemeral=True)
 
     @weather_schedule_group.command(name="remove")
     async def remove_weather_schedule(self, ctx: commands.Context, time: str):
         """Remove a scheduled weather notification."""
+        time_in = str(time or "").strip().lower()
         user_id = ctx.author.id
-        await self.bot.loop.run_in_executor(None, self.db_manager.remove_weather_schedule, user_id, time)
-        await ctx.send(f"✅ Removed weather schedule for **{time}**.")
+        # Special: remove all schedules
+        if time_in in {"all", "*", "clear"}:
+            await self.bot.loop.run_in_executor(None, self.db_manager.clear_weather_schedules, user_id)
+            await self._send_ctx(ctx, "✅ Removed **all** weather schedules.", ephemeral=True)
+            return
+
+        # Validate time
+        time_pattern = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+        if not time_pattern.match(str(time or "").strip()):
+            await self._send_ctx(ctx, "❌ Invalid time format. Use HH:MM (e.g., 08:00) or `all`.", ephemeral=True)
+            return
+
+        await self.bot.loop.run_in_executor(None, self.db_manager.remove_weather_schedule, user_id, str(time).strip())
+        await self._send_ctx(ctx, f"✅ Removed weather schedule for **{str(time).strip()}**.", ephemeral=True)
+
+    @weather_schedule_group.command(name="clear")
+    async def clear_weather_schedule(self, ctx: commands.Context):
+        """Remove all scheduled weather notifications."""
+        user_id = ctx.author.id
+        await self.bot.loop.run_in_executor(None, self.db_manager.clear_weather_schedules, user_id)
+        await self._send_ctx(ctx, "✅ Removed **all** weather schedules.", ephemeral=True)
 
     @weather_schedule_group.command(name="list")
     async def list_weather_schedules(self, ctx: commands.Context):
@@ -155,7 +188,7 @@ class SettingsCog(commands.Cog, name="Settings"):
         schedules = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_weather_schedules, user_id)
         
         if not schedules:
-            await ctx.send("You have no scheduled weather notifications.")
+            await self._send_ctx(ctx, "You have no scheduled weather notifications.", ephemeral=True)
             return
             
         embed = discord.Embed(title="📅 Your Weather Schedules", color=discord.Color.blue())
@@ -165,7 +198,10 @@ class SettingsCog(commands.Cog, name="Settings"):
             description += f"• **{s['schedule_time']}** UTC - {loc}\n"
         
         embed.description = description
-        await ctx.send(embed=embed)
+        if getattr(ctx, "interaction", None):
+            await ctx.send(embed=embed, ephemeral=True)
+        else:
+            await ctx.send(embed=embed)
 
     @settings_group.command(name="tv_overview", aliases=["tvoverview"])
     async def set_tv_overview(self, ctx: commands.Context, new_status: str):

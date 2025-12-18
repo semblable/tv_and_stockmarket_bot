@@ -121,6 +121,15 @@ class PrefsWeatherMixin:
         params = {"user_id": user_id_str, "time": schedule_time}
         return self._execute_query(query, params, commit=True)
 
+    def clear_weather_schedules(self, user_id: int) -> bool:
+        """
+        Remove ALL scheduled weather notifications for a user.
+        """
+        user_id_str = str(user_id)
+        query = "DELETE FROM weather_schedules WHERE user_id = :user_id"
+        params = {"user_id": user_id_str}
+        return self._execute_query(query, params, commit=True)
+
     def get_user_weather_schedules(self, user_id: int) -> List[Dict[str, Any]]:
         user_id_str = str(user_id)
         query = "SELECT schedule_time, location FROM weather_schedules WHERE user_id = :user_id"

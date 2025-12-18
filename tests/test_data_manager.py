@@ -332,6 +332,44 @@ def test_habit_snooze_excludes_from_due_list(db_manager):
     assert any(r.get("id") == habit_id for r in due2)
 
 
+def test_habit_snooze_before_due_skips_next_occurrence(db_manager):
+    """
+    If a habit's next_due_at is in the future (i.e., it is not due yet),
+    snoozing should skip the upcoming occurrence by advancing next_due_at.
+    """
+    guild_id = 0
+    user_id = 4242
+    # Daily habit due 18:00 UTC
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Skip next",
+        [0, 1, 2, 3, 4, 5, 6],
+        "18:00",
+        "UTC",
+        True,
+        "2100-01-01 18:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    # Snooze in the morning before it's due
+    res = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2100-01-01 10:00:00", "week", 1)
+    assert res.get("ok") is True
+
+    # next_due_at should move to the next day at 18:00 UTC
+    h = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h is not None
+    assert (h.get("next_due_at") or "").startswith("2100-01-02 18:00:00")
+
+    # It should NOT be due the same day at 19:00 UTC anymore
+    due_same_day = db_manager.list_due_habit_reminders("2100-01-01 19:00:00", 50)
+    assert not any(r.get("id") == habit_id for r in due_same_day)
+
+    # It becomes due at the new next_due_at
+    due_next = db_manager.list_due_habit_reminders("2100-01-02 18:00:00", 50)
+    assert any(r.get("id") == habit_id for r in due_next)
+
+
 def test_habit_snooze_migration_from_old_schema(tmp_path, monkeypatch):
     """
     Create an older `habits` table without snooze columns, then ensure DataManagerCore migrates it.
@@ -405,7 +443,8 @@ def test_habit_edit_updates_name_and_clears_snooze(db_manager):
     assert isinstance(habit_id, int)
 
     # Snooze it to set snoozed_until, then "edit" schedule and clear snooze
-    res = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2099-12-31 12:00:00", "week", 1)
+    # Use a "now" timestamp AFTER next_due_at so this is an actual snooze (not a "skip next occurrence").
+    res = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2100-01-02 12:00:00", "week", 1)
     assert res.get("ok") is True
 
     h1 = db_manager.get_habit(guild_id, user_id, habit_id)

@@ -70,6 +70,83 @@ class ProductivityMixin:
         except Exception:
             return None
 
+    def _parse_hhmm_time(self, s: Optional[str]) -> Optional[datetime.time]:
+        """
+        Parses "HH:MM" into a naive datetime.time.
+        """
+        if not isinstance(s, str) or not s.strip():
+            return None
+        raw = s.strip()
+        try:
+            hh_s, mm_s = raw.split(":", 1)
+            hh = int(hh_s)
+            mm = int(mm_s)
+        except Exception:
+            return None
+        if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+            return None
+        return datetime.time(hour=hh, minute=mm)
+
+    def _parse_days_of_week_any(self, days_json: Optional[str]) -> List[int]:
+        """
+        Robust parse for `habits.days_of_week` which is JSON list of ints (0=Mon..6=Sun).
+        """
+        try:
+            days = json.loads(days_json or "[]")
+            if not isinstance(days, list):
+                return [0, 1, 2, 3, 4]
+            out: List[int] = []
+            for d in days:
+                try:
+                    di = int(d)
+                except Exception:
+                    continue
+                if 0 <= di <= 6:
+                    out.append(di)
+            out = sorted(set(out))
+            return out if out else [0, 1, 2, 3, 4]
+        except Exception:
+            return [0, 1, 2, 3, 4]
+
+    def _compute_next_due_at_utc(self, habit: Dict[str, Any], ref_utc: datetime.datetime) -> Optional[datetime.datetime]:
+        """
+        Compute the next scheduled due datetime (UTC) strictly after `ref_utc`,
+        using the habit's stored schedule (days_of_week, due_time_local, tz_name).
+        """
+        if not isinstance(habit, dict):
+            return None
+        if not isinstance(ref_utc, datetime.datetime):
+            return None
+        if ref_utc.tzinfo is None:
+            ref_utc = ref_utc.replace(tzinfo=datetime.timezone.utc)
+        ref_utc = ref_utc.astimezone(datetime.timezone.utc)
+
+        tz = self._tzinfo_from_name(habit.get("tz_name"))
+        days = self._parse_days_of_week_any(habit.get("days_of_week"))
+        days_set = set(days)
+
+        due_str = str(habit.get("due_time_local") or habit.get("due_time_utc") or "18:00")
+        due_t = self._parse_hhmm_time(due_str) or datetime.time(18, 0)
+
+        ref_local = ref_utc.astimezone(tz)
+        today_due_local = datetime.datetime.combine(ref_local.date(), due_t).replace(tzinfo=tz)
+
+        # If today is scheduled and due time is still ahead of ref, pick today.
+        if ref_local.weekday() in days_set and ref_local < today_due_local:
+            return today_due_local.astimezone(datetime.timezone.utc)
+
+        # Otherwise, find the next scheduled day in the next 7 days.
+        for add_days in range(1, 8):
+            target_date = (ref_local + datetime.timedelta(days=add_days)).date()
+            if target_date.weekday() in days_set:
+                target_local = datetime.datetime.combine(target_date, due_t).replace(tzinfo=tz)
+                return target_local.astimezone(datetime.timezone.utc)
+
+        # Fallback (shouldn't happen if days_set non-empty).
+        target_date = (ref_local + datetime.timedelta(days=1)).date()
+        target_local = datetime.datetime.combine(target_date, due_t).replace(tzinfo=tz)
+        return target_local.astimezone(datetime.timezone.utc)
+
     def _tzinfo_from_name(self, tz_name: Optional[str]) -> datetime.tzinfo:
         name = (tz_name or "").strip()
         if not name or name.upper() in ("UTC", "ETC/UTC", "Z"):
@@ -1857,16 +1934,69 @@ class ProductivityMixin:
         if not habit:
             return {"ok": False, "error": "not_found", "effective_period": period_n}
 
+        # If the habit isn't due yet (next_due_at is in the future), snooze the *next occurrence*
+        # by advancing next_due_at to the subsequent scheduled occurrence.
+        next_due_dt = self._parse_sqlite_utc_timestamp(habit.get("next_due_at"))
+        if next_due_dt and next_due_dt > now_dt:
+            new_next_due_dt = self._compute_next_due_at_utc(habit, next_due_dt + datetime.timedelta(seconds=1))
+            if new_next_due_dt:
+                new_next_due_s = new_next_due_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+                last_ts = self._parse_sqlite_utc_timestamp(habit.get("last_snooze_at"))
+                if last_ts:
+                    if period_n == "week":
+                        next_allowed = last_ts + datetime.timedelta(days=7)
+                        if now_dt < next_allowed:
+                            return {
+                                "ok": False,
+                                "error": "cooldown",
+                                "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
+                                "effective_period": period_n,
+                            }
+                    else:
+                        if last_ts.year == now_dt.year and last_ts.month == now_dt.month:
+                            if now_dt.month == 12:
+                                next_allowed = datetime.datetime(now_dt.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
+                            else:
+                                next_allowed = datetime.datetime(now_dt.year, now_dt.month + 1, 1, tzinfo=datetime.timezone.utc)
+                            return {
+                                "ok": False,
+                                "error": "cooldown",
+                                "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
+                                "effective_period": period_n,
+                            }
+
+                ok = bool(
+                    self._execute_query(
+                        """
+                        UPDATE habits
+                        SET next_due_at = :next_due_at,
+                            snoozed_until = NULL,
+                            last_snooze_at = :now,
+                            last_snooze_period = :period,
+                            remind_level = 0,
+                            next_remind_at = NULL
+                        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
+                        """,
+                        {
+                            "next_due_at": new_next_due_s,
+                            "now": now_s,
+                            "period": period_n,
+                            "guild_id": str(int(guild_id)),
+                            "user_id": str(int(user_id)),
+                            "id": int(habit_id),
+                        },
+                        commit=True,
+                    )
+                )
+                # Return the next due timestamp as the effective "resume after" time.
+                return {"ok": ok, "snoozed_until": new_next_due_s, "effective_period": period_n}
+
         tz = self._tzinfo_from_name(habit.get("tz_name"))
         now_local = now_dt.astimezone(tz)
         target_date = now_local.date() + datetime.timedelta(days=days)
         snoozed_until_local = datetime.datetime.combine(target_date, datetime.time(0, 0), tzinfo=tz)
         snoozed_until_dt = snoozed_until_local.astimezone(datetime.timezone.utc)
-
-        # Don't snooze beyond the next upcoming due time (if not due yet).
-        next_due_dt = self._parse_sqlite_utc_timestamp(habit.get("next_due_at"))
-        if next_due_dt and next_due_dt > now_dt and next_due_dt < snoozed_until_dt:
-            snoozed_until_dt = next_due_dt
 
         snoozed_until = snoozed_until_dt.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1935,16 +2065,67 @@ class ProductivityMixin:
         if not habit:
             return {"ok": False, "error": "not_found", "effective_period": period_n}
 
+        # If the habit isn't due yet (next_due_at is in the future), snooze the *next occurrence*
+        # by advancing next_due_at to the subsequent scheduled occurrence.
+        next_due_dt = self._parse_sqlite_utc_timestamp(habit.get("next_due_at"))
+        if next_due_dt and next_due_dt > now_dt:
+            new_next_due_dt = self._compute_next_due_at_utc(habit, next_due_dt + datetime.timedelta(seconds=1))
+            if new_next_due_dt:
+                new_next_due_s = new_next_due_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+                last_ts = self._parse_sqlite_utc_timestamp(habit.get("last_snooze_at"))
+                if last_ts:
+                    if period_n == "week":
+                        next_allowed = last_ts + datetime.timedelta(days=7)
+                        if now_dt < next_allowed:
+                            return {
+                                "ok": False,
+                                "error": "cooldown",
+                                "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
+                                "effective_period": period_n,
+                            }
+                    else:
+                        if last_ts.year == now_dt.year and last_ts.month == now_dt.month:
+                            if now_dt.month == 12:
+                                next_allowed = datetime.datetime(now_dt.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
+                            else:
+                                next_allowed = datetime.datetime(now_dt.year, now_dt.month + 1, 1, tzinfo=datetime.timezone.utc)
+                            return {
+                                "ok": False,
+                                "error": "cooldown",
+                                "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
+                                "effective_period": period_n,
+                            }
+
+                ok = bool(
+                    self._execute_query(
+                        """
+                        UPDATE habits
+                        SET next_due_at = :next_due_at,
+                            snoozed_until = NULL,
+                            last_snooze_at = :now,
+                            last_snooze_period = :period,
+                            remind_level = 0,
+                            next_remind_at = NULL
+                        WHERE user_id = :user_id AND id = :id
+                        """,
+                        {
+                            "next_due_at": new_next_due_s,
+                            "now": now_s,
+                            "period": period_n,
+                            "user_id": str(int(user_id)),
+                            "id": int(habit_id),
+                        },
+                        commit=True,
+                    )
+                )
+                return {"ok": ok, "snoozed_until": new_next_due_s, "effective_period": period_n}
+
         tz = self._tzinfo_from_name(habit.get("tz_name"))
         now_local = now_dt.astimezone(tz)
         target_date = now_local.date() + datetime.timedelta(days=days)
         snoozed_until_local = datetime.datetime.combine(target_date, datetime.time(0, 0), tzinfo=tz)
         snoozed_until_dt = snoozed_until_local.astimezone(datetime.timezone.utc)
-
-        # Don't snooze beyond the next upcoming due time (if not due yet).
-        next_due_dt = self._parse_sqlite_utc_timestamp(habit.get("next_due_at"))
-        if next_due_dt and next_due_dt > now_dt and next_due_dt < snoozed_until_dt:
-            snoozed_until_dt = next_due_dt
 
         snoozed_until = snoozed_until_dt.strftime("%Y-%m-%d %H:%M:%S")
 

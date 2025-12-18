@@ -14,17 +14,21 @@ import config
 logger = logging.getLogger(__name__)
 
 try:
-    import google.generativeai as genai  # Google Gemini SDK
+    # New Gemini API Python SDK (Gen AI SDK)
+    # https://github.com/googleapis/python-genai
+    from google import genai  # type: ignore
+    from google.genai import types  # type: ignore
 except ImportError:
     genai = None
+    types = None
     logger.warning(
-        "google-generativeai package not installed. Gemini commands will be disabled.")
+        "google-genai package not installed. Gemini commands will be disabled.")
 
 # ---------------------------------
 # Helper Types
 # ---------------------------------
 SessionKey = Tuple[int, int, int]  # (guild_id, channel_id, user_id)
-SessionEntry = Dict[str, Any]  # {"session": ChatSession, "model": str, "last": float}
+SessionEntry = Dict[str, Any]  # {"model": str, "last": float, "history": list[Content]}
 
 # ---------------------------------
 # Cog
@@ -41,22 +45,23 @@ class GeminiAI(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._configured: bool = bool(config.GEMINI_API_KEY) and genai is not None
+        self._configured: bool = bool(config.GEMINI_API_KEY) and genai is not None and types is not None
 
-        # Setup models
+        # Setup client + models
         if self._configured:
-            genai.configure(api_key=config.GEMINI_API_KEY)
-            self.primary_model_name = "gemini-3-pro-preview"
+            # Gemini Developer API key
+            self.client = genai.Client(api_key=config.GEMINI_API_KEY)
+            # Default per request: Gemini 3 Flash
+            self.primary_model_name = "gemini-3-flash"
             self.fallback_model_name = "gemini-2.5-flash"
-            self.model_primary = genai.GenerativeModel(self.primary_model_name)
-            self._model_fallback: Optional[genai.GenerativeModel] = None  # lazily created
         else:
-            self.model_primary = None
-            self._model_fallback = None
+            self.client = None
+            self.primary_model_name = "gemini-3-flash"
+            self.fallback_model_name = "gemini-2.5-flash"
 
         self.logger = logging.getLogger(__name__)
 
-        # One ChatSession per user per channel
+        # One conversation history per user per channel
         self.sessions: Dict[SessionKey, SessionEntry] = {}
 
     # ------------------------------------------------------------------
@@ -78,37 +83,13 @@ class GeminiAI(commands.Cog):
 
         # Reset or create
         if reset or key not in self.sessions:
-            # Try primary first
-            try:
-                chat_obj = self.model_primary.start_chat(history=[])
-                self.sessions[key] = {
-                    "session": chat_obj,
-                    "model": self.primary_model_name,
-                    "last": time.time(),
-                }
-            except Exception as primary_error:
-                self.logger.warning(
-                    f"Primary Gemini model '{self.primary_model_name}' failed to start chat: {primary_error}. Trying fallback '{self.fallback_model_name}'."
-                )
-
-                if self._model_fallback is None:
-                    try:
-                        self._model_fallback = genai.GenerativeModel(
-                            self.fallback_model_name)
-                    except Exception as inst_err:
-                        raise RuntimeError(
-                            f"Failed to instantiate fallback model '{self.fallback_model_name}': {inst_err}")
-
-                try:
-                    chat_obj = self._model_fallback.start_chat(history=[])
-                    self.sessions[key] = {
-                        "session": chat_obj,
-                        "model": self.fallback_model_name,
-                        "last": time.time(),
-                    }
-                except Exception as fallback_error:
-                    raise RuntimeError(
-                        f"Both Gemini models failed to create chat sessions: {fallback_error}")
+            # Store just the history; we (re)create Chat objects on demand.
+            # This makes pruning deterministic and avoids long-lived SDK objects.
+            self.sessions[key] = {
+                "model": self.primary_model_name,
+                "last": time.time(),
+                "history": [],
+            }
 
         return self.sessions[key]
 
@@ -116,12 +97,21 @@ class GeminiAI(commands.Cog):
         self.sessions.pop(self._make_key(ctx), None)
 
     # Basic history trimming – keep last 20 exchanges (40 messages) 
-    def _prune_history(self, chat_session, max_exchanges: int = 20):
+    def _prune_history(self, entry: SessionEntry, max_exchanges: int = 20):
         try:
-            history = chat_session.history  # list[dict]
-            # Each exchange is 2 messages (user + assistant)
+            history = entry.get("history") or []
+            if not isinstance(history, list):
+                return
+            # Each exchange is 2 Content entries (user + model).
             while len(history) > max_exchanges * 2:
-                history.pop(0)
+                # Drop the oldest exchange (2 entries) to keep role alignment.
+                if len(history) >= 2:
+                    history.pop(0)
+                    history.pop(0)
+                else:
+                    history.clear()
+                    break
+            entry["history"] = history
         except Exception as e:
             # Be resilient – pruning is best-effort
             self.logger.debug(f"Pruning history failed: {e}")
@@ -131,12 +121,12 @@ class GeminiAI(commands.Cog):
     # ------------------------------------------------------------------
 
     async def _upload_attachments(self, attachments: list[discord.Attachment]) -> list[dict[str, str]]:
-        """Download and upload Discord attachments to Gemini Files API, returning file_ids."""
+        """Download and upload Discord attachments to Gemini Files API, returning file uris + mime types."""
         if not attachments:
             return []
 
-        if genai is None:
-            raise RuntimeError("google-generativeai library required for file uploads")
+        if self.client is None or types is None:
+            raise RuntimeError("google-genai library required for file uploads")
 
         file_parts: list[dict[str, str]] = []
 
@@ -168,11 +158,12 @@ class GeminiAI(commands.Cog):
                     tmp.flush()
                     tmp_path = tmp.name
 
-                # Upload – genai.upload_file returns File object with .name containing file_id
-                file_obj = genai.upload_file(path=tmp_path, mime_type=mime, display_name=attachment.filename)
+                # Upload via Files API
+                # Docs: https://ai.google.dev/gemini-api/docs/files
+                file_obj = self.client.files.upload(file=tmp_path, mime_type=mime)
                 file_part = {
-                    "file_uri": getattr(file_obj, "uri", file_obj.name),
-                    "mime_type": mime,
+                    "file_uri": str(getattr(file_obj, "uri", "") or getattr(file_obj, "name", "")),
+                    "mime_type": str(getattr(file_obj, "mime_type", "") or mime),
                 }
                 file_parts.append(file_part)
                 self.logger.debug("Uploaded attachment %s as uri %s", attachment.filename, file_part["file_uri"])
@@ -211,18 +202,9 @@ class GeminiAI(commands.Cog):
             new_fallback,
         )
 
-        # Update primary model
-        try:
-            self.model_primary = genai.GenerativeModel(new_primary)
-        except Exception as err:
-            # Keep old model on failure and raise upstream so the command can notify the user.
-            self.logger.exception("Failed to instantiate new primary model '%s': %s", new_primary, err)
-            raise
-
         # Update names and reset fallback for lazy re-creation
         self.primary_model_name = new_primary
         self.fallback_model_name = new_fallback
-        self._model_fallback = None
 
     # Utility: split long text into Discord-compatible chunks (≤ 2000 chars each)
     def _split_content(self, content: str, limit: int = 2000) -> list[str]:
@@ -297,20 +279,20 @@ class GeminiAI(commands.Cog):
             await self._send_simple(ctx, "❌ Gemini AI is not configured by the bot owner.")
             return
         try:
-            self._switch_primary_model("gemini-3-pro-preview", "gemini-2.5-flash")
+            self._switch_primary_model("gemini-3-pro-preview", "gemini-3-flash")
             await self._send_simple(ctx, "✅ Default Gemini model set to **gemini-3-pro-preview**. New conversations will use this model.")
         except Exception as e:
             await self._send_simple(ctx, f"⚠️ Failed to switch model: {e}")
 
     @gemini.command(name="fast", description="Switch the default Gemini model to the faster 2.5-flash.")
     async def fast(self, ctx: commands.Context):
-        """Alias: !gemini fast – sets primary model to gemini-2.5-flash."""
+        """Alias: !gemini fast – sets primary model to gemini-3-flash."""
         if not self._configured:
             await self._send_simple(ctx, "❌ Gemini AI is not configured by the bot owner.")
             return
         try:
-            self._switch_primary_model("gemini-2.5-flash", "gemini-3-pro-preview")
-            await self._send_simple(ctx, "✅ Default Gemini model set to **gemini-2.5-flash**. New conversations will use this model.")
+            self._switch_primary_model("gemini-3-flash", "gemini-2.5-flash")
+            await self._send_simple(ctx, "✅ Default Gemini model set to **gemini-3-flash**. New conversations will use this model.")
         except Exception as e:
             await self._send_simple(ctx, f"⚠️ Failed to switch model: {e}")
 
@@ -320,13 +302,13 @@ class GeminiAI(commands.Cog):
 
     @gemini.command(name="superfast", description="Switch the default Gemini model to the ultra-fast flash-lite preview.")
     async def superfast(self, ctx: commands.Context):
-        """Alias: !gemini superfast – sets primary model to gemini-2.5-flash-lite-preview-06-17."""
+        """Alias: !gemini superfast – sets primary model to gemini-2.5-flash-lite."""
         if not self._configured:
             await self._send_simple(ctx, "❌ Gemini AI is not configured by the bot owner.")
             return
         try:
-            self._switch_primary_model("gemini-2.5-flash-lite-preview-06-17", "gemini-2.5-flash")
-            await self._send_simple(ctx, "✅ Default Gemini model set to **gemini-2.5-flash-lite-preview-06-17**. New conversations will use this model.")
+            self._switch_primary_model("gemini-2.5-flash-lite", "gemini-3-flash")
+            await self._send_simple(ctx, "✅ Default Gemini model set to **gemini-2.5-flash-lite**. New conversations will use this model.")
         except Exception as e:
             await self._send_simple(ctx, f"⚠️ Failed to switch model: {e}")
 
@@ -390,8 +372,11 @@ class GeminiAI(commands.Cog):
             await send(f"⚠️ {err}", ephemeral=is_slash)
             return
 
-        chat_session = entry["session"]
-        model_name = entry["model"]
+        model_name = str(entry.get("model") or self.primary_model_name)
+        history = entry.get("history") or []
+        if not isinstance(history, list):
+            history = []
+            entry["history"] = history
 
         # Prepare message payload – include Files API references if we have attachments
         file_parts: list[dict[str, str]] = []
@@ -401,20 +386,38 @@ class GeminiAI(commands.Cog):
             except Exception as attach_err:
                 self.logger.error("Attachment processing failed: %s", attach_err)
 
-        # Build parts list if we have uploaded files
-        if file_parts:
-            parts: list[dict[str, Any]] = [{"text": prompt}] if prompt else []
-            for fp in file_parts:
-                parts.append({"file_data": fp})
-            user_input = {"parts": parts}
-        else:
-            user_input = prompt
+        # Build Parts payload (typed) for this user turn.
+        user_parts: list[Any] = []
+        if prompt:
+            user_parts.append(types.Part(text=prompt))
+        for fp in file_parts:
+            uri = str(fp.get("file_uri") or "")
+            mt = str(fp.get("mime_type") or "application/octet-stream")
+            if uri:
+                try:
+                    user_parts.append(types.Part.from_uri(file_uri=uri, mime_type=mt))
+                except Exception:
+                    # Best-effort: skip invalid file parts
+                    continue
+
+        # Ensure we have at least a text part (Gemini requires some user content).
+        if not user_parts:
+            user_parts = [types.Part(text=prompt or "")]
 
         loop = asyncio.get_running_loop()
 
         try:
+            if self.client is None:
+                raise RuntimeError("Gemini client not initialized")
+
+            def _call_model(model_to_use: str):
+                # Create a chat object from current pruned history.
+                # Note: history must start with a user message (SDK requirement). We only store full exchanges.
+                chat_obj = self.client.chats.create(model=model_to_use, history=history)
+                return chat_obj.send_message(user_parts)
+
             # Run the blocking Gemini call in a thread pool but give it a generous timeout (up to 5 minutes)
-            send_future = loop.run_in_executor(None, chat_session.send_message, user_input)
+            send_future = loop.run_in_executor(None, _call_model, model_name)
             # If the request takes longer than 300 seconds we abort and inform the user
             try:
                 response = await asyncio.wait_for(send_future, timeout=300)
@@ -422,6 +425,22 @@ class GeminiAI(commands.Cog):
                 # Best-effort cancellation; thread may keep running but we still respond.
                 self.logger.warning("Gemini chat request timed out (>300s).")
                 raise RuntimeError("Gemini AI took too long to respond. Please try again later.")
+            except Exception as primary_error:
+                # Best-effort fallback model
+                if str(model_name) != str(self.fallback_model_name):
+                    self.logger.warning(
+                        "Gemini primary model '%s' failed (%s); retrying with fallback '%s'.",
+                        model_name,
+                        primary_error,
+                        self.fallback_model_name,
+                    )
+                    send_future2 = loop.run_in_executor(None, _call_model, self.fallback_model_name)
+                    response = await asyncio.wait_for(send_future2, timeout=300)
+                    # Track that this session is now using fallback for subsequent turns.
+                    entry["model"] = self.fallback_model_name
+                    model_name = self.fallback_model_name
+                else:
+                    raise
             answer: Optional[str] = getattr(response, "text", str(response))
 
             if not answer:
@@ -459,7 +478,17 @@ class GeminiAI(commands.Cog):
 
             # Update bookkeeping only if we didn't raise
             entry["last"] = time.time()
-            self._prune_history(chat_session)
+            # Append this exchange to stored history and prune.
+            try:
+                entry["history"] = entry.get("history") or []
+                if not isinstance(entry["history"], list):
+                    entry["history"] = []
+                entry["history"].append(types.Content(role="user", parts=user_parts))
+                entry["history"].append(types.Content(role="model", parts=[types.Part(text=answer)]))
+            except Exception:
+                # If history update fails, continue without breaking the chat UX.
+                pass
+            self._prune_history(entry)
 
         except Exception as error:
             self.logger.error(f"Gemini chat failed: {error}")

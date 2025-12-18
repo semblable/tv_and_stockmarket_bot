@@ -4,6 +4,6 @@ requests>=2.28.0
 Flask
 yfinance>=0.2.18
 urllib3>=1.26.0
-google-generativeai
+google-genai
 pydantic
 pydantic-settings
