@@ -12,6 +12,7 @@ from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
 from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series # Added
 from api_clients import yahoo_finance_client # Added Yahoo Finance support
+from api_clients import google_news_rss_client
 from utils.chart_utils import generate_stock_chart_url, get_stock_chart_image # Added
 from data_manager import DataManager # Import DataManager class
 import config
@@ -115,20 +116,18 @@ class Stocks(commands.Cog):
 
     async def _fetch_stock_news_any_provider(self, symbol: str, limit: int = 5) -> typing.Optional[typing.List[dict]]:
         """
-        Prefer Alpha Vantage news (has summaries + sentiment), fallback to Yahoo if AV is limited/unavailable.
+        Prefer Google News RSS (free/no key), fallback to Yahoo.
         """
         sym = str(symbol or "").strip().upper()
         limit = max(1, min(25, int(limit)))
         if not sym:
             return None
 
-        news = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_news, sym, limit)
-        if isinstance(news, list) and news:
-            return news
-        if isinstance(news, dict) and news.get("error") in {"api_limit", "config_error", "api_error"}:
-            yf_news = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_news, sym, limit)
-            return yf_news if isinstance(yf_news, list) and yf_news else None
+        rss_news = await self.bot.loop.run_in_executor(None, google_news_rss_client.get_stock_news, sym, limit)
+        if isinstance(rss_news, list) and rss_news:
+            return rss_news
 
+        # Yahoo fallback (sometimes has better direct ticker linkage)
         yf_news = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_news, sym, limit)
         return yf_news if isinstance(yf_news, list) and yf_news else None
 
@@ -455,7 +454,7 @@ class Stocks(commands.Cog):
                 color=discord.Color.dark_gold(),
                 timestamp=now,
             )
-            embed.set_footer(text="Gemini 3 Flash • Not financial advice • Data: Alpha Vantage/Yahoo Finance")
+            embed.set_footer(text="Gemini 3 Flash • Not financial advice • Data: Google News RSS (with Yahoo fallback)")
             await self._dm_user(uid, embed=embed)
 
     @check_portfolio_analysis_schedules.before_loop
@@ -1113,25 +1112,10 @@ class Stocks(commands.Cog):
         upper_symbol = symbol.upper()
         
         # Limit to 3-5 articles, client default is 5, so we'll use that.
-        news_data = await self.bot.loop.run_in_executor(None, alpha_vantage_client.get_stock_news, upper_symbol, 5)
+        news_data = await self._fetch_stock_news_any_provider(upper_symbol, limit=5)
 
         if news_data is None:
             await ctx.send(f"📰 No news found for {upper_symbol}, or an error occurred while fetching.", ephemeral=True)
-            return
-        
-        if isinstance(news_data, dict) and "error" in news_data:
-            error_type = news_data["error"]
-            error_message = news_data.get("message", "An unspecified error occurred.")
-            if error_type == "api_limit":
-                await ctx.send(f"Could not retrieve news for {upper_symbol}: {error_message}", ephemeral=True)
-            elif error_type == "config_error":
-                logger.error(f"Stock news configuration error for {upper_symbol}: {error_message}")
-                await ctx.send(f"Could not retrieve news for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.", ephemeral=True)
-            elif error_type == "api_error":
-                await ctx.send(f"Could not retrieve news for {upper_symbol}: {error_message}", ephemeral=True)
-            else:
-                logger.error(f"Stock news: Unknown error type '{error_type}' for {upper_symbol}: {error_message}")
-                await ctx.send(f"Error fetching news for {upper_symbol}. An unexpected error occurred with the data provider.", ephemeral=True)
             return
 
         if not isinstance(news_data, list) or not news_data:
@@ -1142,7 +1126,7 @@ class Stocks(commands.Cog):
             title=f"📰 Recent News for {upper_symbol}",
             color=discord.Color.blue()
         )
-        embed.set_footer(text="News provided by Alpha Vantage. Summaries may be truncated.")
+        embed.set_footer(text="News provided by Google News RSS (best-effort).")
 
         for i, article in enumerate(news_data):
             if i >= 5: # Should be handled by API client limit, but as a safeguard
