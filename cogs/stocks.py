@@ -118,7 +118,7 @@ class Stocks(commands.Cog):
         Prefer Alpha Vantage news (has summaries + sentiment), fallback to Yahoo if AV is limited/unavailable.
         """
         sym = str(symbol or "").strip().upper()
-        limit = max(1, min(10, int(limit)))
+        limit = max(1, min(25, int(limit)))
         if not sym:
             return None
 
@@ -200,10 +200,21 @@ class Stocks(commands.Cog):
     ) -> str:
         sym = str(symbol or "").upper()
         out: list[str] = [f"### {sym}"]
+        items2 = [it for it in (items or []) if isinstance(it, dict)][:max_articles]
 
-        for it in (items or [])[:max_articles]:
-            if not isinstance(it, dict):
-                continue
+        # Fetch article texts concurrently but bounded, since this uses executor threads.
+        sem = asyncio.Semaphore(5)
+
+        async def _fetch_one(u: str) -> str:
+            if not u:
+                return ""
+            async with sem:
+                return await self._fetch_article_text(u)
+
+        urls = [str(it.get("url") or "").strip() for it in items2]
+        fetched = await asyncio.gather(*[_fetch_one(u) for u in urls], return_exceptions=True)
+
+        for idx, it in enumerate(items2):
             title = str(it.get("title") or "Untitled").strip()
             src = str(it.get("source") or "").strip()
             ts = str(it.get("time_published") or "").strip()
@@ -217,8 +228,12 @@ class Stocks(commands.Cog):
                 out.append(f"  URL: {url}")
 
             article_text = ""
-            if url:
-                article_text = await self._fetch_article_text(url)
+            try:
+                v = fetched[idx]
+                if isinstance(v, str):
+                    article_text = v
+            except Exception:
+                article_text = ""
 
             if article_text:
                 article_text = clamp_text(article_text, max_chars=per_article_chars)
@@ -227,7 +242,7 @@ class Stocks(commands.Cog):
             else:
                 if summary:
                     out.append("  SUMMARY:")
-                    out.append("  " + clamp_text(summary, max_chars=min(600, per_article_chars)).replace("\n", " "))
+                    out.append("  " + clamp_text(summary, max_chars=min(2000, per_article_chars)).replace("\n", " "))
                 else:
                     out.append("  SUMMARY: (unavailable)")
 
@@ -1170,9 +1185,11 @@ class Stocks(commands.Cog):
     )
     @discord.app_commands.describe(
         symbol="Optional stock symbol. If omitted, analyzes your tracked stocks.",
-        limit="Max articles per stock (default 5, max 10).",
+        limit="Max articles per stock (default 8, max 25).",
         public="Post analysis publicly in the channel (default: False).",
         detail="short|medium|long (controls depth + length; default: medium).",
+        max_symbols="For portfolio mode: how many tracked symbols to include (default 25, max 50).",
+        include_sources="Attach a sources file (URLs + extracted text). Default: True.",
     )
     async def stock_analyze(
         self,
@@ -1181,11 +1198,17 @@ class Stocks(commands.Cog):
         limit: int = 5,
         public: bool = False,
         detail: str = "medium",
+        max_symbols: int = 25,
+        include_sources: bool = True,
     ):
         is_dm = ctx.guild is None
         ephemeral = (not public) if not is_dm else False
         await ctx.defer(ephemeral=ephemeral)
-        limit = max(1, min(10, int(limit)))
+        # defaults/caps (user has plenty of model context; the real constraint is API/scraping/Discord)
+        if limit == 5:
+            limit = 8
+        limit = max(1, min(25, int(limit)))
+        max_symbols = max(1, min(50, int(max_symbols)))
 
         if self._gemini_client is None:
             await ctx.send("❌ Gemini is not configured by the bot owner (missing `GEMINI_API_KEY`).", ephemeral=ephemeral)
@@ -1196,8 +1219,9 @@ class Stocks(commands.Cog):
             detail_l = "medium"
 
         # Tune caps: longer detail => more Gemini output + more article text per item.
-        detail_to_tokens = {"short": 900, "medium": 1600, "long": 2800}
-        detail_to_article_chars = {"short": 2500, "medium": 4500, "long": 9000}
+        # More generous defaults since user isn't token-constrained.
+        detail_to_tokens = {"short": 1400, "medium": 3200, "long": 6000}
+        detail_to_article_chars = {"short": 5000, "medium": 12000, "long": 25000}
         max_tokens = int(detail_to_tokens[detail_l])
         per_article_chars = int(detail_to_article_chars[detail_l])
 
@@ -1216,12 +1240,12 @@ class Stocks(commands.Cog):
                 )
                 return
 
-        # Safety cap for cost + API load
-        max_symbols = 8
         trimmed = False
-        if len(symbols) > max_symbols:
-            symbols = symbols[:max_symbols]
-            trimmed = True
+        if not symbol:
+            # Portfolio mode: allow more symbols, but still cap to avoid huge latency/scrape failures.
+            if len(symbols) > max_symbols:
+                symbols = symbols[:max_symbols]
+                trimmed = True
 
         briefs: list[str] = []
         for sym in symbols:
@@ -1273,12 +1297,27 @@ class Stocks(commands.Cog):
         embed.add_field(name="Symbols", value=(", ".join(symbols)[:1024] or "n/a"), inline=False)
         footer = "Not financial advice."
         if trimmed:
-            footer += " Only the first 8 symbols were analyzed."
+            footer += f" Only the first {len(symbols)} symbols were analyzed."
         embed.set_footer(text=footer)
+
+        files: list[discord.File] = []
 
         # Always attach full report to avoid Discord embed limits.
         buf = io.BytesIO(text.encode("utf-8", errors="ignore"))
-        files = [discord.File(fp=buf, filename="stock_analysis.txt")]
+        files.append(discord.File(fp=buf, filename="stock_analysis.txt"))
+
+        # Optionally attach sources (what Gemini read). Clamp to ~3MB to avoid Discord attachment limits.
+        if include_sources:
+            src_txt = (
+                "SOURCES (best-effort extracted article text; may be truncated)\n"
+                f"Symbols: {', '.join(symbols)}\n\n"
+                + context
+            )
+            src_bytes = src_txt.encode("utf-8", errors="ignore")
+            max_src_bytes = 3_000_000
+            if len(src_bytes) > max_src_bytes:
+                src_bytes = src_bytes[: max_src_bytes - 10] + b"\n...(truncated)"
+            files.append(discord.File(fp=io.BytesIO(src_bytes), filename="stock_sources.txt"))
 
         await ctx.send(embed=embed, files=files, ephemeral=ephemeral)
 
