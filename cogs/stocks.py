@@ -233,10 +233,10 @@ class Stocks(commands.Cog):
 
         return "\n".join(out).strip()
 
-    async def _gemini_summarize(self, prompt: str) -> str:
+    async def _gemini_summarize(self, prompt: str, *, max_output_tokens: int = 900) -> str:
         if self._gemini_client is None or types is None:
             raise RuntimeError("Gemini is not configured (missing GEMINI_API_KEY or google-genai)")
-        cfg = types.GenerateContentConfig(temperature=0.2, max_output_tokens=900)
+        cfg = types.GenerateContentConfig(temperature=0.2, max_output_tokens=int(max_output_tokens))
         resp = await asyncio.get_running_loop().run_in_executor(
             None,
             lambda: self._gemini_client.models.generate_content(
@@ -1172,6 +1172,7 @@ class Stocks(commands.Cog):
         symbol="Optional stock symbol. If omitted, analyzes your tracked stocks.",
         limit="Max articles per stock (default 5, max 10).",
         public="Post analysis publicly in the channel (default: False).",
+        detail="short|medium|long (controls depth + length; default: medium).",
     )
     async def stock_analyze(
         self,
@@ -1179,6 +1180,7 @@ class Stocks(commands.Cog):
         symbol: typing.Optional[str] = None,
         limit: int = 5,
         public: bool = False,
+        detail: str = "medium",
     ):
         is_dm = ctx.guild is None
         ephemeral = (not public) if not is_dm else False
@@ -1188,6 +1190,16 @@ class Stocks(commands.Cog):
         if self._gemini_client is None:
             await ctx.send("❌ Gemini is not configured by the bot owner (missing `GEMINI_API_KEY`).", ephemeral=ephemeral)
             return
+
+        detail_l = str(detail or "medium").strip().lower()
+        if detail_l not in {"short", "medium", "long"}:
+            detail_l = "medium"
+
+        # Tune caps: longer detail => more Gemini output + more article text per item.
+        detail_to_tokens = {"short": 900, "medium": 1600, "long": 2800}
+        detail_to_article_chars = {"short": 2500, "medium": 4500, "long": 9000}
+        max_tokens = int(detail_to_tokens[detail_l])
+        per_article_chars = int(detail_to_article_chars[detail_l])
 
         user_id = ctx.author.id
         symbols: typing.List[str]
@@ -1217,7 +1229,7 @@ class Stocks(commands.Cog):
             if not news:
                 briefs.append(f"### {sym}\n- No news found.")
                 continue
-            briefs.append(await self._news_to_fulltext_context(sym, news, max_articles=limit, per_article_chars=3500))
+            briefs.append(await self._news_to_fulltext_context(sym, news, max_articles=limit, per_article_chars=per_article_chars))
 
         context = "\n\n".join(briefs)
         scope_line = "single stock" if symbol else "portfolio"
@@ -1239,7 +1251,7 @@ class Stocks(commands.Cog):
         )
 
         try:
-            text = await self._gemini_summarize(prompt)
+            text = await self._gemini_summarize(prompt, max_output_tokens=max_tokens)
         except Exception as e:
             await ctx.send(f"⚠️ Could not run Gemini analysis right now: {e}", ephemeral=ephemeral)
             return
@@ -1257,16 +1269,16 @@ class Stocks(commands.Cog):
         )
         embed.add_field(name="Model", value=title_model, inline=True)
         embed.add_field(name="Scope", value=("single" if symbol else "portfolio"), inline=True)
+        embed.add_field(name="Detail", value=detail_l, inline=True)
         embed.add_field(name="Symbols", value=(", ".join(symbols)[:1024] or "n/a"), inline=False)
         footer = "Not financial advice."
         if trimmed:
             footer += " Only the first 8 symbols were analyzed."
         embed.set_footer(text=footer)
 
-        files = []
-        if len(text) > 3900:
-            buf = io.BytesIO(text.encode("utf-8", errors="ignore"))
-            files.append(discord.File(fp=buf, filename="stock_analysis.txt"))
+        # Always attach full report to avoid Discord embed limits.
+        buf = io.BytesIO(text.encode("utf-8", errors="ignore"))
+        files = [discord.File(fp=buf, filename="stock_analysis.txt")]
 
         await ctx.send(embed=embed, files=files, ephemeral=ephemeral)
 
