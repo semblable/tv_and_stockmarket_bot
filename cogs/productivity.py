@@ -324,7 +324,8 @@ def _escalation_interval_minutes(level: int, profile: str = "catchup") -> int:
     }
     schedule = schedules.get(p) or schedules["catchup"]
     idx = max(0, min(len(schedule) - 1, int(level)))
-    return schedule[idx]
+    # Global anti-spam: never remind more frequently than every 30 minutes.
+    return max(30, int(schedule[idx]))
 
 
 class ProductivityCog(commands.Cog, name="Productivity"):
@@ -930,7 +931,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         if not self.db_manager:
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
-        initial_minutes = max(5, min(7 * 24 * 60, int(initial_minutes)))
+        # Global anti-spam: don't schedule reminders more frequently than every 30 minutes.
+        initial_minutes = max(30, min(7 * 24 * 60, int(initial_minutes)))
         next_remind = None
         if enabled:
             next_remind = _sqlite_utc_timestamp(_utc_now() + timedelta(minutes=initial_minutes))
@@ -2012,6 +2014,9 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         now = _utc_now()
         now_str = _sqlite_utc_timestamp(now)
 
+        MAX_NAG_SENDS = 5
+        MAX_NAG_LEVEL = MAX_NAG_SENDS - 1  # level starts at 0
+
         habit_messages = [
             "⏰ Habit reminder: **{name}** (id #{hid}) is due.\nCheck in with `/habit_checkin {hid}`",
             "📌 Quick nudge: **{name}** is still due (#{hid}).\nLog it with `/habit_checkin {hid}`",
@@ -2033,6 +2038,17 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             try:
                 uid = int(h.get("user_id"))
                 if await self._is_user_in_dnd(uid):
+                    # Avoid reprocessing every minute while in DND.
+                    next_rem = _sqlite_utc_timestamp(now + timedelta(minutes=30))
+                    await self.bot.loop.run_in_executor(
+                        None,
+                        self.db_manager.bump_habit_reminder,
+                        int(h.get("guild_id") or 0),
+                        uid,
+                        int(h.get("id") or 0),
+                        int(h.get("remind_level") or 0),
+                        next_rem,
+                    )
                     continue
 
                 hid = h.get("id")
@@ -2052,6 +2068,18 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                         int(hid),
                         0,
                         next_rem,
+                    )
+                    continue
+
+                # Anti-spam: after N nags, stop (user can re-enable).
+                if level >= MAX_NAG_LEVEL:
+                    await self.bot.loop.run_in_executor(
+                        None,
+                        self.db_manager.set_habit_reminder_enabled,
+                        int(h.get("guild_id") or 0),
+                        uid,
+                        int(hid),
+                        False,
                     )
                     continue
 
@@ -2094,11 +2122,35 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             try:
                 uid = int(t.get("user_id"))
                 if await self._is_user_in_dnd(uid):
+                    # Avoid reprocessing every minute while in DND.
+                    next_rem = _sqlite_utc_timestamp(now + timedelta(minutes=30))
+                    await self.bot.loop.run_in_executor(
+                        None,
+                        self.db_manager.bump_todo_reminder,
+                        int(t.get("guild_id") or 0),
+                        uid,
+                        int(t.get("id") or 0),
+                        int(t.get("remind_level") or 0),
+                        next_rem,
+                    )
                     continue
 
                 tid = t.get("id")
                 content = t.get("content") or "To-do"
                 level = int(t.get("remind_level") or 0)
+
+                # Anti-spam: after N nags, stop (user can re-enable).
+                if level >= MAX_NAG_LEVEL:
+                    await self.bot.loop.run_in_executor(
+                        None,
+                        self.db_manager.set_todo_reminder,
+                        int(t.get("guild_id") or 0),
+                        uid,
+                        int(tid),
+                        False,
+                        None,
+                    )
+                    continue
 
                 tpl = todo_messages[level % len(todo_messages)]
                 sent = await self._dm_user(

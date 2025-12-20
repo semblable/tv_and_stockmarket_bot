@@ -15,6 +15,10 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+MIN_REMINDER_SPACING = timedelta(minutes=30)
+MAX_REPEAT_SENDS = 5
+MAX_BATCH_PER_SEND = 5
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -158,6 +162,8 @@ class RemindersCog(commands.Cog, name="Reminders"):
     def __init__(self, bot: commands.Bot, db_manager):
         self.bot = bot
         self.db_manager = db_manager
+        # Best-effort in-memory throttle (persisted fallback is in user_preferences).
+        self._last_sent_by_user: dict[int, datetime] = {}
 
     async def cog_load(self):
         self.reminder_loop.start()
@@ -231,6 +237,43 @@ class RemindersCog(commands.Cog, name="Reminders"):
         except Exception:
             return False
 
+    async def _get_user_last_sent(self, user_id: int) -> Optional[datetime]:
+        # Prefer in-memory for speed; fall back to persisted preference.
+        dt = self._last_sent_by_user.get(int(user_id))
+        if isinstance(dt, datetime):
+            return dt
+        if not self.db_manager:
+            return None
+        try:
+            last_s = await self.bot.loop.run_in_executor(
+                None,
+                self.db_manager.get_user_preference,
+                int(user_id),
+                "generic_reminder_last_sent_at_utc",
+                None,
+            )
+            if isinstance(last_s, str):
+                return _parse_sqlite_utc_timestamp(last_s)
+        except Exception:
+            return None
+        return None
+
+    async def _set_user_last_sent(self, user_id: int, dt_utc: datetime) -> None:
+        dt_utc = dt_utc.astimezone(timezone.utc)
+        self._last_sent_by_user[int(user_id)] = dt_utc
+        if not self.db_manager:
+            return
+        try:
+            await self.bot.loop.run_in_executor(
+                None,
+                self.db_manager.set_user_preference,
+                int(user_id),
+                "generic_reminder_last_sent_at_utc",
+                _sqlite_utc_timestamp(dt_utc),
+            )
+        except Exception:
+            return
+
     @tasks.loop(seconds=30)
     async def reminder_loop(self):
         if not self.db_manager:
@@ -239,39 +282,158 @@ class RemindersCog(commands.Cog, name="Reminders"):
         now_s = _sqlite_utc_timestamp(now)
 
         due = await self.bot.loop.run_in_executor(None, self.db_manager.list_due_reminders, now_s, 50)
+        if not due:
+            return
+
+        # Group by user to apply 30min spacing globally.
+        by_user: dict[int, list[dict]] = {}
         for r in due or []:
             try:
-                rid = int(r.get("id"))
                 uid = int(r.get("user_id"))
-                gid = int(r.get("guild_id") or 0)
-                cid = int(r.get("channel_id") or 0)
-                msg = str(r.get("message") or "").strip()
-                rep = r.get("repeat_interval_seconds")
-                rep_s = int(rep) if rep is not None else 0
+            except Exception:
+                continue
+            by_user.setdefault(uid, []).append(r)
 
-                # Respect DND (best-effort): skip this cycle and retry next loop.
+        for uid, rows in by_user.items():
+            try:
+                # DND: don't spin every 30s; snooze a bit and retry later.
                 if await self._is_user_in_dnd(uid):
+                    snooze_to = _sqlite_utc_timestamp(now + MIN_REMINDER_SPACING)
+                    for r in rows[:50]:
+                        try:
+                            rid = int(r.get("id"))
+                            await self.bot.loop.run_in_executor(
+                                None, partial(self.db_manager.snooze_reminder, rid, next_trigger_at_utc=snooze_to)
+                            )
+                        except Exception:
+                            continue
                     continue
 
-                sent = await self._send_reminder(user_id=uid, guild_id=gid, channel_id=cid, message=msg)
+                last_sent = await self._get_user_last_sent(uid)
+                if last_sent is not None and (now - last_sent) < MIN_REMINDER_SPACING:
+                    # Too soon: postpone all due reminders for this user a bit.
+                    snooze_to = _sqlite_utc_timestamp(last_sent + MIN_REMINDER_SPACING)
+                    for r in rows[:50]:
+                        try:
+                            rid = int(r.get("id"))
+                            await self.bot.loop.run_in_executor(
+                                None, partial(self.db_manager.snooze_reminder, rid, next_trigger_at_utc=snooze_to)
+                            )
+                        except Exception:
+                            continue
+                    continue
+
+                # Sort due reminders (oldest first), then choose a "destination" (channel/DM) to send as a batch.
+                def _key(rr):
+                    return str(rr.get("trigger_at") or ""), int(rr.get("id") or 0)
+
+                rows_sorted = sorted(rows, key=_key)
+                first = rows_sorted[0]
+                try:
+                    dest_cid = int(first.get("channel_id") or 0)
+                except Exception:
+                    dest_cid = 0
+                try:
+                    dest_gid = int(first.get("guild_id") or 0)
+                except Exception:
+                    dest_gid = 0
+
+                # Prepare batch: same destination only, cap size, and enforce per-reminder repeat max.
+                batch: list[dict] = []
+                postpone: list[dict] = []
+                for r in rows_sorted:
+                    try:
+                        cid = int(r.get("channel_id") or 0)
+                    except Exception:
+                        cid = 0
+                    if cid != dest_cid:
+                        postpone.append(r)
+                        continue
+
+                    # Stop repeating reminders after N sends.
+                    rep = r.get("repeat_interval_seconds")
+                    rep_s = int(rep) if rep is not None else 0
+                    rc = 0
+                    try:
+                        rc = int(r.get("repeat_count") or 0)
+                    except Exception:
+                        rc = 0
+                    if rep_s > 0 and rc >= MAX_REPEAT_SENDS:
+                        try:
+                            rid = int(r.get("id"))
+                            await self.bot.loop.run_in_executor(None, self.db_manager.complete_oneoff_reminder, rid)
+                        except Exception:
+                            pass
+                        continue
+
+                    if len(batch) < MAX_BATCH_PER_SEND:
+                        batch.append(r)
+                    else:
+                        postpone.append(r)
+
+                # Postpone anything we didn't include in the batch, to respect global 30min spacing.
+                if postpone:
+                    snooze_to = _sqlite_utc_timestamp(now + MIN_REMINDER_SPACING)
+                    for r in postpone[:50]:
+                        try:
+                            rid = int(r.get("id"))
+                            await self.bot.loop.run_in_executor(
+                                None, partial(self.db_manager.snooze_reminder, rid, next_trigger_at_utc=snooze_to)
+                            )
+                        except Exception:
+                            continue
+
+                if not batch:
+                    continue
+
+                # Compose message.
+                if len(batch) == 1:
+                    msg = str(batch[0].get("message") or "").strip()
+                    sent = await self._send_reminder(user_id=uid, guild_id=dest_gid, channel_id=dest_cid, message=msg)
+                else:
+                    lines = []
+                    for r in batch:
+                        m = str(r.get("message") or "").strip()
+                        if m:
+                            lines.append(f"- {m}")
+                    combined = "Multiple reminders due:\n" + ("\n".join(lines)[:1500] if lines else "(no messages)")
+                    sent = await self._send_reminder(user_id=uid, guild_id=dest_gid, channel_id=dest_cid, message=combined)
+
                 if not sent:
                     # If delivery fails, back off for 12h to avoid spinning.
                     backoff_s = _sqlite_utc_timestamp(now + timedelta(hours=12))
-                    await self.bot.loop.run_in_executor(
-                        None, partial(self.db_manager.bump_reminder_after_send, rid, next_trigger_at_utc=backoff_s)
-                    )
+                    for r in batch:
+                        try:
+                            rid = int(r.get("id"))
+                            await self.bot.loop.run_in_executor(
+                                None, partial(self.db_manager.snooze_reminder, rid, next_trigger_at_utc=backoff_s)
+                            )
+                        except Exception:
+                            continue
                     continue
 
-                if rep_s and rep_s > 0:
-                    nxt = now + timedelta(seconds=rep_s)
-                    nxt_s = _sqlite_utc_timestamp(nxt)
-                    await self.bot.loop.run_in_executor(
-                        None, partial(self.db_manager.bump_reminder_after_send, rid, next_trigger_at_utc=nxt_s)
-                    )
-                else:
-                    await self.bot.loop.run_in_executor(None, self.db_manager.complete_oneoff_reminder, rid)
+                await self._set_user_last_sent(uid, now)
+
+                # Update each reminder in the batch after successful send.
+                for r in batch:
+                    try:
+                        rid = int(r.get("id"))
+                        rep = r.get("repeat_interval_seconds")
+                        rep_s = int(rep) if rep is not None else 0
+                        rep_s_eff = max(rep_s, 30 * 60) if rep_s and rep_s > 0 else 0
+                        if rep_s_eff and rep_s_eff > 0:
+                            nxt = now + timedelta(seconds=rep_s_eff)
+                            nxt_s = _sqlite_utc_timestamp(nxt)
+                            await self.bot.loop.run_in_executor(
+                                None, partial(self.db_manager.bump_reminder_after_send, rid, next_trigger_at_utc=nxt_s)
+                            )
+                        else:
+                            await self.bot.loop.run_in_executor(None, self.db_manager.complete_oneoff_reminder, rid)
+                    except Exception:
+                        continue
+
             except Exception as e:
-                logger.warning(f"reminder_loop error: {e}")
+                logger.warning(f"reminder_loop error for user {uid}: {e}")
 
     @reminder_loop.before_loop
     async def before_reminder_loop(self):
@@ -316,10 +478,12 @@ class RemindersCog(commands.Cog, name="Reminders"):
         if not self.db_manager:
             await ctx.send("Database is not available right now. Please try again later.")
             return
-        seconds = _parse_duration_seconds(interval)
-        if seconds is None:
+        raw_seconds = _parse_duration_seconds(interval)
+        if raw_seconds is None:
             await ctx.send("❌ Invalid interval. Examples: `30m`, `2h`, `1d`, `1h30m`.")
             return
+        # Anti-spam: repeating reminders cannot be more frequent than every 30 minutes.
+        seconds = max(int(raw_seconds), 30 * 60)
 
         now = _utc_now()
         trigger = now + timedelta(seconds=seconds)
@@ -343,7 +507,10 @@ class RemindersCog(commands.Cog, name="Reminders"):
         if not rid:
             await ctx.send("❌ Could not create that repeating reminder.")
             return
-        await ctx.send(f"✅ Repeating reminder **#{rid}** set every `{interval}` (next at `{local_str}` {tz_label}).")
+        if int(raw_seconds) < 30 * 60:
+            await ctx.send(f"✅ Repeating reminder **#{rid}** set every **30m** (minimum). Next at `{local_str}` {tz_label}.")
+        else:
+            await ctx.send(f"✅ Repeating reminder **#{rid}** set every `{interval}` (next at `{local_str}` {tz_label}).")
 
     @commands.hybrid_command(name="remind_at", description="Set a reminder at a specific time (uses your saved timezone).")
     async def remind_at(self, ctx: commands.Context, when: str, *, message: str):

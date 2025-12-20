@@ -25,6 +25,9 @@ class RemindersMixin:
             return None
         if not isinstance(trigger_at_utc, str) or len(trigger_at_utc.strip()) < 19:
             return None
+        # Safety: repeating reminders can get spammy. Enforce a minimum interval.
+        MIN_REPEAT_INTERVAL_SECONDS = 30 * 60
+
         rep = None
         if repeat_interval_seconds is not None:
             try:
@@ -33,6 +36,8 @@ class RemindersMixin:
                 rep = None
             if rep is not None and rep <= 0:
                 rep = None
+            if rep is not None and rep < MIN_REPEAT_INTERVAL_SECONDS:
+                rep = MIN_REPEAT_INTERVAL_SECONDS
 
         q = """
         INSERT INTO reminders (guild_id, channel_id, user_id, message, trigger_at, repeat_interval_seconds, repeat_count, is_active)
@@ -104,9 +109,26 @@ class RemindersMixin:
         """
         return bool(self._execute_query(q, {"id": int(reminder_id), "trigger_at": next_trigger_at_utc.strip()}, commit=True))
 
+    def snooze_reminder(self, reminder_id: int, *, next_trigger_at_utc: str) -> bool:
+        """
+        Move a reminder's trigger time forward WITHOUT counting it as a repeat send.
+
+        This is used for throttling (e.g., user-level 30min cooldown) and best-effort DND backoff,
+        so we don't spin and/or spam when multiple reminders are due at once.
+        """
+        if not isinstance(next_trigger_at_utc, str) or len(next_trigger_at_utc.strip()) < 19:
+            return False
+        q = """
+        UPDATE reminders
+        SET trigger_at = :trigger_at
+        WHERE id = :id AND is_active = 1
+        """
+        return bool(self._execute_query(q, {"id": int(reminder_id), "trigger_at": next_trigger_at_utc.strip()}, commit=True))
+
     def complete_oneoff_reminder(self, reminder_id: int) -> bool:
         q = "UPDATE reminders SET is_active = 0 WHERE id = :id"
         return bool(self._execute_query(q, {"id": int(reminder_id)}, commit=True))
+
 
 
 

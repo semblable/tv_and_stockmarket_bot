@@ -226,3 +226,4 @@ def get_stock_news(
         _cache[cache_key] = (now, list(out))
 
     return out
+
