@@ -215,6 +215,57 @@ def test_habit_reminder_profile_normal_maps_to_nag_normal(db_manager):
     assert (h.get("remind_profile") or "").lower() == "nag_normal"
 
 
+def test_refresh_stale_habit_due_dates_advances_only_when_schedule_moved_on(db_manager):
+    """
+    `next_due_at` is allowed to be slightly in the past (overdue) for nagging,
+    but should be advanced once the schedule has already moved on to the next occurrence.
+    """
+    guild_id = 0
+    user_id = 6001
+    # Daily habit due 18:00 UTC with an old due pointer.
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Stale due",
+        [0, 1, 2, 3, 4, 5, 6],
+        "18:00",
+        "UTC",
+        True,
+        "2025-12-21 18:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    # Make it look like it has been nagging already.
+    db_manager._execute_query(
+        """
+        UPDATE habits
+        SET remind_level = 3,
+            next_remind_at = '2025-12-22 00:00:00'
+        WHERE guild_id = :gid AND user_id = :uid AND id = :id
+        """,
+        {"gid": str(guild_id), "uid": str(user_id), "id": int(habit_id)},
+        commit=True,
+    )
+
+    # Not stale yet: before the next scheduled occurrence after 2025-12-21 18:00 (which is 2025-12-22 18:00).
+    n0 = db_manager.refresh_stale_habit_due_dates_any_scope(user_id, now_utc="2025-12-22 10:00:00", limit=200)
+    assert int(n0) == 0
+    h0 = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h0 is not None
+    assert (h0.get("next_due_at") or "")[:19] == "2025-12-21 18:00:00"
+    assert int(h0.get("remind_level") or 0) == 3  # unchanged
+    assert (h0.get("next_remind_at") or "")[:19] == "2025-12-22 00:00:00"
+
+    # Stale: now is past the next occurrence after the stored due date, so advance to next due after now.
+    n1 = db_manager.refresh_stale_habit_due_dates_any_scope(user_id, now_utc="2025-12-24 12:00:00", limit=200)
+    assert int(n1) == 1
+    h1 = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h1 is not None
+    assert (h1.get("next_due_at") or "")[:19] == "2025-12-24 18:00:00"
+    assert int(h1.get("remind_level") or 0) == 0
+    assert h1.get("next_remind_at") is None
+
+
 def test_record_habit_checkin_at_timestamp(db_manager):
     guild_id = 0
     user_id = 555

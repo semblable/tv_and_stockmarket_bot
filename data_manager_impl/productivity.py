@@ -147,6 +147,176 @@ class ProductivityMixin:
         target_local = datetime.datetime.combine(target_date, due_t).replace(tzinfo=tz)
         return target_local.astimezone(datetime.timezone.utc)
 
+    def _refresh_habit_due_if_stale(
+        self,
+        habit: Dict[str, Any],
+        *,
+        now_dt_utc: datetime.datetime,
+        fallback_user_id: Optional[int] = None,
+        fallback_guild_id: Optional[int] = None,
+    ) -> Optional[str]:
+        """
+        If a habit's stored `next_due_at` is "stale" (i.e. we are already past the *next scheduled occurrence*
+        after it), advance `next_due_at` to the next scheduled occurrence after `now_dt_utc`.
+
+        Why:
+          - `next_due_at` represents the *current* due occurrence for nagging reminders (can be slightly overdue).
+          - But if the user hasn't checked in for multiple occurrences, keeping `next_due_at` stuck far in the past
+            causes confusing `/habit_list` output and can lead to outdated nags.
+
+        "Stale" definition:
+          - Let D = stored next_due_at.
+          - Let D2 = next scheduled occurrence strictly after D.
+          - If now >= D2, then D is stale (the schedule has moved on).
+
+        Returns:
+          - new next_due_at UTC timestamp string if updated
+          - None if no change or on error
+        """
+        if not isinstance(habit, dict):
+            return None
+        if not isinstance(now_dt_utc, datetime.datetime):
+            return None
+        if now_dt_utc.tzinfo is None:
+            now_dt_utc = now_dt_utc.replace(tzinfo=datetime.timezone.utc)
+        now_dt_utc = now_dt_utc.astimezone(datetime.timezone.utc)
+
+        # Respect active snooze (don't move due pointers while snoozed).
+        snoozed_until_dt = self._parse_sqlite_utc_timestamp(habit.get("snoozed_until"))
+        if snoozed_until_dt and snoozed_until_dt > now_dt_utc:
+            return None
+
+        next_due_dt = self._parse_sqlite_utc_timestamp(habit.get("next_due_at"))
+
+        # Resolve identifiers (some list/get queries intentionally omit user_id for brevity).
+        try:
+            hid = int(habit.get("id") or 0)
+        except Exception:
+            return None
+        if hid <= 0:
+            return None
+        try:
+            gid = int(habit.get("guild_id") or 0)
+        except Exception:
+            gid = int(fallback_guild_id or 0)
+        if fallback_guild_id is not None:
+            try:
+                gid = int(fallback_guild_id)
+            except Exception:
+                pass
+        try:
+            uid = int(habit.get("user_id") or 0)
+        except Exception:
+            uid = int(fallback_user_id or 0)
+        if uid <= 0 and fallback_user_id is not None:
+            try:
+                uid = int(fallback_user_id)
+            except Exception:
+                pass
+        if uid <= 0:
+            return None
+
+        # If missing/invalid, initialize from now.
+        if not next_due_dt:
+            new_dt = self._compute_next_due_at_utc(habit, now_dt_utc)
+            if not new_dt:
+                return None
+            new_s = new_dt.strftime("%Y-%m-%d %H:%M:%S")
+            ok = self.set_habit_schedule_and_due(
+                gid,
+                uid,
+                hid,
+                next_due_at_utc=new_s,
+                remind_level=0,
+                clear_next_remind_at=True,
+            )
+            return new_s if ok else None
+
+        # Is it stale (we're already past the next scheduled occurrence)?
+        next_after_dt = self._compute_next_due_at_utc(habit, next_due_dt + datetime.timedelta(seconds=1))
+        if not next_after_dt:
+            return None
+        if now_dt_utc < next_after_dt:
+            return None
+
+        new_dt = self._compute_next_due_at_utc(habit, now_dt_utc)
+        if not new_dt:
+            return None
+        new_s = new_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        ok = self.set_habit_schedule_and_due(
+            gid,
+            uid,
+            hid,
+            next_due_at_utc=new_s,
+            remind_level=0,
+            clear_next_remind_at=True,
+        )
+        return new_s if ok else None
+
+    def refresh_stale_habit_due_dates_any_scope(self, user_id: int, *, now_utc: Optional[str] = None, limit: int = 200) -> int:
+        """
+        Refreshes (advances) stale `next_due_at` values for a user's habits across all scopes.
+        Returns the number of habits updated.
+        """
+        limit = max(1, min(2000, int(limit)))
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if isinstance(now_utc, str) and now_utc.strip() else None
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        now_dt = now_dt.astimezone(datetime.timezone.utc)
+
+        habits = self.list_habits_any_scope(int(user_id), limit)
+        updated = 0
+        for h in habits or []:
+            if not isinstance(h, dict):
+                continue
+            new_s = self._refresh_habit_due_if_stale(h, now_dt_utc=now_dt, fallback_user_id=int(user_id))
+            if isinstance(new_s, str) and new_s:
+                updated += 1
+        return int(updated)
+
+    def refresh_stale_habit_due_dates(self, guild_id: int, user_id: int, *, now_utc: Optional[str] = None, limit: int = 200) -> int:
+        """
+        Refreshes (advances) stale `next_due_at` values for a user's habits within a specific guild scope.
+        Returns the number of habits updated.
+        """
+        limit = max(1, min(2000, int(limit)))
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if isinstance(now_utc, str) and now_utc.strip() else None
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        now_dt = now_dt.astimezone(datetime.timezone.utc)
+
+        habits = self.list_habits(int(guild_id), int(user_id), limit)
+        updated = 0
+        for h in habits or []:
+            if not isinstance(h, dict):
+                continue
+            new_s = self._refresh_habit_due_if_stale(
+                h,
+                now_dt_utc=now_dt,
+                fallback_user_id=int(user_id),
+                fallback_guild_id=int(guild_id),
+            )
+            if isinstance(new_s, str) and new_s:
+                updated += 1
+        return int(updated)
+
+    def refresh_stale_habit_due_date_any_scope(self, user_id: int, habit_id: int, *, now_utc: Optional[str] = None) -> bool:
+        """
+        Refreshes a single habit (any scope). Returns True if updated.
+        Intended for reminder loops where we only want to touch habits that surfaced as due.
+        """
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if isinstance(now_utc, str) and now_utc.strip() else None
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        now_dt = now_dt.astimezone(datetime.timezone.utc)
+
+        habit = self.get_habit_any_scope(int(user_id), int(habit_id))
+        if not habit:
+            return False
+        new_s = self._refresh_habit_due_if_stale(habit, now_dt_utc=now_dt, fallback_user_id=int(user_id))
+        return bool(new_s)
+
     def _tzinfo_from_name(self, tz_name: Optional[str]) -> datetime.tzinfo:
         name = (tz_name or "").strip()
         if not name or name.upper() in ("UTC", "ETC/UTC", "Z"):

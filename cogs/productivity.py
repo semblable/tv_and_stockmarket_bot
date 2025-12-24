@@ -1144,6 +1144,23 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
             return
 
+        # Refresh stale due pointers so `/habit_list` doesn't show "next due" stuck days/weeks in the past.
+        # This advances `next_due_at` only when the schedule has already moved on to the next occurrence.
+        try:
+            now_str = _sqlite_utc_timestamp(_utc_now())
+            if is_dm and hasattr(self.db_manager, "refresh_stale_habit_due_dates_any_scope"):
+                await self.bot.loop.run_in_executor(
+                    None, lambda: self.db_manager.refresh_stale_habit_due_dates_any_scope(ctx.author.id, now_utc=now_str, limit=200)
+                )
+            elif hasattr(self.db_manager, "refresh_stale_habit_due_dates"):
+                guild_id0 = _scope_guild_id_from_ctx(ctx)
+                await self.bot.loop.run_in_executor(
+                    None, lambda: self.db_manager.refresh_stale_habit_due_dates(guild_id0, ctx.author.id, now_utc=now_str, limit=200)
+                )
+        except Exception:
+            # Best-effort only; listing should still work even if refresh fails.
+            pass
+
         if is_dm and hasattr(self.db_manager, "list_habits_any_scope"):
             habits = await self.bot.loop.run_in_executor(None, self.db_manager.list_habits_any_scope, ctx.author.id, 50)
             title = "📌 Your Habits (all scopes)"
@@ -1157,6 +1174,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
         embed = discord.Embed(title=title, color=discord.Color.green())
         lines: List[str] = []
+        now_utc = _utc_now()
         for h in habits[:50]:
             hid = h.get("id")
             name = h.get("name") or ""
@@ -1181,15 +1199,18 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 scope_label = f" ({'DM' if gid == '0' else f'g:{gid}'})"
 
             next_due_disp = next_due or "n/a"
+            status_prefix = "next due"
             if isinstance(next_due, str) and next_due.strip():
                 dt_utc = _parse_sqlite_utc_timestamp(next_due)
                 if dt_utc is not None:
                     local_str, tz_disp = _format_due_display(dt_utc, str(tz_name or "UTC"))
                     next_due_disp = f"{local_str} {tz_disp}"
+                    if dt_utc <= now_utc:
+                        status_prefix = "due (overdue)"
 
             lines.append(
                 f"{rflag} **#{hid}**{scope_label} — **{name}** (due `{due_time}` `{tz_label}`, remind: `{remind_profile}`)\n"
-                f"• next due: `{next_due_disp}` | last check-in: `{last or 'n/a'}`"
+                f"• {status_prefix}: `{next_due_disp}` | last check-in: `{last or 'n/a'}`"
             )
         embed.description = "\n".join(lines)[:4000]
         await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
@@ -2037,6 +2058,22 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         for h in due_habits or []:
             try:
                 uid = int(h.get("user_id"))
+
+                # If the stored due pointer is stale (schedule has already moved on),
+                # advance it and skip sending an outdated reminder.
+                try:
+                    if hasattr(self.db_manager, "refresh_stale_habit_due_date_any_scope"):
+                        advanced = await self.bot.loop.run_in_executor(
+                            None,
+                            lambda: self.db_manager.refresh_stale_habit_due_date_any_scope(
+                                uid, int(h.get("id") or 0), now_utc=now_str
+                            ),
+                        )
+                        if advanced:
+                            continue
+                except Exception:
+                    pass
+
                 if await self._is_user_in_dnd(uid):
                     # Avoid reprocessing every minute while in DND.
                     next_rem = _sqlite_utc_timestamp(now + timedelta(minutes=30))
