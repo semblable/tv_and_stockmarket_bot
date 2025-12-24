@@ -59,6 +59,47 @@ class ProductivityMixin:
         p = aliases.get(p, p)
         return p if p in self._HABIT_SNOOZE_PERIODS else "week"
 
+    def _record_habit_snooze_event(
+        self,
+        *,
+        habit_id: int,
+        guild_id: int,
+        user_id: int,
+        snoozed_at_utc: str,
+        snoozed_until_utc: Optional[str],
+        days: Optional[int],
+        period: Optional[str],
+        mode: str,
+    ) -> None:
+        """
+        Best-effort insert into `habit_snoozes` for stats/history.
+        Must never raise; snoozing should still work even if logging fails.
+        """
+        try:
+            self._execute_query(
+                """
+                INSERT INTO habit_snoozes (habit_id, guild_id, user_id, snoozed_at, snoozed_until, days, period, mode)
+                VALUES (:habit_id, :guild_id, :user_id, :snoozed_at, :snoozed_until, :days, :period, :mode)
+                """,
+                {
+                    "habit_id": int(habit_id),
+                    "guild_id": str(int(guild_id)),
+                    "user_id": str(int(user_id)),
+                    "snoozed_at": str(snoozed_at_utc)[:19],
+                    "snoozed_until": (
+                        str(snoozed_until_utc)[:19]
+                        if isinstance(snoozed_until_utc, str) and len(snoozed_until_utc.strip()) >= 19
+                        else None
+                    ),
+                    "days": (int(days) if days is not None else None),
+                    "period": (str(period).strip() if isinstance(period, str) and period.strip() else None),
+                    "mode": str(mode or "snooze").strip().lower(),
+                },
+                commit=True,
+            )
+        except Exception:
+            return
+
     def _parse_sqlite_utc_timestamp(self, ts: Optional[str]) -> Optional[datetime.datetime]:
         if not isinstance(ts, str) or not ts.strip():
             return None
@@ -1225,6 +1266,7 @@ class ProductivityMixin:
           scheduled_days, completed_days, completion_rate,
           current_streak, best_streak,
           total_checkins, last_checkin_at_utc,
+          total_snoozes, snoozes_in_range,
           daily_labels, daily_counts,
           weekday_counts (Mon..Sun)
         """
@@ -1332,6 +1374,51 @@ class ProductivityMixin:
 
         weekday_counts = [int(per_weekday_counts.get(i, 0)) for i in range(7)]
 
+        # Snoozes (count events; tracked in UTC, but range is defined in habit-local days)
+        total_snoozes = 0
+        snoozes_in_range = 0
+        try:
+            row_total = self._execute_query(
+                """
+                SELECT COUNT(1) AS c
+                FROM habit_snoozes
+                WHERE habit_id = :habit_id AND guild_id = :guild_id AND user_id = :user_id
+                """,
+                {"habit_id": int(habit_id), "guild_id": str(int(guild_id)), "user_id": str(int(user_id))},
+                fetch_one=True,
+            )
+            if isinstance(row_total, dict):
+                total_snoozes = int(row_total.get("c") or 0)
+        except Exception:
+            total_snoozes = 0
+
+        try:
+            start_local_dt = datetime.datetime.combine(range_start_local, datetime.time(0, 0), tzinfo=tz)
+            end_excl_local_dt = datetime.datetime.combine(range_end_local + datetime.timedelta(days=1), datetime.time(0, 0), tzinfo=tz)
+            start_utc_s = start_local_dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            end_excl_utc_s = end_excl_local_dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            row_range = self._execute_query(
+                """
+                SELECT COUNT(1) AS c
+                FROM habit_snoozes
+                WHERE habit_id = :habit_id AND guild_id = :guild_id AND user_id = :user_id
+                  AND snoozed_at >= :start
+                  AND snoozed_at < :end_excl
+                """,
+                {
+                    "habit_id": int(habit_id),
+                    "guild_id": str(int(guild_id)),
+                    "user_id": str(int(user_id)),
+                    "start": start_utc_s,
+                    "end_excl": end_excl_utc_s,
+                },
+                fetch_one=True,
+            )
+            if isinstance(row_range, dict):
+                snoozes_in_range = int(row_range.get("c") or 0)
+        except Exception:
+            snoozes_in_range = 0
+
         return {
             "id": int(habit_id),
             "name": habit.get("name") or "Habit",
@@ -1346,6 +1433,8 @@ class ProductivityMixin:
             "best_streak": int(best),
             "total_checkins": int(total_checkins),
             "last_checkin_at_utc": (last_dt_utc.strftime("%Y-%m-%d %H:%M:%S") if last_dt_utc else None),
+            "total_snoozes": int(total_snoozes),
+            "snoozes_in_range": int(snoozes_in_range),
             "daily_labels": daily_labels,
             "daily_counts": daily_counts,
             "weekday_counts": weekday_counts,
@@ -1380,6 +1469,8 @@ class ProductivityMixin:
         total_scheduled = 0
         total_completed = 0
         total_checkins = 0
+        total_snoozes = 0
+        snoozes_in_range = 0
         best_streak_max = 0
         current_streak_sum = 0
         habits_with_stats = 0
@@ -1403,6 +1494,8 @@ class ProductivityMixin:
             cur = int(s.get("current_streak") or 0)
             best = int(s.get("best_streak") or 0)
             tcheck = int(s.get("total_checkins") or 0)
+            tsnooze = int(s.get("total_snoozes") or 0)
+            snooze_r = int(s.get("snoozes_in_range") or 0)
 
             summaries.append(
                 {
@@ -1414,6 +1507,8 @@ class ProductivityMixin:
                     "current_streak": cur,
                     "best_streak": best,
                     "total_checkins": tcheck,
+                    "total_snoozes": tsnooze,
+                    "snoozes_in_range": snooze_r,
                     "tz_name": str(s.get("tz_name") or h.get("tz_name") or "UTC"),
                 }
             )
@@ -1421,6 +1516,8 @@ class ProductivityMixin:
             total_scheduled += scheduled
             total_completed += completed
             total_checkins += tcheck
+            total_snoozes += tsnooze
+            snoozes_in_range += snooze_r
             best_streak_max = max(best_streak_max, best)
             current_streak_sum += cur
             habits_with_stats += 1
@@ -1444,6 +1541,8 @@ class ProductivityMixin:
             "overall_completion_rate": float(overall_rate),
             "avg_habit_completion_rate": float(avg_habit_rate),
             "total_checkins": int(total_checkins),
+            "total_snoozes": int(total_snoozes),
+            "snoozes_in_range": int(snoozes_in_range),
             "best_streak_max": int(best_streak_max),
             "avg_current_streak": float(avg_current_streak),
             "habits": summaries,
@@ -1474,6 +1573,8 @@ class ProductivityMixin:
         total_scheduled = 0
         total_completed = 0
         total_checkins = 0
+        total_snoozes = 0
+        snoozes_in_range = 0
         best_streak_max = 0
         current_streak_sum = 0
         habits_with_stats = 0
@@ -1501,6 +1602,8 @@ class ProductivityMixin:
             cur = int(s.get("current_streak") or 0)
             best = int(s.get("best_streak") or 0)
             tcheck = int(s.get("total_checkins") or 0)
+            tsnooze = int(s.get("total_snoozes") or 0)
+            snooze_r = int(s.get("snoozes_in_range") or 0)
 
             summaries.append(
                 {
@@ -1513,6 +1616,8 @@ class ProductivityMixin:
                     "current_streak": cur,
                     "best_streak": best,
                     "total_checkins": tcheck,
+                    "total_snoozes": tsnooze,
+                    "snoozes_in_range": snooze_r,
                     "tz_name": str(s.get("tz_name") or h.get("tz_name") or "UTC"),
                 }
             )
@@ -1520,6 +1625,8 @@ class ProductivityMixin:
             total_scheduled += scheduled
             total_completed += completed
             total_checkins += tcheck
+            total_snoozes += tsnooze
+            snoozes_in_range += snooze_r
             best_streak_max = max(best_streak_max, best)
             current_streak_sum += cur
             habits_with_stats += 1
@@ -1542,6 +1649,8 @@ class ProductivityMixin:
             "overall_completion_rate": float(overall_rate),
             "avg_habit_completion_rate": float(avg_habit_rate),
             "total_checkins": int(total_checkins),
+            "total_snoozes": int(total_snoozes),
+            "snoozes_in_range": int(snoozes_in_range),
             "best_streak_max": int(best_streak_max),
             "avg_current_streak": float(avg_current_streak),
             "habits": summaries,
@@ -2089,7 +2198,7 @@ class ProductivityMixin:
         """
         Snooze a habit for the rest of today (and optionally N days) in the habit's timezone.
         Snooze will NOT extend past the habit's upcoming `next_due_at` (if it is in the future).
-        Enforces: once per week or once per calendar month (per habit).
+        Snoozing is unlimited; we track snoozes for stats.
 
         Returns: { ok: bool, error?: str, snoozed_until?: str, next_allowed_at?: str, effective_period?: str }
         """
@@ -2111,30 +2220,6 @@ class ProductivityMixin:
             new_next_due_dt = self._compute_next_due_at_utc(habit, next_due_dt + datetime.timedelta(seconds=1))
             if new_next_due_dt:
                 new_next_due_s = new_next_due_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-                last_ts = self._parse_sqlite_utc_timestamp(habit.get("last_snooze_at"))
-                if last_ts:
-                    if period_n == "week":
-                        next_allowed = last_ts + datetime.timedelta(days=7)
-                        if now_dt < next_allowed:
-                            return {
-                                "ok": False,
-                                "error": "cooldown",
-                                "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
-                                "effective_period": period_n,
-                            }
-                    else:
-                        if last_ts.year == now_dt.year and last_ts.month == now_dt.month:
-                            if now_dt.month == 12:
-                                next_allowed = datetime.datetime(now_dt.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
-                            else:
-                                next_allowed = datetime.datetime(now_dt.year, now_dt.month + 1, 1, tzinfo=datetime.timezone.utc)
-                            return {
-                                "ok": False,
-                                "error": "cooldown",
-                                "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
-                                "effective_period": period_n,
-                            }
 
                 ok = bool(
                     self._execute_query(
@@ -2159,6 +2244,17 @@ class ProductivityMixin:
                         commit=True,
                     )
                 )
+                if ok:
+                    self._record_habit_snooze_event(
+                        habit_id=int(habit_id),
+                        guild_id=int(guild_id),
+                        user_id=int(user_id),
+                        snoozed_at_utc=now_s,
+                        snoozed_until_utc=new_next_due_s,
+                        days=None,
+                        period=period_n,
+                        mode="skip_next",
+                    )
                 # Return the next due timestamp as the effective "resume after" time.
                 return {"ok": ok, "snoozed_until": new_next_due_s, "effective_period": period_n}
 
@@ -2169,32 +2265,6 @@ class ProductivityMixin:
         snoozed_until_dt = snoozed_until_local.astimezone(datetime.timezone.utc)
 
         snoozed_until = snoozed_until_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        last_ts = self._parse_sqlite_utc_timestamp(habit.get("last_snooze_at"))
-        if last_ts:
-            if period_n == "week":
-                next_allowed = last_ts + datetime.timedelta(days=7)
-                if now_dt < next_allowed:
-                    return {
-                        "ok": False,
-                        "error": "cooldown",
-                        "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
-                        "effective_period": period_n,
-                    }
-            else:
-                # month = once per calendar month (UTC)
-                if last_ts.year == now_dt.year and last_ts.month == now_dt.month:
-                    # next allowed at start of next month (UTC)
-                    if now_dt.month == 12:
-                        next_allowed = datetime.datetime(now_dt.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
-                    else:
-                        next_allowed = datetime.datetime(now_dt.year, now_dt.month + 1, 1, tzinfo=datetime.timezone.utc)
-                    return {
-                        "ok": False,
-                        "error": "cooldown",
-                        "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
-                        "effective_period": period_n,
-                    }
 
         query = """
         UPDATE habits
@@ -2214,6 +2284,17 @@ class ProductivityMixin:
             "id": int(habit_id),
         }
         ok = bool(self._execute_query(query, params, commit=True))
+        if ok:
+            self._record_habit_snooze_event(
+                habit_id=int(habit_id),
+                guild_id=int(guild_id),
+                user_id=int(user_id),
+                snoozed_at_utc=now_s,
+                snoozed_until_utc=snoozed_until,
+                days=int(days),
+                period=period_n,
+                mode="snooze",
+            )
         return {"ok": ok, "snoozed_until": snoozed_until, "effective_period": period_n}
 
     def snooze_habit_for_day_any_scope(
@@ -2243,30 +2324,6 @@ class ProductivityMixin:
             if new_next_due_dt:
                 new_next_due_s = new_next_due_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-                last_ts = self._parse_sqlite_utc_timestamp(habit.get("last_snooze_at"))
-                if last_ts:
-                    if period_n == "week":
-                        next_allowed = last_ts + datetime.timedelta(days=7)
-                        if now_dt < next_allowed:
-                            return {
-                                "ok": False,
-                                "error": "cooldown",
-                                "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
-                                "effective_period": period_n,
-                            }
-                    else:
-                        if last_ts.year == now_dt.year and last_ts.month == now_dt.month:
-                            if now_dt.month == 12:
-                                next_allowed = datetime.datetime(now_dt.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
-                            else:
-                                next_allowed = datetime.datetime(now_dt.year, now_dt.month + 1, 1, tzinfo=datetime.timezone.utc)
-                            return {
-                                "ok": False,
-                                "error": "cooldown",
-                                "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
-                                "effective_period": period_n,
-                            }
-
                 ok = bool(
                     self._execute_query(
                         """
@@ -2289,6 +2346,21 @@ class ProductivityMixin:
                         commit=True,
                     )
                 )
+                if ok:
+                    try:
+                        gid0 = int(habit.get("guild_id") or 0)
+                    except Exception:
+                        gid0 = 0
+                    self._record_habit_snooze_event(
+                        habit_id=int(habit_id),
+                        guild_id=int(gid0),
+                        user_id=int(user_id),
+                        snoozed_at_utc=now_s,
+                        snoozed_until_utc=new_next_due_s,
+                        days=None,
+                        period=period_n,
+                        mode="skip_next",
+                    )
                 return {"ok": ok, "snoozed_until": new_next_due_s, "effective_period": period_n}
 
         tz = self._tzinfo_from_name(habit.get("tz_name"))
@@ -2298,30 +2370,6 @@ class ProductivityMixin:
         snoozed_until_dt = snoozed_until_local.astimezone(datetime.timezone.utc)
 
         snoozed_until = snoozed_until_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        last_ts = self._parse_sqlite_utc_timestamp(habit.get("last_snooze_at"))
-        if last_ts:
-            if period_n == "week":
-                next_allowed = last_ts + datetime.timedelta(days=7)
-                if now_dt < next_allowed:
-                    return {
-                        "ok": False,
-                        "error": "cooldown",
-                        "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
-                        "effective_period": period_n,
-                    }
-            else:
-                if last_ts.year == now_dt.year and last_ts.month == now_dt.month:
-                    if now_dt.month == 12:
-                        next_allowed = datetime.datetime(now_dt.year + 1, 1, 1, tzinfo=datetime.timezone.utc)
-                    else:
-                        next_allowed = datetime.datetime(now_dt.year, now_dt.month + 1, 1, tzinfo=datetime.timezone.utc)
-                    return {
-                        "ok": False,
-                        "error": "cooldown",
-                        "next_allowed_at": next_allowed.strftime("%Y-%m-%d %H:%M:%S"),
-                        "effective_period": period_n,
-                    }
 
         query = """
         UPDATE habits
@@ -2334,6 +2382,21 @@ class ProductivityMixin:
         """
         params = {"snoozed_until": snoozed_until, "now": now_s, "period": period_n, "user_id": str(int(user_id)), "id": int(habit_id)}
         ok = bool(self._execute_query(query, params, commit=True))
+        if ok:
+            try:
+                gid0 = int(habit.get("guild_id") or 0)
+            except Exception:
+                gid0 = 0
+            self._record_habit_snooze_event(
+                habit_id=int(habit_id),
+                guild_id=int(gid0),
+                user_id=int(user_id),
+                snoozed_at_utc=now_s,
+                snoozed_until_utc=snoozed_until,
+                days=int(days),
+                period=period_n,
+                mode="snooze",
+            )
         return {"ok": ok, "snoozed_until": snoozed_until, "effective_period": period_n}
 
     def set_habit_reminder_profile(self, guild_id: int, user_id: int, habit_id: int, profile: str) -> bool:

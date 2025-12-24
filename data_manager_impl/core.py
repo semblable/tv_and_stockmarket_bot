@@ -592,6 +592,33 @@ class DataManagerCore:
         ):
             logger.warning("Could not create idx_habit_checkins_habit.")
 
+        # --- Habits: Snooze history (stats) ---
+        create_habit_snoozes_sql = """
+        CREATE TABLE IF NOT EXISTS habit_snoozes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            habit_id INTEGER NOT NULL,
+            guild_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            snoozed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- UTC timestamp when snooze happened
+            snoozed_until TIMESTAMP, -- UTC timestamp reminders resume (or skipped-to due for "skip next")
+            days INTEGER, -- requested days for time-based snooze
+            period TEXT, -- user-selected label (week/month), kept for back-compat UX
+            mode TEXT -- 'snooze' | 'skip_next'
+        )
+        """
+        create_table_if_not_exists("habit_snoozes", create_habit_snoozes_sql)
+        try:
+            self._execute_query(
+                "CREATE INDEX IF NOT EXISTS idx_habit_snoozes_habit ON habit_snoozes(habit_id, snoozed_at);",
+                commit=True,
+            )
+            self._execute_query(
+                "CREATE INDEX IF NOT EXISTS idx_habit_snoozes_user ON habit_snoozes(user_id, guild_id, snoozed_at);",
+                commit=True,
+            )
+        except Exception as e:
+            logger.warning(f"Could not create habit_snoozes indexes: {e}")
+
         # --- Generic Reminders (one-off + repeating) ---
         create_reminders_sql = """
         CREATE TABLE IF NOT EXISTS reminders (

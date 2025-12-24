@@ -421,6 +421,62 @@ def test_habit_snooze_before_due_skips_next_occurrence(db_manager):
     assert any(r.get("id") == habit_id for r in due_next)
 
 
+def test_habit_snooze_unlimited_and_logged(db_manager):
+    guild_id = 0
+    user_id = 9876
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Unlimited snooze",
+        [0, 1, 2, 3, 4, 5, 6],
+        "18:00",
+        "UTC",
+        True,
+        "2000-01-01 00:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    # Snooze twice in the same day (previously could be limited by period cooldown).
+    res1 = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2025-01-08 12:00:00", "week", 1)
+    assert res1.get("ok") is True
+    res2 = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2025-01-08 12:05:00", "week", 1)
+    assert res2.get("ok") is True
+
+    row = db_manager._execute_query(
+        "SELECT COUNT(1) AS c FROM habit_snoozes WHERE habit_id = :hid AND guild_id = :gid AND user_id = :uid",
+        {"hid": int(habit_id), "gid": str(guild_id), "uid": str(user_id)},
+        fetch_one=True,
+    )
+    assert isinstance(row, dict)
+    assert int(row.get("c") or 0) == 2
+
+
+def test_habit_snooze_counts_in_stats(db_manager):
+    guild_id = 0
+    user_id = 9877
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Snooze stats",
+        [0, 1, 2, 3, 4, 5, 6],
+        "18:00",
+        "UTC",
+        True,
+        "2000-01-01 00:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    res1 = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2025-01-08 12:00:00", "week", 1)
+    assert res1.get("ok") is True
+    res2 = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2025-01-09 12:00:00", "week", 1)
+    assert res2.get("ok") is True
+
+    stats = db_manager.get_habit_stats(guild_id, user_id, habit_id, days=7, now_utc="2025-01-10 12:00:00")
+    assert isinstance(stats, dict)
+    assert int(stats.get("total_snoozes") or 0) == 2
+    assert int(stats.get("snoozes_in_range") or 0) == 2
+
+
 def test_portfolio_analysis_schedule_crud(db_manager):
     user_id = 9911
     # add

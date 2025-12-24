@@ -1309,6 +1309,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         cur_streak = int(stats.get("current_streak") or 0)
         best_streak = int(stats.get("best_streak") or 0)
         total_checkins = int(stats.get("total_checkins") or 0)
+        total_snoozes = int(stats.get("total_snoozes") or 0)
+        snoozes_in_range = int(stats.get("snoozes_in_range") or 0)
         last_checkin_utc = stats.get("last_checkin_at_utc") or ""
         tz_name = str(stats.get("tz_name") or habit.get("tz_name") or "UTC")
         rstart = stats.get("range_start_local") or ""
@@ -1333,7 +1335,16 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             if dt_last is not None:
                 last_local, last_tz = _format_due_display(dt_last, tz_name)
                 last_disp = f"{last_local} {last_tz}"
-        embed.add_field(name="Totals", value=f"- Total check-ins: **{total_checkins}**\n- Last check-in: `{last_disp}`", inline=False)
+        embed.add_field(
+            name="Totals",
+            value=(
+                f"- Total check-ins: **{total_checkins}**\n"
+                f"- Snoozes (this range): **{snoozes_in_range}**\n"
+                f"- Total snoozes: **{total_snoozes}**\n"
+                f"- Last check-in: `{last_disp}`"
+            ),
+            inline=False,
+        )
         await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
 
     @commands.hybrid_command(name="habits_stats", description="Show overall stats across all your habits.")
@@ -1374,6 +1385,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         overall_rate = float(stats.get("overall_completion_rate") or 0.0) * 100.0
         avg_rate = float(stats.get("avg_habit_completion_rate") or 0.0) * 100.0
         total_checkins = int(stats.get("total_checkins") or 0)
+        total_snoozes = int(stats.get("total_snoozes") or 0)
+        snoozes_in_range = int(stats.get("snoozes_in_range") or 0)
         best_streak = int(stats.get("best_streak_max") or 0)
         avg_cur = float(stats.get("avg_current_streak") or 0.0)
 
@@ -1394,6 +1407,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             name="Streaks & check-ins",
             value=(
                 f"- Total check-ins: **{total_checkins}**\n"
+                f"- Snoozes (this range): **{snoozes_in_range}**\n"
+                f"- Total snoozes: **{total_snoozes}**\n"
                 f"- Best streak (max across habits): **{best_streak}**\n"
                 f"- Avg current streak: **{avg_cur:.1f}**\n"
                 f"- Avg habit completion rate: **{avg_rate:.0f}%**"
