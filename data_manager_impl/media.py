@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -98,8 +98,43 @@ class MediaMixin:
         return self._execute_query(query, params, commit=True)
 
     # --- Sent Episode Notifications ---
-    def add_sent_episode_notification(self, user_id: int, show_tmdb_id: int, episode_tmdb_id: int, season_number: int, episode_number: int) -> bool:
+    def _normalize_episode_notification_id(self, episode_id: Any) -> Tuple[Optional[Union[int, str]], Optional[int]]:
+        """
+        Returns:
+          - normalized_id: int|str|None (what we store/query as primary episode id)
+          - legacy_int: int|None (parsed numeric suffix for backwards-compatible lookup)
+        """
+        if episode_id is None:
+            return None, None
+        # Keep ints as-is.
+        if isinstance(episode_id, int):
+            return int(episode_id), int(episode_id)
+        # Allow storing/querying provider-prefixed ids like "tvmaze:12345".
+        try:
+            s = str(episode_id).strip()
+        except Exception:
+            return None, None
+        if not s:
+            return None, None
+        legacy_int: Optional[int] = None
+        if ":" in s:
+            # Parse last segment as int if possible (e.g. "tvmaze:123").
+            try:
+                legacy_int = int(s.rsplit(":", 1)[-1])
+            except Exception:
+                legacy_int = None
+        else:
+            try:
+                legacy_int = int(s)
+            except Exception:
+                legacy_int = None
+        return s, legacy_int
+
+    def add_sent_episode_notification(self, user_id: int, show_tmdb_id: int, episode_tmdb_id: Any, season_number: int, episode_number: int) -> bool:
         user_id_str = str(user_id)
+        normalized_id, _legacy = self._normalize_episode_notification_id(episode_tmdb_id)
+        if normalized_id is None:
+            return False
         query = """
         INSERT OR IGNORE INTO sent_episode_notifications 
             (user_id, show_tmdb_id, episode_tmdb_id, season_number, episode_number)
@@ -108,14 +143,17 @@ class MediaMixin:
         params = {
             "user_id": user_id_str,
             "show_tmdb_id": show_tmdb_id,
-            "episode_tmdb_id": episode_tmdb_id,
+            "episode_tmdb_id": normalized_id,
             "season_number": season_number,
             "episode_number": episode_number
         }
         return self._execute_query(query, params, commit=True)
 
-    def has_user_been_notified_for_episode(self, user_id: int, show_tmdb_id: int, episode_tmdb_id: int) -> bool:
+    def has_user_been_notified_for_episode(self, user_id: int, show_tmdb_id: int, episode_tmdb_id: Any) -> bool:
         user_id_str = str(user_id)
+        normalized_id, legacy_int = self._normalize_episode_notification_id(episode_tmdb_id)
+        if normalized_id is None:
+            return False
         query = """
         SELECT 1 FROM sent_episode_notifications
         WHERE user_id = :user_id AND show_tmdb_id = :show_tmdb_id AND episode_tmdb_id = :episode_tmdb_id
@@ -124,10 +162,25 @@ class MediaMixin:
         params = {
             "user_id": user_id_str,
             "show_tmdb_id": show_tmdb_id,
-            "episode_tmdb_id": episode_tmdb_id
+            "episode_tmdb_id": normalized_id
         }
         result = self._execute_query(query, params, fetch_one=True)
-        return bool(result) # True if a record is found, False otherwise
+        if result:
+            return True
+
+        # Backwards-compat: older rows stored raw integer ids (no provider prefix).
+        if legacy_int is not None:
+            result2 = self._execute_query(
+                """
+                SELECT 1 FROM sent_episode_notifications
+                WHERE user_id = :user_id AND show_tmdb_id = :show_tmdb_id AND episode_tmdb_id = :legacy_id
+                LIMIT 1
+                """,
+                {"user_id": user_id_str, "show_tmdb_id": show_tmdb_id, "legacy_id": legacy_int},
+                fetch_one=True,
+            )
+            return bool(result2)
+        return False
 
     def has_user_been_notified_for_episode_by_number(self, user_id: int, show_tmdb_id: int, season_number: int, episode_number: int) -> bool:
         """

@@ -2186,6 +2186,51 @@ class ProductivityMixin:
         rows = self._execute_query(query, {"now": now_utc, "limit": limit}, fetch_all=True)
         return rows if isinstance(rows, list) else []
 
+    def skip_overdue_habit_occurrence(
+        self,
+        guild_id: int,
+        user_id: int,
+        habit_id: int,
+        *,
+        now_utc: Optional[str] = None,
+    ) -> bool:
+        """
+        When a habit is due/overdue and we've already sent "enough" nags, do NOT permanently disable reminders.
+
+        Instead, advance `next_due_at` to the next scheduled occurrence after `now_utc` and reset reminder state.
+        This makes reminders "come back" automatically on the next due day/time.
+        """
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if isinstance(now_utc, str) and now_utc.strip() else None
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        now_dt = now_dt.astimezone(datetime.timezone.utc)
+
+        habit = self.get_habit(int(guild_id), int(user_id), int(habit_id))
+        if not isinstance(habit, dict):
+            return False
+
+        # Compute next scheduled occurrence strictly after "now".
+        new_due_dt = self._compute_next_due_at_utc(habit, now_dt + datetime.timedelta(seconds=1))
+        if not new_due_dt:
+            return False
+        new_due_s = new_due_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        query = """
+        UPDATE habits
+        SET next_due_at = :next_due_at,
+            remind_level = 0,
+            next_remind_at = NULL
+        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
+          AND COALESCE(is_archived, 0) = 0
+        """
+        params = {
+            "next_due_at": new_due_s,
+            "guild_id": str(int(guild_id)),
+            "user_id": str(int(user_id)),
+            "id": int(habit_id),
+        }
+        return bool(self._execute_query(query, params, commit=True))
+
     def snooze_habit_for_day(
         self,
         guild_id: int,

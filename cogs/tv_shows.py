@@ -1210,20 +1210,23 @@ class TVShows(commands.Cog):
                                             should_check = True
                                     
                                     if should_check:
-                                        # Check if notified (using episode ID or Season/Episode number for robustness)
+                                        # Check if notified (using episode ID + provider namespace, plus season/episode number for robustness)
+                                        ep_key = f"tvmaze:{ep_id}" if ep_id is not None else None
                                         already_notified = await self.bot.loop.run_in_executor(
-                                            None, self.db_manager.has_user_been_notified_for_episode, user_id, show_id, ep_id
+                                            None, self.db_manager.has_user_been_notified_for_episode, user_id, show_id, ep_key
                                         )
                                         
                                         if not already_notified:
                                             # Robustness check: Check by season/episode number too
                                             ep_season = ep.get('season', 0)
                                             ep_num = ep.get('number', 0)
-                                            already_notified_by_num = await self.bot.loop.run_in_executor(
-                                                None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
-                                            )
-                                            if already_notified_by_num:
-                                                already_notified = True
+                                            # Guard against unknown season/episode (0/0) which can suppress future notifications.
+                                            if isinstance(ep_season, int) and isinstance(ep_num, int) and ep_season > 0 and ep_num > 0:
+                                                already_notified_by_num = await self.bot.loop.run_in_executor(
+                                                    None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
+                                                )
+                                                if already_notified_by_num:
+                                                    already_notified = True
 
                                         if not already_notified:
                                             if not any(e['id'] == ep_id for e in episodes_to_notify):
@@ -1269,18 +1272,19 @@ class TVShows(commands.Cog):
                                         self.db_manager.has_user_been_notified_for_episode, 
                                         user_id, 
                                         show_id, 
-                                        last_aired_ep.get('id')
+                                        f"tmdb:{last_aired_ep.get('id')}"
                                     )
 
                                     if not already_notified:
                                         # Robustness check: Check by season/episode number too
                                         ep_season = last_aired_ep.get('season_number', 0)
                                         ep_num = last_aired_ep.get('episode_number', 0)
-                                        already_notified_by_num = await self.bot.loop.run_in_executor(
-                                            None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
-                                        )
-                                        if already_notified_by_num:
-                                            already_notified = True
+                                        if isinstance(ep_season, int) and isinstance(ep_num, int) and ep_season > 0 and ep_num > 0:
+                                            already_notified_by_num = await self.bot.loop.run_in_executor(
+                                                None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
+                                            )
+                                            if already_notified_by_num:
+                                                already_notified = True
 
                                     if not already_notified:
                                         if not any(ep.get('id') == last_aired_ep.get('id') for ep in episodes_to_notify):
@@ -1364,13 +1368,18 @@ class TVShows(commands.Cog):
                             ep_id = ep.get('id')
                             ep_season = ep.get('season_number', 0)
                             ep_num = ep.get('episode_number', 0)
+                            ep_source = (ep.get("source") or "TMDB")
+                            if str(ep_source).lower() == "tvmaze":
+                                ep_id_key = f"tvmaze:{ep_id}"
+                            else:
+                                ep_id_key = f"tmdb:{ep_id}"
                             
                             await self.bot.loop.run_in_executor(
                                 None, 
                                 self.db_manager.add_sent_episode_notification,
                                 user_id,
                                 show_id, 
-                                ep_id,
+                                ep_id_key,
                                 ep_season if isinstance(ep_season, int) else 0,
                                 ep_num if isinstance(ep_num, int) else 0
                             )

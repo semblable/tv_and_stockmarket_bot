@@ -2125,14 +2125,30 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
                 # Anti-spam: after N nags, stop (user can re-enable).
                 if level >= MAX_NAG_LEVEL:
-                    await self.bot.loop.run_in_executor(
-                        None,
-                        self.db_manager.set_habit_reminder_enabled,
-                        int(h.get("guild_id") or 0),
-                        uid,
-                        int(hid),
-                        False,
-                    )
+                    # Don't permanently disable reminders (this caused habits to get "stuck" with 🔕).
+                    # Instead, skip this overdue occurrence and reset reminder state so it resumes on the next due.
+                    gid_i = int(h.get("guild_id") or 0)
+                    if hasattr(self.db_manager, "skip_overdue_habit_occurrence"):
+                        await self.bot.loop.run_in_executor(
+                            None,
+                            lambda: self.db_manager.skip_overdue_habit_occurrence(
+                                gid_i,
+                                uid,
+                                int(hid),
+                                now_utc=now_str,
+                            ),
+                        )
+                    else:
+                        # Backwards-compatible fallback.
+                        await self.bot.loop.run_in_executor(
+                            None,
+                            self.db_manager.bump_habit_reminder,
+                            gid_i,
+                            uid,
+                            int(hid),
+                            0,
+                            _sqlite_utc_timestamp(now + timedelta(days=1)),
+                        )
                     continue
 
                 tpl = habit_messages[level % len(habit_messages)]
