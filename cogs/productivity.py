@@ -1213,6 +1213,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 f"• {status_prefix}: `{next_due_disp}` | last check-in: `{last or 'n/a'}`"
             )
         embed.description = "\n".join(lines)[:4000]
+        embed.set_footer(text="Tip: 🔕 means reminders are disabled. Re-enable one: `/habit_remind <id> enabled:true` • Re-enable all: `/habit_remind_all enabled:true`")
         await self.send_response(ctx, embed=embed, ephemeral=not is_dm)
 
     @commands.hybrid_command(name="habit_checkin", description="Mark a habit as completed (check-in).")
@@ -1673,6 +1674,47 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Could not update that habit.", ephemeral=not is_dm)
             return
         await self.send_response(ctx, ("🔔 Reminders enabled." if enabled else "🔕 Reminders disabled."), ephemeral=not is_dm)
+
+    @commands.hybrid_command(name="habit_remind_all", description="Enable/disable reminders for all your habits.")
+    @discord.app_commands.describe(enabled="Enable reminders for all habits (default: True).")
+    async def habit_remind_all(self, ctx: commands.Context, enabled: bool = True):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        updated = 0
+        if is_dm and hasattr(self.db_manager, "set_all_habit_reminders_any_scope"):
+            updated = await self.bot.loop.run_in_executor(
+                None, self.db_manager.set_all_habit_reminders_any_scope, ctx.author.id, enabled
+            )
+            # Best-effort: if enabling, ensure missing/stale due pointers are initialized/advanced.
+            if enabled and hasattr(self.db_manager, "refresh_stale_habit_due_dates_any_scope"):
+                now_str = _sqlite_utc_timestamp(_utc_now())
+                await self.bot.loop.run_in_executor(
+                    None, lambda: self.db_manager.refresh_stale_habit_due_dates_any_scope(ctx.author.id, now_utc=now_str, limit=200)
+                )
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            if hasattr(self.db_manager, "set_all_habit_reminders"):
+                updated = await self.bot.loop.run_in_executor(
+                    None, self.db_manager.set_all_habit_reminders, int(guild_id), ctx.author.id, enabled
+                )
+                if enabled and hasattr(self.db_manager, "refresh_stale_habit_due_dates"):
+                    now_str = _sqlite_utc_timestamp(_utc_now())
+                    await self.bot.loop.run_in_executor(
+                        None, lambda: self.db_manager.refresh_stale_habit_due_dates(int(guild_id), ctx.author.id, now_utc=now_str, limit=200)
+                    )
+            else:
+                await self.send_response(ctx, "This bot version doesn't support bulk habit reminder toggling yet.", ephemeral=not is_dm)
+                return
+
+        await self.send_response(
+            ctx,
+            (f"🔔 Enabled reminders for **{updated}** habit(s)." if enabled else f"🔕 Disabled reminders for **{updated}** habit(s)."),
+            ephemeral=not is_dm,
+        )
 
     @commands.hybrid_command(
         name="habit_remind_profile",

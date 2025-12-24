@@ -1854,6 +1854,80 @@ class ProductivityMixin:
                 except Exception:
                     pass
 
+    def set_all_habit_reminders_any_scope(self, user_id: int, enabled: bool) -> int:
+        """
+        Enable/disable reminders for all *non-archived* habits for a user across all scopes.
+        Returns number of rows updated.
+        """
+        query = """
+        UPDATE habits
+        SET remind_enabled = :enabled,
+            remind_level = CASE WHEN :enabled = 1 THEN remind_level ELSE 0 END,
+            next_remind_at = CASE WHEN :enabled = 1 THEN next_remind_at ELSE NULL END
+        WHERE user_id = :user_id
+          AND COALESCE(is_archived, 0) = 0
+        """
+        params = {"enabled": 1 if enabled else 0, "user_id": str(int(user_id))}
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                updated = int(cur.rowcount or 0)
+                conn.commit()
+                return updated
+            except sqlite3.Error as e:
+                logger.error(f"set_all_habit_reminders_any_scope failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return 0
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
+    def set_all_habit_reminders(self, guild_id: int, user_id: int, enabled: bool) -> int:
+        """
+        Enable/disable reminders for all *non-archived* habits for a user within a guild scope.
+        Returns number of rows updated.
+        """
+        query = """
+        UPDATE habits
+        SET remind_enabled = :enabled,
+            remind_level = CASE WHEN :enabled = 1 THEN remind_level ELSE 0 END,
+            next_remind_at = CASE WHEN :enabled = 1 THEN next_remind_at ELSE NULL END
+        WHERE guild_id = :guild_id AND user_id = :user_id
+          AND COALESCE(is_archived, 0) = 0
+        """
+        params = {"enabled": 1 if enabled else 0, "guild_id": str(int(guild_id)), "user_id": str(int(user_id))}
+        conn = self._get_connection()
+        cur = None
+        with self._lock:
+            try:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                updated = int(cur.rowcount or 0)
+                conn.commit()
+                return updated
+            except sqlite3.Error as e:
+                logger.error(f"set_all_habit_reminders failed: {e}")
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+                return 0
+            finally:
+                try:
+                    if cur:
+                        cur.close()
+                except Exception:
+                    pass
+
     def record_habit_checkin_any_scope(
         self,
         user_id: int,
