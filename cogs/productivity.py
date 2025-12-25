@@ -1859,7 +1859,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
         days_n = max(1, min(365, int(days)))
         ids: Optional[list[int]] = None
-        if isinstance(habit_ids, str) and habit_ids.strip():
+        provided_ids = isinstance(habit_ids, str) and habit_ids.strip()
+        if provided_ids:
             parsed: list[int] = []
             for part in habit_ids.replace(";", ",").replace(" ", ",").split(","):
                 p = part.strip()
@@ -1870,7 +1871,14 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 except Exception:
                     continue
             parsed = [x for x in parsed if x > 0]
-            ids = sorted(set(parsed)) if parsed else []
+            if not parsed:
+                await self.send_response(
+                    ctx,
+                    "No valid `habit_ids` were found. Provide comma-separated numbers like `1,2,3`, or omit `habit_ids` to pause all your habits.",
+                    ephemeral=not is_dm,
+                )
+                return
+            ids = sorted(set(parsed))
 
         now_s = _sqlite_utc_timestamp(_utc_now())
         if is_dm and hasattr(self.db_manager, "set_habit_vacation_any_scope"):
@@ -1889,12 +1897,28 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             await self.send_response(ctx, "Could not start vacation mode (no matching habits?).", ephemeral=not is_dm)
             return
 
-        paused_until = str(res.get("paused_until") or "n/a")
+        paused_until_utc = str(res.get("paused_until") or "").strip()
+        paused_until_disp = paused_until_utc or "n/a"
+        try:
+            tz_name = await self.bot.loop.run_in_executor(
+                None,
+                self.db_manager.get_user_preference,
+                int(ctx.author.id),
+                "timezone",
+                "Europe/Warsaw",
+            )
+            dt_pu = _parse_sqlite_utc_timestamp(paused_until_utc)
+            if dt_pu is not None:
+                local_pu, tz_lbl = _format_due_display(dt_pu, str(tz_name or "Europe/Warsaw"))
+                # Include both local + UTC so it's unambiguous in shared contexts.
+                paused_until_disp = f"{local_pu} {tz_lbl} (UTC `{paused_until_utc}`)"
+        except Exception:
+            pass
         updated = int(res.get("updated") or 0)
-        scope_msg = ("all your habits" if not ids else f"**{updated}** habit(s)")
+        scope_msg = ("all your habits" if ids is None else f"**{updated}** habit(s)")
         await self.send_response(
             ctx,
-            f"🏖️ Vacation mode enabled for {scope_msg} for **{days_n}** day(s). Next due dates were moved forward; reminders resume after `{paused_until}` (UTC).",
+            f"🏖️ Vacation mode enabled for {scope_msg} for **{days_n}** day(s). Next due dates were moved forward; reminders resume after `{paused_until_disp}`.",
             ephemeral=not is_dm,
         )
 
