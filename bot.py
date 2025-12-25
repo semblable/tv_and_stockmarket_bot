@@ -255,6 +255,19 @@ async def sync_prefix(ctx: commands.Context):
         log.error("Manual sync unexpected error:", exc_info=True)
         await ctx.send(f"❌ Sync failed: {e}")
 
+
+@sync_prefix.error
+async def sync_prefix_error(ctx: commands.Context, error: Exception):
+    # Avoid noisy tracebacks when someone tries to run this in DMs.
+    if isinstance(error, commands.NoPrivateMessage):
+        try:
+            await ctx.send("❌ This command can only be used in a server (not in DMs).")
+        except Exception:
+            pass
+        return
+    # Let other errors fall back to the default handler/logging.
+    raise error
+
 # --- Main Execution ---
 async def main():
     log.info("Async main() function started.")

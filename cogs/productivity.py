@@ -17,6 +17,23 @@ except Exception:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
 
+def _habit_checkins_executor_fn(db_manager, guild_id: int, user_id: int, habit_id: int, since_utc: str, limit: int = 5000):
+    """
+    Returns a zero-arg callable suitable for `loop.run_in_executor(...)` that fetches habit check-ins.
+
+    Important: `DataManager.list_habit_checkins` uses keyword-only args for `since_utc` and `limit`.
+    This helper prevents accidental positional-arg calls (which would raise TypeError at runtime).
+    """
+    return partial(
+        db_manager.list_habit_checkins,
+        int(guild_id),
+        int(user_id),
+        int(habit_id),
+        since_utc=since_utc,
+        limit=int(limit),
+    )
+
+
 def _scope_guild_id_from_ctx(ctx: commands.Context) -> int:
     return ctx.guild.id if ctx.guild else 0
 
@@ -2047,7 +2064,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 since_local = datetime.combine(yday, dtime(0, 0)).replace(tzinfo=htz)
                 since_utc_s = _sqlite_utc_timestamp(since_local.astimezone(timezone.utc) - timedelta(days=2))
                 checkins = await self.bot.loop.run_in_executor(
-                    None, self.db_manager.list_habit_checkins, gid, uid_i, hid, since_utc_s, 5000
+                    None,
+                    _habit_checkins_executor_fn(self.db_manager, gid, uid_i, hid, since_utc_s, 5000),
                 )
                 completed = False
                 for r in checkins or []:
