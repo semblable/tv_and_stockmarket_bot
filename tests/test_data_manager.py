@@ -367,18 +367,28 @@ def test_habit_snooze_excludes_from_due_list(db_manager):
     due0 = db_manager.list_due_habit_reminders("2100-01-01 00:00:00", 50)
     assert any(r.get("id") == habit_id for r in due0)
 
-    # Snooze for "today" at 2099-12-31 noon UTC. This should suppress reminders until the next
-    # local midnight in the habit tz (Europe/Warsaw), returned as snoozed_until (UTC).
+    # Snooze at 2099-12-31 noon UTC. This should skip the current due/overdue instance and
+    # advance next_due_at to the next scheduled occurrence.
     res = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2099-12-31 12:00:00", "week", 1)
     assert res.get("ok") is True
     until_s = res.get("snoozed_until")
     assert isinstance(until_s, str) and len(until_s) >= 19
 
-    # Before snooze expires => not due for reminders
-    due1 = db_manager.list_due_habit_reminders("2099-12-31 22:00:00", 50)
+    # It should have advanced next_due_at and cleared snoozed_until (we are skipping, not time-pausing).
+    h = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h is not None
+    assert (h.get("next_due_at") or "")[:19] == until_s[:19]
+    assert h.get("snoozed_until") is None
+
+    # Before the new next_due_at => not due for reminders
+    from datetime import datetime, timedelta
+
+    until_dt = datetime.strptime(until_s[:19], "%Y-%m-%d %H:%M:%S")
+    before_s = (until_dt - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+    due1 = db_manager.list_due_habit_reminders(before_s, 50)
     assert not any(r.get("id") == habit_id for r in due1)
 
-    # At/after snooze expires, it should be due again (it's still overdue).
+    # At the new next_due_at, it should be due again.
     due2 = db_manager.list_due_habit_reminders(until_s, 50)
     assert any(r.get("id") == habit_id for r in due2)
 
@@ -567,14 +577,15 @@ def test_habit_edit_updates_name_and_clears_snooze(db_manager):
     )
     assert isinstance(habit_id, int)
 
-    # Snooze it to set snoozed_until, then "edit" schedule and clear snooze
-    # Use a "now" timestamp AFTER next_due_at so this is an actual snooze (not a "skip next occurrence").
+    # Snooze it, then "edit" schedule and clear any snooze state.
+    # Snoozing now skips to the next scheduled occurrence (advances next_due_at) and keeps snoozed_until cleared.
     res = db_manager.snooze_habit_for_day(guild_id, user_id, habit_id, "2100-01-02 12:00:00", "week", 1)
     assert res.get("ok") is True
 
     h1 = db_manager.get_habit(guild_id, user_id, habit_id)
     assert h1 is not None
-    assert h1.get("snoozed_until") is not None
+    assert h1.get("snoozed_until") is None
+    assert isinstance(h1.get("next_due_at"), str) and len((h1.get("next_due_at") or "")) >= 19
 
     ok = db_manager.set_habit_schedule_and_due(
         guild_id,

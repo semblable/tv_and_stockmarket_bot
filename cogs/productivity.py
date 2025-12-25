@@ -1761,7 +1761,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
 
     @commands.hybrid_command(
         name="habit_snooze",
-        description="Snooze a habit for 1 day (can be limited to once per week or month).",
+        description="Snooze a habit until its next scheduled instance (skips the current instance).",
     )
     @discord.app_commands.describe(
         habit_id="The numeric id (from /habit_list).",
@@ -1840,11 +1840,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             if dt_until is not None:
                 local_until, tz_lbl = _format_due_display(dt_until, tz_name)
                 until_disp = f"{local_until} {tz_lbl}"
-        await self.send_response(
-            ctx,
-            f"😴 Snoozed habit **#{habit_id}**. Reminders will resume after `{until_disp}`.",
-            ephemeral=not is_dm,
-        )
+        await self.send_response(ctx, f"😴 Snoozed habit **#{habit_id}**. Next due at `{until_disp}`.", ephemeral=not is_dm)
 
     # -------------------------
     # Habit catch-up (DM)

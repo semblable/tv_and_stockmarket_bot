@@ -2315,9 +2315,12 @@ class ProductivityMixin:
         days: int = 1,
     ) -> Dict[str, Any]:
         """
-        Snooze a habit for the rest of today (and optionally N days) in the habit's timezone.
-        Snooze will NOT extend past the habit's upcoming `next_due_at` (if it is in the future).
-        Snoozing is unlimited; we track snoozes for stats.
+        Snooze a habit by skipping the current due/overdue instance and rescheduling to the next
+        scheduled occurrence (i.e., advance `next_due_at`).
+
+        Historically this snoozed "until next local midnight" for overdue habits, which could
+        cause a burst of reminders at midnight for habits that remained overdue. We now always
+        advance `next_due_at` to the next scheduled occurrence.
 
         Returns: { ok: bool, error?: str, snoozed_until?: str, next_allowed_at?: str, effective_period?: str }
         """
@@ -2325,96 +2328,61 @@ class ProductivityMixin:
         now_dt = self._parse_sqlite_utc_timestamp(now_utc) if now_utc else datetime.datetime.now(datetime.timezone.utc)
         if not now_dt:
             now_dt = datetime.datetime.now(datetime.timezone.utc)
-        days = max(1, min(30, int(days)))
         now_s = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         habit = self.get_habit(guild_id, user_id, habit_id)
         if not habit:
             return {"ok": False, "error": "not_found", "effective_period": period_n}
 
-        # If the habit isn't due yet (next_due_at is in the future), snooze the *next occurrence*
-        # by advancing next_due_at to the subsequent scheduled occurrence.
+        # Always skip the next scheduled occurrence:
+        # - if the habit isn't due yet, skip that upcoming occurrence
+        # - if the habit is due/overdue, skip the current due instance and move to the next occurrence after "now"
         next_due_dt = self._parse_sqlite_utc_timestamp(habit.get("next_due_at"))
         if next_due_dt and next_due_dt > now_dt:
-            new_next_due_dt = self._compute_next_due_at_utc(habit, next_due_dt + datetime.timedelta(seconds=1))
-            if new_next_due_dt:
-                new_next_due_s = new_next_due_dt.strftime("%Y-%m-%d %H:%M:%S")
+            base_dt = next_due_dt + datetime.timedelta(seconds=1)
+        else:
+            base_dt = now_dt + datetime.timedelta(seconds=1)
 
-                ok = bool(
-                    self._execute_query(
-                        """
-                        UPDATE habits
-                        SET next_due_at = :next_due_at,
-                            snoozed_until = NULL,
-                            last_snooze_at = :now,
-                            last_snooze_period = :period,
-                            remind_level = 0,
-                            next_remind_at = NULL
-                        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
-                        """,
-                        {
-                            "next_due_at": new_next_due_s,
-                            "now": now_s,
-                            "period": period_n,
-                            "guild_id": str(int(guild_id)),
-                            "user_id": str(int(user_id)),
-                            "id": int(habit_id),
-                        },
-                        commit=True,
-                    )
-                )
-                if ok:
-                    self._record_habit_snooze_event(
-                        habit_id=int(habit_id),
-                        guild_id=int(guild_id),
-                        user_id=int(user_id),
-                        snoozed_at_utc=now_s,
-                        snoozed_until_utc=new_next_due_s,
-                        days=None,
-                        period=period_n,
-                        mode="skip_next",
-                    )
-                # Return the next due timestamp as the effective "resume after" time.
-                return {"ok": ok, "snoozed_until": new_next_due_s, "effective_period": period_n}
+        new_next_due_dt = self._compute_next_due_at_utc(habit, base_dt)
+        if not new_next_due_dt:
+            return {"ok": False, "error": "schedule_error", "effective_period": period_n}
+        new_next_due_s = new_next_due_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        tz = self._tzinfo_from_name(habit.get("tz_name"))
-        now_local = now_dt.astimezone(tz)
-        target_date = now_local.date() + datetime.timedelta(days=days)
-        snoozed_until_local = datetime.datetime.combine(target_date, datetime.time(0, 0), tzinfo=tz)
-        snoozed_until_dt = snoozed_until_local.astimezone(datetime.timezone.utc)
-
-        snoozed_until = snoozed_until_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        query = """
-        UPDATE habits
-        SET snoozed_until = :snoozed_until,
-            last_snooze_at = :now,
-            last_snooze_period = :period,
-            remind_level = 0,
-            next_remind_at = :snoozed_until
-        WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
-        """
-        params = {
-            "snoozed_until": snoozed_until,
-            "now": now_s,
-            "period": period_n,
-            "guild_id": str(int(guild_id)),
-            "user_id": str(int(user_id)),
-            "id": int(habit_id),
-        }
-        ok = bool(self._execute_query(query, params, commit=True))
+        ok = bool(
+            self._execute_query(
+                """
+                UPDATE habits
+                SET next_due_at = :next_due_at,
+                    snoozed_until = NULL,
+                    last_snooze_at = :now,
+                    last_snooze_period = :period,
+                    remind_level = 0,
+                    next_remind_at = NULL
+                WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
+                """,
+                {
+                    "next_due_at": new_next_due_s,
+                    "now": now_s,
+                    "period": period_n,
+                    "guild_id": str(int(guild_id)),
+                    "user_id": str(int(user_id)),
+                    "id": int(habit_id),
+                },
+                commit=True,
+            )
+        )
         if ok:
             self._record_habit_snooze_event(
                 habit_id=int(habit_id),
                 guild_id=int(guild_id),
                 user_id=int(user_id),
                 snoozed_at_utc=now_s,
-                snoozed_until_utc=snoozed_until,
-                days=int(days),
+                snoozed_until_utc=new_next_due_s,
+                days=None,
                 period=period_n,
-                mode="snooze",
+                mode="skip_next",
             )
-        return {"ok": ok, "snoozed_until": snoozed_until, "effective_period": period_n}
+        return {"ok": ok, "snoozed_until": new_next_due_s, "effective_period": period_n}
 
     def snooze_habit_for_day_any_scope(
         self,
@@ -2428,79 +2396,46 @@ class ProductivityMixin:
         now_dt = self._parse_sqlite_utc_timestamp(now_utc) if now_utc else datetime.datetime.now(datetime.timezone.utc)
         if not now_dt:
             now_dt = datetime.datetime.now(datetime.timezone.utc)
-        days = max(1, min(30, int(days)))
         now_s = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         habit = self.get_habit_any_scope(user_id, habit_id)
         if not habit:
             return {"ok": False, "error": "not_found", "effective_period": period_n}
 
-        # If the habit isn't due yet (next_due_at is in the future), snooze the *next occurrence*
-        # by advancing next_due_at to the subsequent scheduled occurrence.
+        # Always skip the next scheduled occurrence (see scoped version above for details).
         next_due_dt = self._parse_sqlite_utc_timestamp(habit.get("next_due_at"))
         if next_due_dt and next_due_dt > now_dt:
-            new_next_due_dt = self._compute_next_due_at_utc(habit, next_due_dt + datetime.timedelta(seconds=1))
-            if new_next_due_dt:
-                new_next_due_s = new_next_due_dt.strftime("%Y-%m-%d %H:%M:%S")
+            base_dt = next_due_dt + datetime.timedelta(seconds=1)
+        else:
+            base_dt = now_dt + datetime.timedelta(seconds=1)
 
-                ok = bool(
-                    self._execute_query(
-                        """
-                        UPDATE habits
-                        SET next_due_at = :next_due_at,
-                            snoozed_until = NULL,
-                            last_snooze_at = :now,
-                            last_snooze_period = :period,
-                            remind_level = 0,
-                            next_remind_at = NULL
-                        WHERE user_id = :user_id AND id = :id
-                        """,
-                        {
-                            "next_due_at": new_next_due_s,
-                            "now": now_s,
-                            "period": period_n,
-                            "user_id": str(int(user_id)),
-                            "id": int(habit_id),
-                        },
-                        commit=True,
-                    )
-                )
-                if ok:
-                    try:
-                        gid0 = int(habit.get("guild_id") or 0)
-                    except Exception:
-                        gid0 = 0
-                    self._record_habit_snooze_event(
-                        habit_id=int(habit_id),
-                        guild_id=int(gid0),
-                        user_id=int(user_id),
-                        snoozed_at_utc=now_s,
-                        snoozed_until_utc=new_next_due_s,
-                        days=None,
-                        period=period_n,
-                        mode="skip_next",
-                    )
-                return {"ok": ok, "snoozed_until": new_next_due_s, "effective_period": period_n}
+        new_next_due_dt = self._compute_next_due_at_utc(habit, base_dt)
+        if not new_next_due_dt:
+            return {"ok": False, "error": "schedule_error", "effective_period": period_n}
+        new_next_due_s = new_next_due_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        tz = self._tzinfo_from_name(habit.get("tz_name"))
-        now_local = now_dt.astimezone(tz)
-        target_date = now_local.date() + datetime.timedelta(days=days)
-        snoozed_until_local = datetime.datetime.combine(target_date, datetime.time(0, 0), tzinfo=tz)
-        snoozed_until_dt = snoozed_until_local.astimezone(datetime.timezone.utc)
-
-        snoozed_until = snoozed_until_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        query = """
-        UPDATE habits
-        SET snoozed_until = :snoozed_until,
-            last_snooze_at = :now,
-            last_snooze_period = :period,
-            remind_level = 0,
-            next_remind_at = :snoozed_until
-        WHERE user_id = :user_id AND id = :id
-        """
-        params = {"snoozed_until": snoozed_until, "now": now_s, "period": period_n, "user_id": str(int(user_id)), "id": int(habit_id)}
-        ok = bool(self._execute_query(query, params, commit=True))
+        ok = bool(
+            self._execute_query(
+                """
+                UPDATE habits
+                SET next_due_at = :next_due_at,
+                    snoozed_until = NULL,
+                    last_snooze_at = :now,
+                    last_snooze_period = :period,
+                    remind_level = 0,
+                    next_remind_at = NULL
+                WHERE user_id = :user_id AND id = :id
+                """,
+                {
+                    "next_due_at": new_next_due_s,
+                    "now": now_s,
+                    "period": period_n,
+                    "user_id": str(int(user_id)),
+                    "id": int(habit_id),
+                },
+                commit=True,
+            )
+        )
         if ok:
             try:
                 gid0 = int(habit.get("guild_id") or 0)
@@ -2511,12 +2446,12 @@ class ProductivityMixin:
                 guild_id=int(gid0),
                 user_id=int(user_id),
                 snoozed_at_utc=now_s,
-                snoozed_until_utc=snoozed_until,
-                days=int(days),
+                snoozed_until_utc=new_next_due_s,
+                days=None,
                 period=period_n,
-                mode="snooze",
+                mode="skip_next",
             )
-        return {"ok": ok, "snoozed_until": snoozed_until, "effective_period": period_n}
+        return {"ok": ok, "snoozed_until": new_next_due_s, "effective_period": period_n}
 
     def set_habit_reminder_profile(self, guild_id: int, user_id: int, habit_id: int, profile: str) -> bool:
         """
