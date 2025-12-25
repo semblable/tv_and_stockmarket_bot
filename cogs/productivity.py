@@ -1867,6 +1867,8 @@ class ProductivityCog(commands.Cog, name="Productivity"):
         days="How many days to pause (1-365).",
         habit_ids="Optional: comma-separated habit ids (e.g. 1,2,3). If omitted, pauses all your habits.",
     )
+    @discord.app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    @discord.app_commands.allowed_installs(guilds=True, users=True)
     async def vacation(self, ctx: commands.Context, days: int, habit_ids: str = ""):
         is_dm = ctx.guild is None
         await self._defer_if_interaction(ctx, ephemeral=not is_dm)
@@ -1898,7 +1900,9 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             ids = sorted(set(parsed))
 
         now_s = _sqlite_utc_timestamp(_utc_now())
-        if is_dm and hasattr(self.db_manager, "set_habit_vacation_any_scope"):
+        # Vacation is a personal setting: by default pause ALL of the user's habits, regardless of guild scope.
+        # This avoids confusing "no matching habits" when habits were created in DMs or another server.
+        if hasattr(self.db_manager, "set_habit_vacation_any_scope"):
             res = await self.bot.loop.run_in_executor(
                 None,
                 lambda: self.db_manager.set_habit_vacation_any_scope(ctx.author.id, days=days_n, habit_ids=ids, now_utc=now_s),
@@ -1911,7 +1915,18 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             )
 
         if not isinstance(res, dict) or not res.get("ok"):
-            await self.send_response(ctx, "Could not start vacation mode (no matching habits?).", ephemeral=not is_dm)
+            if ids is not None and len(ids) > 0:
+                await self.send_response(
+                    ctx,
+                    "Could not start vacation mode (no matching habits for those `habit_ids`). Use `/habit_list` to find your habit IDs, or omit `habit_ids` to pause all your habits.",
+                    ephemeral=not is_dm,
+                )
+            else:
+                await self.send_response(
+                    ctx,
+                    "Could not start vacation mode (no habits found). Create a habit first with `/habit_create`, then try again.",
+                    ephemeral=not is_dm,
+                )
             return
 
         paused_until_utc = str(res.get("paused_until") or "").strip()
