@@ -20,6 +20,28 @@ import random # For placeholder chart data
 log = logger.get_logger(__name__)
 log.info("Bot script started. Logging configured via logger.py.")
 
+def _enable_dm_for_app_commands() -> None:
+    """
+    Ensure application (slash) commands are allowed in DMs/private channels and for user installs.
+
+    Discord's newer command context/installation rules can cause otherwise-correct slash commands
+    (including hybrid commands) to not appear in DMs unless contexts/installs are explicitly allowed.
+    """
+    try:
+        for cmd in bot.tree.walk_commands():
+            try:
+                # Allow usage in guilds + DMs + private channels.
+                if getattr(cmd, "allowed_contexts", None) is None:
+                    app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(cmd)
+                # Allow both guild installs and user installs (needed for DM availability in many setups).
+                if getattr(cmd, "allowed_installs", None) is None:
+                    app_commands.allowed_installs(guilds=True, users=True)(cmd)
+            except Exception:
+                # Never fail startup/sync due to a single command.
+                continue
+    except Exception:
+        return
+
 # Check if the token was loaded correctly
 if config.DISCORD_BOT_TOKEN is None:
     log.error("CRITICAL: DISCORD_BOT_TOKEN is not set in config.py. The bot cannot start.")
@@ -142,6 +164,9 @@ async def on_ready():
     # Sync commands
     commands_synced = False
     try:
+        # Make sure commands are DM-capable before syncing them to Discord.
+        _enable_dm_for_app_commands()
+
         # Guild sync is the only way to make new slash commands appear immediately.
         # The old code synced only to bot.guilds[0], which is easy to miss if you test in another server.
         guilds = list(bot.guilds or [])
@@ -214,6 +239,7 @@ async def sync_prefix(ctx: commands.Context):
     This works as a PREFIX command: !sync
     """
     try:
+        _enable_dm_for_app_commands()
         guild_id = ctx.guild.id
         bot.tree.copy_global_to(guild=discord.Object(id=guild_id))
         synced = await bot.tree.sync(guild=discord.Object(id=guild_id))
