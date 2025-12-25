@@ -551,6 +551,8 @@ def test_habit_snooze_migration_from_old_schema(tmp_path, monkeypatch):
         cols = mgr._execute_query("PRAGMA table_info(habits);", fetch_all=True)
         col_names = [c.get("name") for c in cols if isinstance(c, dict)]
         assert "snoozed_until" in col_names
+        assert "paused_from" in col_names
+        assert "paused_until" in col_names
         assert "last_snooze_at" in col_names
         assert "last_snooze_period" in col_names
 
@@ -560,6 +562,82 @@ def test_habit_snooze_migration_from_old_schema(tmp_path, monkeypatch):
         assert (row.get("last_snooze_period") or "").lower() == "week"
     finally:
         mgr.close()
+
+
+def test_habit_vacation_advances_next_due_and_suppresses_due_list(db_manager):
+    guild_id = 0
+    user_id = 6060
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Vacation habit",
+        [0, 1, 2, 3, 4, 5, 6],
+        "18:00",
+        "UTC",
+        True,
+        "2000-01-01 00:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    res = db_manager.set_habit_vacation(guild_id, user_id, days=3, now_utc="2100-01-01 10:00:00")
+    assert isinstance(res, dict) and res.get("ok") is True
+    assert (res.get("paused_until") or "")[:19] == "2100-01-04 10:00:00"
+
+    h = db_manager.get_habit(guild_id, user_id, habit_id)
+    assert h is not None
+    assert (h.get("paused_until") or "")[:19] == "2100-01-04 10:00:00"
+    assert (h.get("next_due_at") or "")[:19] == "2100-01-04 18:00:00"
+
+    due_during = db_manager.list_due_habit_reminders("2100-01-02 12:00:00", 50)
+    assert not any(r.get("id") == habit_id for r in due_during)
+
+    due_after = db_manager.list_due_habit_reminders("2100-01-04 18:00:00", 50)
+    assert any(r.get("id") == habit_id for r in due_after)
+
+
+def test_habit_stats_exclude_paused_days_and_checkins(db_manager):
+    guild_id = 0
+    user_id = 6061
+    habit_id = db_manager.create_habit(
+        guild_id,
+        user_id,
+        "Vacation stats",
+        [0, 1, 2, 3, 4, 5, 6],
+        "18:00",
+        "UTC",
+        True,
+        "2100-01-01 18:00:00",
+    )
+    assert isinstance(habit_id, int)
+
+    # Pause Jan 2 (00:00) .. Jan 4 (00:00) UTC (2 days).
+    res = db_manager.set_habit_vacation(guild_id, user_id, days=2, now_utc="2100-01-02 00:00:00")
+    assert isinstance(res, dict) and res.get("ok") is True
+
+    # One check-in on Jan 1 (counts), one check-in on Jan 2 (should be ignored by stats since paused day).
+    db_manager._execute_query(
+        """
+        INSERT INTO habit_checkins (habit_id, guild_id, user_id, checked_in_at, note)
+        VALUES (:hid, :gid, :uid, :ts, 't1')
+        """,
+        {"hid": int(habit_id), "gid": str(guild_id), "uid": str(user_id), "ts": "2100-01-01 18:00:00"},
+        commit=True,
+    )
+    db_manager._execute_query(
+        """
+        INSERT INTO habit_checkins (habit_id, guild_id, user_id, checked_in_at, note)
+        VALUES (:hid, :gid, :uid, :ts, 't2')
+        """,
+        {"hid": int(habit_id), "gid": str(guild_id), "uid": str(user_id), "ts": "2100-01-02 18:00:00"},
+        commit=True,
+    )
+
+    stats = db_manager.get_habit_stats(guild_id, user_id, habit_id, days=4, now_utc="2100-01-04 12:00:00")
+    assert isinstance(stats, dict)
+    # Range local dates: Jan 1..Jan 4 (4 scheduled), but Jan 2-3 are paused => scheduled_days=2.
+    assert int(stats.get("scheduled_days") or 0) == 2
+    # Only Jan 1 counts as completed (Jan 2 is paused).
+    assert int(stats.get("completed_days") or 0) == 1
 
 
 def test_habit_edit_updates_name_and_clears_snooze(db_manager):

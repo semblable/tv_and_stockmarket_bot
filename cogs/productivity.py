@@ -1842,6 +1842,62 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                 until_disp = f"{local_until} {tz_lbl}"
         await self.send_response(ctx, f"😴 Snoozed habit **#{habit_id}**. Next due at `{until_disp}`.", ephemeral=not is_dm)
 
+    @commands.hybrid_command(
+        name="vacation",
+        description="Pause all habits (default) or selected habits for a number of days (vacation mode).",
+    )
+    @discord.app_commands.describe(
+        days="How many days to pause (1-365).",
+        habit_ids="Optional: comma-separated habit ids (e.g. 1,2,3). If omitted, pauses all your habits.",
+    )
+    async def vacation(self, ctx: commands.Context, days: int, habit_ids: str = ""):
+        is_dm = ctx.guild is None
+        await self._defer_if_interaction(ctx, ephemeral=not is_dm)
+        if not self.db_manager:
+            await self.send_response(ctx, "Database is not available right now. Please try again later.", ephemeral=not is_dm)
+            return
+
+        days_n = max(1, min(365, int(days)))
+        ids: Optional[list[int]] = None
+        if isinstance(habit_ids, str) and habit_ids.strip():
+            parsed: list[int] = []
+            for part in habit_ids.replace(";", ",").replace(" ", ",").split(","):
+                p = part.strip()
+                if not p:
+                    continue
+                try:
+                    parsed.append(int(p))
+                except Exception:
+                    continue
+            parsed = [x for x in parsed if x > 0]
+            ids = sorted(set(parsed)) if parsed else []
+
+        now_s = _sqlite_utc_timestamp(_utc_now())
+        if is_dm and hasattr(self.db_manager, "set_habit_vacation_any_scope"):
+            res = await self.bot.loop.run_in_executor(
+                None,
+                lambda: self.db_manager.set_habit_vacation_any_scope(ctx.author.id, days=days_n, habit_ids=ids, now_utc=now_s),
+            )
+        else:
+            guild_id = _scope_guild_id_from_ctx(ctx)
+            res = await self.bot.loop.run_in_executor(
+                None,
+                lambda: self.db_manager.set_habit_vacation(guild_id, ctx.author.id, days=days_n, habit_ids=ids, now_utc=now_s),
+            )
+
+        if not isinstance(res, dict) or not res.get("ok"):
+            await self.send_response(ctx, "Could not start vacation mode (no matching habits?).", ephemeral=not is_dm)
+            return
+
+        paused_until = str(res.get("paused_until") or "n/a")
+        updated = int(res.get("updated") or 0)
+        scope_msg = ("all your habits" if not ids else f"**{updated}** habit(s)")
+        await self.send_response(
+            ctx,
+            f"🏖️ Vacation mode enabled for {scope_msg} for **{days_n}** day(s). Next due dates were moved forward; reminders resume after `{paused_until}` (UTC).",
+            ephemeral=not is_dm,
+        )
+
     # -------------------------
     # Habit catch-up (DM)
     # -------------------------
@@ -1948,6 +2004,20 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                     days_set = {0, 1, 2, 3, 4}
                 if yday.weekday() not in days_set:
                     continue
+
+                # Vacation/pause: if the habit was paused during yesterday (local), don't include it in catch-up.
+                try:
+                    pf = _parse_sqlite_utc_timestamp(h.get("paused_from") if isinstance(h, dict) else None)
+                    pu = _parse_sqlite_utc_timestamp(h.get("paused_until") if isinstance(h, dict) else None)
+                except Exception:
+                    pf = None
+                    pu = None
+                if pf is not None and pu is not None and pu > pf:
+                    pf_local = pf.astimezone(htz)
+                    pu_local_excl = pu.astimezone(htz)
+                    end_local = (pu_local_excl - timedelta(seconds=1)).date()
+                    if pf_local.date() <= yday <= end_local:
+                        continue
 
                 # Check if there is any check-in on that local date.
                 since_local = datetime.combine(yday, dtime(0, 0)).replace(tzinfo=htz)

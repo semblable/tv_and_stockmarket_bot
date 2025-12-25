@@ -100,6 +100,72 @@ class ProductivityMixin:
         except Exception:
             return
 
+    def _record_habit_pause_event(
+        self,
+        *,
+        habit_id: int,
+        guild_id: int,
+        user_id: int,
+        paused_from_utc: str,
+        paused_until_utc: str,
+        mode: str = "vacation",
+    ) -> None:
+        """
+        Best-effort insert into `habit_pauses` for stats/history.
+        Must never raise.
+        """
+        try:
+            if not paused_from_utc or not paused_until_utc:
+                return
+            self._execute_query(
+                """
+                INSERT INTO habit_pauses (habit_id, guild_id, user_id, paused_from, paused_until, mode)
+                VALUES (:habit_id, :guild_id, :user_id, :paused_from, :paused_until, :mode)
+                """,
+                {
+                    "habit_id": int(habit_id),
+                    "guild_id": str(int(guild_id)),
+                    "user_id": str(int(user_id)),
+                    "paused_from": str(paused_from_utc)[:19],
+                    "paused_until": str(paused_until_utc)[:19],
+                    "mode": str(mode or "vacation").strip().lower(),
+                },
+                commit=True,
+            )
+        except Exception:
+            return
+
+    def _list_habit_pause_intervals(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        habit_id: int,
+        since_utc: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Returns pause intervals (UTC timestamps) for a habit since `since_utc` (best-effort).
+        """
+        try:
+            q = """
+            SELECT paused_from, paused_until, mode
+            FROM habit_pauses
+            WHERE habit_id = :habit_id AND guild_id = :guild_id AND user_id = :user_id
+            """
+            params: Dict[str, Any] = {
+                "habit_id": int(habit_id),
+                "guild_id": str(int(guild_id)),
+                "user_id": str(int(user_id)),
+            }
+            if isinstance(since_utc, str) and since_utc.strip():
+                q += " AND paused_until >= :since"
+                params["since"] = str(since_utc)[:19]
+            q += " ORDER BY paused_from ASC"
+            rows = self._execute_query(q, params, fetch_all=True)
+            return rows if isinstance(rows, list) else []
+        except Exception:
+            return []
+
     def _parse_sqlite_utc_timestamp(self, ts: Optional[str]) -> Optional[datetime.datetime]:
         if not isinstance(ts, str) or not ts.strip():
             return None
@@ -225,6 +291,11 @@ class ProductivityMixin:
         # Respect active snooze (don't move due pointers while snoozed).
         snoozed_until_dt = self._parse_sqlite_utc_timestamp(habit.get("snoozed_until"))
         if snoozed_until_dt and snoozed_until_dt > now_dt_utc:
+            return None
+
+        # Respect active vacation/pause (don't move due pointers while paused).
+        paused_until_dt = self._parse_sqlite_utc_timestamp(habit.get("paused_until"))
+        if paused_until_dt and paused_until_dt > now_dt_utc:
             return None
 
         next_due_dt = self._parse_sqlite_utc_timestamp(habit.get("next_due_at"))
@@ -1119,7 +1190,7 @@ class ProductivityMixin:
         query = """
         SELECT id, guild_id, name, days_of_week, due_time_local, tz_name, due_time_utc,
                remind_enabled, remind_profile,
-               snoozed_until, last_snooze_at, last_snooze_period,
+               snoozed_until, paused_from, paused_until, last_snooze_at, last_snooze_period,
                remind_level, next_due_at, next_remind_at, last_checkin_at, created_at,
                COALESCE(is_archived, 0) AS is_archived, archived_at
         FROM habits
@@ -1317,6 +1388,62 @@ class ProductivityMixin:
         checkins = self.list_habit_checkins(guild_id, user_id, habit_id, since_utc=since_utc, limit=20000)
         completed_dates, per_day_counts, per_weekday_counts, total_checkins, last_dt_utc = self._bucket_checkins_by_local_date(checkins, tz)
 
+        # Vacation/paused days: exclude scheduled instances AND check-ins from stats/streak/rate.
+        paused_dates: Set[datetime.date] = set()
+        try:
+            pauses = self._list_habit_pause_intervals(guild_id=int(guild_id), user_id=int(user_id), habit_id=int(habit_id), since_utc=since_utc)
+            for p in pauses or []:
+                if not isinstance(p, dict):
+                    continue
+                pf = self._parse_sqlite_utc_timestamp(p.get("paused_from") if isinstance(p.get("paused_from"), str) else None)
+                pu = self._parse_sqlite_utc_timestamp(p.get("paused_until") if isinstance(p.get("paused_until"), str) else None)
+                if not pf or not pu:
+                    continue
+                if pu <= pf:
+                    continue
+                pf_local = pf.astimezone(tz)
+                # Treat any overlap with a local date as "paused" for that whole local day.
+                pu_local_excl = pu.astimezone(tz)
+                end_local_date = (pu_local_excl - datetime.timedelta(seconds=1)).date()
+                d0 = pf_local.date()
+                # Safety cap (streak window size); prevents pathological loops.
+                guard_days = 0
+                while d0 <= end_local_date and guard_days < (streak_max_days + 7):
+                    paused_dates.add(d0)
+                    d0 = d0 + datetime.timedelta(days=1)
+                    guard_days += 1
+        except Exception:
+            paused_dates = set()
+
+        if paused_dates:
+            # Remove paused-day checkins from day buckets.
+            per_day_counts = {d: int(c) for d, c in (per_day_counts or {}).items() if d not in paused_dates}
+            completed_dates = {d for d in (completed_dates or set()) if d not in paused_dates}
+            # Recompute weekday counts and totals based on filtered buckets.
+            per_weekday_counts = {i: 0 for i in range(7)}
+            for d, c in per_day_counts.items():
+                try:
+                    wd = int(d.weekday())
+                except Exception:
+                    wd = 0
+                if 0 <= wd <= 6:
+                    per_weekday_counts[wd] = int(per_weekday_counts.get(wd, 0)) + int(c)
+            total_checkins = int(sum(int(c) for c in per_day_counts.values()))
+            # Best-effort "last check-in" excluding paused days.
+            last_dt_eff: Optional[datetime.datetime] = None
+            for r in checkins or []:
+                if not isinstance(r, dict):
+                    continue
+                ts = r.get("checked_in_at")
+                dt_utc = self._parse_sqlite_utc_timestamp(ts if isinstance(ts, str) else None)
+                if not dt_utc:
+                    continue
+                if dt_utc.astimezone(tz).date() in paused_dates:
+                    continue
+                if last_dt_eff is None or dt_utc > last_dt_eff:
+                    last_dt_eff = dt_utc
+            last_dt_utc = last_dt_eff
+
         # Daily series (last N days)
         daily_labels: List[str] = []
         daily_counts: List[int] = []
@@ -1330,7 +1457,7 @@ class ProductivityMixin:
             cnt = int(per_day_counts.get(d, 0))
             daily_counts.append(cnt)
             # Do not count scheduled/completed days before the habit existed.
-            if d >= created_local_date and d.weekday() in sched_set:
+            if d >= created_local_date and d.weekday() in sched_set and d not in paused_dates:
                 scheduled_days += 1
                 if cnt > 0:
                     completed_days += 1
@@ -1344,7 +1471,7 @@ class ProductivityMixin:
         run = 0
         d = earliest_local_for_streak
         while d <= range_end_local:
-            if d.weekday() in sched_set:
+            if d.weekday() in sched_set and d not in paused_dates:
                 if d in completed_dates:
                     run += 1
                     if run > best:
@@ -1358,13 +1485,13 @@ class ProductivityMixin:
         d = range_end_local
         # Find the last scheduled day <= today
         guard = 0
-        while d.weekday() not in sched_set and guard < 14:
+        while (d.weekday() not in sched_set or d in paused_dates) and guard < 60:
             d = d - datetime.timedelta(days=1)
             guard += 1
         # Now count consecutive completions on scheduled days
         guard = 0
         while d >= earliest_local_for_streak and guard < streak_max_days:
-            if d.weekday() in sched_set:
+            if d.weekday() in sched_set and d not in paused_dates:
                 if d in completed_dates:
                     cur += 1
                 else:
@@ -1715,7 +1842,7 @@ class ProductivityMixin:
         query = """
         SELECT id, name, days_of_week, due_time_local, tz_name, due_time_utc,
                remind_enabled, remind_profile,
-               snoozed_until, last_snooze_at, last_snooze_period,
+               snoozed_until, paused_from, paused_until, last_snooze_at, last_snooze_period,
                remind_level, next_due_at, next_remind_at, last_checkin_at, created_at,
                COALESCE(is_archived, 0) AS is_archived, archived_at
         FROM habits
@@ -1731,7 +1858,7 @@ class ProductivityMixin:
         query = """
         SELECT id, name, days_of_week, due_time_local, tz_name, due_time_utc,
                remind_enabled, remind_profile,
-               snoozed_until, last_snooze_at, last_snooze_period,
+               snoozed_until, paused_from, paused_until, last_snooze_at, last_snooze_period,
                remind_level, next_due_at, next_remind_at, last_checkin_at, created_at,
                COALESCE(is_archived, 0) AS is_archived, archived_at
         FROM habits
@@ -1750,7 +1877,7 @@ class ProductivityMixin:
         query = """
         SELECT id, guild_id, name, days_of_week, due_time_local, tz_name, due_time_utc,
                remind_enabled, remind_profile,
-               snoozed_until, last_snooze_at, last_snooze_period,
+               snoozed_until, paused_from, paused_until, last_snooze_at, last_snooze_period,
                remind_level, next_due_at, next_remind_at, last_checkin_at, created_at,
                COALESCE(is_archived, 0) AS is_archived, archived_at
         FROM habits
@@ -2244,8 +2371,19 @@ class ProductivityMixin:
     def list_due_habit_reminders(self, now_utc: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
         limit = max(1, min(500, int(limit)))
         now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Best-effort cleanup: once a pause window has ended, clear the marker fields so the habit is "back to normal".
+        try:
+            self._execute_query(
+                "UPDATE habits SET paused_from = NULL, paused_until = NULL WHERE paused_until IS NOT NULL AND paused_until <= :now;",
+                {"now": now_utc},
+                commit=True,
+            )
+        except Exception:
+            pass
+
         query = """
-        SELECT id, guild_id, user_id, name, remind_profile, snoozed_until, last_snooze_at, last_snooze_period,
+        SELECT id, guild_id, user_id, name, remind_profile, snoozed_until, paused_until, last_snooze_at, last_snooze_period,
                remind_level, next_due_at, next_remind_at
         FROM habits
         WHERE remind_enabled = 1
@@ -2253,6 +2391,7 @@ class ProductivityMixin:
           AND next_due_at IS NOT NULL
           AND next_due_at <= :now
           AND (snoozed_until IS NULL OR snoozed_until <= :now)
+          AND (paused_until IS NULL OR paused_until <= :now)
           AND (next_remind_at IS NULL OR next_remind_at <= :now)
         ORDER BY COALESCE(next_remind_at, next_due_at) ASC
         LIMIT :limit
@@ -2304,6 +2443,202 @@ class ProductivityMixin:
             "id": int(habit_id),
         }
         return bool(self._execute_query(query, params, commit=True))
+
+    def set_habit_vacation(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        days: int = 7,
+        habit_ids: Optional[List[int]] = None,
+        now_utc: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Pause (vacation) all habits by default, or a selected list, for N days.
+
+        Effects:
+        - Stores paused_from/paused_until on each habit
+        - Advances next_due_at to the next scheduled occurrence strictly after paused_until
+          (so we skip all instances during vacation and avoid post-vacation spam)
+        - Clears reminder state (snoozed_until/next_remind_at/remind_level)
+        - Records a history row in habit_pauses (best-effort) so stats can exclude paused days.
+        """
+        days_n = max(1, min(365, int(days)))
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if isinstance(now_utc, str) and now_utc.strip() else None
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=datetime.timezone.utc)
+        now_dt = now_dt.astimezone(datetime.timezone.utc)
+
+        paused_from_s = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        paused_until_dt = now_dt + datetime.timedelta(days=days_n)
+        paused_until_s = paused_until_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        target_ids: Optional[Set[int]] = None
+        if isinstance(habit_ids, list):
+            try:
+                target_ids = {int(x) for x in habit_ids if int(x) > 0}
+            except Exception:
+                target_ids = None
+
+        habits = self.list_habits(int(guild_id), int(user_id), limit=2000)
+        updated = 0
+        updated_ids: List[int] = []
+        for h in habits or []:
+            if not isinstance(h, dict):
+                continue
+            try:
+                hid = int(h.get("id") or 0)
+            except Exception:
+                continue
+            if hid <= 0:
+                continue
+            if target_ids is not None and hid not in target_ids:
+                continue
+
+            new_due_dt = self._compute_next_due_at_utc(h, paused_until_dt + datetime.timedelta(seconds=1))
+            if not new_due_dt:
+                continue
+            new_due_s = new_due_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+            ok = bool(
+                self._execute_query(
+                    """
+                    UPDATE habits
+                    SET paused_from = :paused_from,
+                        paused_until = :paused_until,
+                        next_due_at = :next_due_at,
+                        snoozed_until = NULL,
+                        remind_level = 0,
+                        next_remind_at = NULL
+                    WHERE guild_id = :guild_id AND user_id = :user_id AND id = :id
+                      AND COALESCE(is_archived, 0) = 0
+                    """,
+                    {
+                        "paused_from": paused_from_s,
+                        "paused_until": paused_until_s,
+                        "next_due_at": new_due_s,
+                        "guild_id": str(int(guild_id)),
+                        "user_id": str(int(user_id)),
+                        "id": int(hid),
+                    },
+                    commit=True,
+                )
+            )
+            if ok:
+                updated += 1
+                updated_ids.append(hid)
+                self._record_habit_pause_event(
+                    habit_id=int(hid),
+                    guild_id=int(guild_id),
+                    user_id=int(user_id),
+                    paused_from_utc=paused_from_s,
+                    paused_until_utc=paused_until_s,
+                    mode="vacation",
+                )
+
+        return {
+            "ok": updated > 0,
+            "updated": int(updated),
+            "paused_from": paused_from_s,
+            "paused_until": paused_until_s,
+            "habit_ids": updated_ids,
+        }
+
+    def set_habit_vacation_any_scope(
+        self,
+        user_id: int,
+        *,
+        days: int = 7,
+        habit_ids: Optional[List[int]] = None,
+        now_utc: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        days_n = max(1, min(365, int(days)))
+        now_dt = self._parse_sqlite_utc_timestamp(now_utc) if isinstance(now_utc, str) and now_utc.strip() else None
+        if not now_dt:
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=datetime.timezone.utc)
+        now_dt = now_dt.astimezone(datetime.timezone.utc)
+
+        paused_from_s = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+        paused_until_dt = now_dt + datetime.timedelta(days=days_n)
+        paused_until_s = paused_until_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        target_ids: Optional[Set[int]] = None
+        if isinstance(habit_ids, list):
+            try:
+                target_ids = {int(x) for x in habit_ids if int(x) > 0}
+            except Exception:
+                target_ids = None
+
+        habits = self.list_habits_any_scope(int(user_id), limit=2000)
+        updated = 0
+        updated_ids: List[int] = []
+        for h in habits or []:
+            if not isinstance(h, dict):
+                continue
+            try:
+                hid = int(h.get("id") or 0)
+            except Exception:
+                continue
+            if hid <= 0:
+                continue
+            if target_ids is not None and hid not in target_ids:
+                continue
+
+            new_due_dt = self._compute_next_due_at_utc(h, paused_until_dt + datetime.timedelta(seconds=1))
+            if not new_due_dt:
+                continue
+            new_due_s = new_due_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+            ok = bool(
+                self._execute_query(
+                    """
+                    UPDATE habits
+                    SET paused_from = :paused_from,
+                        paused_until = :paused_until,
+                        next_due_at = :next_due_at,
+                        snoozed_until = NULL,
+                        remind_level = 0,
+                        next_remind_at = NULL
+                    WHERE user_id = :user_id AND id = :id
+                      AND COALESCE(is_archived, 0) = 0
+                    """,
+                    {
+                        "paused_from": paused_from_s,
+                        "paused_until": paused_until_s,
+                        "next_due_at": new_due_s,
+                        "user_id": str(int(user_id)),
+                        "id": int(hid),
+                    },
+                    commit=True,
+                )
+            )
+            if ok:
+                updated += 1
+                updated_ids.append(hid)
+                try:
+                    gid0 = int(h.get("guild_id") or 0)
+                except Exception:
+                    gid0 = 0
+                self._record_habit_pause_event(
+                    habit_id=int(hid),
+                    guild_id=int(gid0),
+                    user_id=int(user_id),
+                    paused_from_utc=paused_from_s,
+                    paused_until_utc=paused_until_s,
+                    mode="vacation",
+                )
+
+        return {
+            "ok": updated > 0,
+            "updated": int(updated),
+            "paused_from": paused_from_s,
+            "paused_until": paused_until_s,
+            "habit_ids": updated_ids,
+        }
 
     def snooze_habit_for_day(
         self,

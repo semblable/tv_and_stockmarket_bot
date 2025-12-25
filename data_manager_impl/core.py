@@ -478,6 +478,8 @@ class DataManagerCore:
             remind_enabled INTEGER NOT NULL DEFAULT 1 CHECK (remind_enabled IN (0,1)),
             remind_profile TEXT NOT NULL DEFAULT 'catchup', -- catchup (default) | nag_* (opt-in)
             snoozed_until TIMESTAMP, -- when set, reminders/due are suppressed until this UTC timestamp
+            paused_from TIMESTAMP, -- UTC start of a "vacation"/pause interval (stats + reminders ignore scheduled days during pause)
+            paused_until TIMESTAMP, -- UTC end of a "vacation"/pause interval (exclusive)
             last_snooze_at TIMESTAMP, -- UTC timestamp of last snooze action
             last_snooze_period TEXT NOT NULL DEFAULT 'week', -- 'week' or 'month'
             remind_level INTEGER NOT NULL DEFAULT 0,
@@ -514,6 +516,12 @@ class DataManagerCore:
                 if "snoozed_until" not in col_names:
                     self._execute_query("ALTER TABLE habits ADD COLUMN snoozed_until TIMESTAMP;", commit=True)
                     logger.info("Column 'snoozed_until' added successfully to habits.")
+                if "paused_from" not in col_names:
+                    self._execute_query("ALTER TABLE habits ADD COLUMN paused_from TIMESTAMP;", commit=True)
+                    logger.info("Column 'paused_from' added successfully to habits.")
+                if "paused_until" not in col_names:
+                    self._execute_query("ALTER TABLE habits ADD COLUMN paused_until TIMESTAMP;", commit=True)
+                    logger.info("Column 'paused_until' added successfully to habits.")
                 if "last_snooze_at" not in col_names:
                     self._execute_query("ALTER TABLE habits ADD COLUMN last_snooze_at TIMESTAMP;", commit=True)
                     logger.info("Column 'last_snooze_at' added successfully to habits.")
@@ -618,6 +626,32 @@ class DataManagerCore:
             )
         except Exception as e:
             logger.warning(f"Could not create habit_snoozes indexes: {e}")
+
+        # --- Habits: Pause/Vacation history (stats) ---
+        create_habit_pauses_sql = """
+        CREATE TABLE IF NOT EXISTS habit_pauses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            habit_id INTEGER NOT NULL,
+            guild_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            paused_from TIMESTAMP NOT NULL, -- UTC start (inclusive)
+            paused_until TIMESTAMP NOT NULL, -- UTC end (exclusive)
+            mode TEXT NOT NULL DEFAULT 'vacation', -- reserved for future: vacation | pause_manual
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        create_table_if_not_exists("habit_pauses", create_habit_pauses_sql)
+        try:
+            self._execute_query(
+                "CREATE INDEX IF NOT EXISTS idx_habit_pauses_habit ON habit_pauses(habit_id, paused_from);",
+                commit=True,
+            )
+            self._execute_query(
+                "CREATE INDEX IF NOT EXISTS idx_habit_pauses_user ON habit_pauses(user_id, guild_id, paused_from);",
+                commit=True,
+            )
+        except Exception as e:
+            logger.warning(f"Could not create habit_pauses indexes: {e}")
 
         # --- Generic Reminders (one-off + repeating) ---
         create_reminders_sql = """
