@@ -142,32 +142,30 @@ async def on_ready():
     # Sync commands
     commands_synced = False
     try:
-        # If we have guilds, sync to the first one for immediate updates
-        if bot.guilds:
-            first_guild = bot.guilds[0]
-            log.info(f"Copying global commands to guild: {first_guild.name} (ID: {first_guild.id}) for immediate availability...")
-            bot.tree.copy_global_to(guild=discord.Object(id=first_guild.id))
-            
-            log.info(f"Attempting to sync application commands to guild: {first_guild.name} (ID: {first_guild.id})...")
-            try:
-                # Now sync the commands that were copied (or already existed) for this guild
-                synced_guild = await bot.tree.sync(guild=discord.Object(id=first_guild.id))
-                log.info(f"✅ Successfully synced {len(synced_guild)} command(s) to guild {first_guild.name}")
-                commands_synced = True
-                
-                # Log the synced commands
-                for cmd in synced_guild:
-                    log.info(f"  - Synced command: /{cmd.name}")
-                    
-            except discord.Forbidden as e:
-                log.error(f"❌ Forbidden error syncing to guild {first_guild.name}: {e}")
-                log.error("This usually means the bot lacks 'applications.commands' scope or manage guild permissions")
-            except discord.HTTPException as e:
-                log.error(f"❌ HTTP error syncing to guild {first_guild.name}: {e}")
-            except Exception as e:
-                log.error(f"❌ Unexpected error syncing to guild {first_guild.name}: {e}")
-        else:
+        # Guild sync is the only way to make new slash commands appear immediately.
+        # The old code synced only to bot.guilds[0], which is easy to miss if you test in another server.
+        guilds = list(bot.guilds or [])
+        if not guilds:
             log.warning("Bot is not in any guilds - cannot do guild-specific sync")
+        else:
+            # Safety cap to avoid hitting rate limits if the bot is in many guilds.
+            max_guild_sync = int(os.environ.get("MAX_GUILD_SYNC", "10"))
+            for g in guilds[: max(0, max_guild_sync)]:
+                log.info(f"Copying global commands to guild: {g.name} (ID: {g.id}) for immediate availability...")
+                bot.tree.copy_global_to(guild=discord.Object(id=g.id))
+
+                log.info(f"Attempting to sync application commands to guild: {g.name} (ID: {g.id})...")
+                try:
+                    synced_guild = await bot.tree.sync(guild=discord.Object(id=g.id))
+                    log.info(f"✅ Successfully synced {len(synced_guild)} command(s) to guild {g.name}")
+                    commands_synced = True
+                except discord.Forbidden as e:
+                    log.error(f"❌ Forbidden error syncing to guild {g.name}: {e}")
+                    log.error("This usually means the bot lacks 'applications.commands' scope or manage guild permissions")
+                except discord.HTTPException as e:
+                    log.error(f"❌ HTTP error syncing to guild {g.name}: {e}")
+                except Exception as e:
+                    log.error(f"❌ Unexpected error syncing to guild {g.name}: {e}")
         
         # Also sync globally (takes up to 1 hour to propagate)
         log.info("Attempting to sync application commands globally...")
@@ -223,13 +221,13 @@ async def sync_prefix(ctx: commands.Context):
         log.info(f"Manual sync: synced {len(synced)} commands to guild {guild_id}")
     except discord.Forbidden as e:
         log.error(f"Manual sync forbidden in guild {ctx.guild.id}: {e}")
-        await ctx.send("❌ I don't have permission to sync commands here. Make sure I was invited with `applications.commands` and I have permission to manage the server.", ephemeral=True)
+        await ctx.send("❌ I don't have permission to sync commands here. Make sure I was invited with `applications.commands` and I have permission to manage the server.")
     except discord.HTTPException as e:
         log.error(f"Manual sync HTTP error in guild {ctx.guild.id}: {e}")
-        await ctx.send(f"❌ Sync failed due to a Discord API error: {e}", ephemeral=True)
+        await ctx.send(f"❌ Sync failed due to a Discord API error: {e}")
     except Exception as e:
         log.error("Manual sync unexpected error:", exc_info=True)
-        await ctx.send(f"❌ Sync failed: {e}", ephemeral=True)
+        await ctx.send(f"❌ Sync failed: {e}")
 
 # --- Main Execution ---
 async def main():
