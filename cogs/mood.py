@@ -115,13 +115,6 @@ class MoodCog(commands.Cog, name="Mood"):
             app_group = getattr(hybrid_group, "app_command", None)
             if app_group is not None:
                 try:
-                    # Ensure the app command group exists on the tree (defensive; should already).
-                    if not any(getattr(c, "name", None) == getattr(app_group, "name", None) for c in self.bot.tree.get_commands()):
-                        self.bot.tree.add_command(app_group)
-                except Exception:
-                    pass
-
-                try:
                     _patch(app_group)
                 except Exception:
                     pass
