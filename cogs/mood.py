@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone, time as dtime, date
 from typing import Optional, Tuple, Dict, Any
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 import io
 
@@ -97,6 +98,19 @@ class MoodCog(commands.Cog, name="Mood"):
 
     async def cog_load(self):
         self.mood_reminder_loop.start()
+        # Make sure mood slash commands are available in DMs.
+        # (Some Discord setups require explicit allowed_contexts/allowed_installs per command.)
+        try:
+            for cmd in self.bot.tree.walk_commands():
+                qn = getattr(cmd, "qualified_name", None) or getattr(cmd, "name", "")
+                if qn == "mood" or str(qn).startswith("mood "):
+                    try:
+                        app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(cmd)
+                        app_commands.allowed_installs(guilds=True, users=True)(cmd)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
         logger.info("MoodCog loaded and reminder loop started.")
 
     async def cog_unload(self):

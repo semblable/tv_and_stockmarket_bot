@@ -94,10 +94,13 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
 
     error_message = "Sorry, an unexpected error occurred while processing your command. The developers have been notified."
 
+    # Ephemeral messages are not supported in DMs in some clients/APIs.
+    effective_ephemeral = interaction.guild is not None
+
     if interaction.is_response_done():
         try:
             # If the interaction has been responded to or deferred, try sending a followup message.
-            await interaction.followup.send(error_message, ephemeral=True)
+            await interaction.followup.send(error_message, ephemeral=effective_ephemeral)
         except discord.HTTPException as e:
             log.error(f"Failed to send followup error message for '/{command_name}': {e}")
         except Exception as e:
@@ -105,7 +108,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
     else:
         try:
             # If the interaction has not been responded to yet, send a new response.
-            await interaction.response.send_message(error_message, ephemeral=True)
+            await interaction.response.send_message(error_message, ephemeral=effective_ephemeral)
         except discord.HTTPException as e:
             log.error(f"Failed to send initial error message for '/{command_name}': {e}")
         except Exception as e:
