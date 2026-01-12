@@ -62,6 +62,10 @@ def _enable_dm_for_app_commands(bot: commands.Bot) -> None:
         for cmd in bot.tree.walk_commands():
             try:
                 _patch(cmd)
+                # Log for debugging
+                qn = getattr(cmd, "qualified_name", None) or getattr(cmd, "name", "")
+                if "mood" in qn.lower():
+                    log.info(f"Explicitly DM-enabled mood command: {qn}")
             except Exception:
                 continue
     except Exception:

@@ -279,6 +279,8 @@ class MoodCog(commands.Cog, name="Mood"):
         await self.bot.wait_until_ready()
 
     @commands.hybrid_group(name="mood", fallback="help", description="Track your mood (optional, no streaks).")
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    @app_commands.allowed_installs(guilds=True, users=True)
     async def mood_group(self, ctx: commands.Context):
         # NOTE:
         # For hybrid groups, `fallback="help"` registers the group callback itself as `/mood help`.
