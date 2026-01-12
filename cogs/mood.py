@@ -99,16 +99,40 @@ class MoodCog(commands.Cog, name="Mood"):
     async def cog_load(self):
         self.mood_reminder_loop.start()
         # Make sure mood slash commands are available in DMs.
-        # (Some Discord setups require explicit allowed_contexts/allowed_installs per command.)
+        #
+        # Important nuance:
+        # For slash command *groups* (like `/mood`), Discord may hide the entire command tree in DMs
+        # unless the *group object itself* is DM-enabled — even if subcommands are.
+        #
+        # Hybrid groups can be tricky to patch by iterating `tree.walk_commands()` (some versions
+        # skip the top-level group). So we patch the group + all its descendants directly.
+        def _patch(cmd: app_commands.AppCommand) -> None:
+            app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(cmd)
+            app_commands.allowed_installs(guilds=True, users=True)(cmd)
+
         try:
-            for cmd in self.bot.tree.walk_commands():
-                qn = getattr(cmd, "qualified_name", None) or getattr(cmd, "name", "")
-                if qn == "mood" or str(qn).startswith("mood "):
-                    try:
-                        app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(cmd)
-                        app_commands.allowed_installs(guilds=True, users=True)(cmd)
-                    except Exception:
-                        continue
+            hybrid_group = getattr(self, "mood_group", None)
+            app_group = getattr(hybrid_group, "app_command", None)
+            if app_group is not None:
+                try:
+                    # Ensure the app command group exists on the tree (defensive; should already).
+                    if not any(getattr(c, "name", None) == getattr(app_group, "name", None) for c in self.bot.tree.get_commands()):
+                        self.bot.tree.add_command(app_group)
+                except Exception:
+                    pass
+
+                try:
+                    _patch(app_group)
+                except Exception:
+                    pass
+                try:
+                    for child in app_group.walk_commands():
+                        try:
+                            _patch(child)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
         except Exception:
             pass
         logger.info("MoodCog loaded and reminder loop started.")
@@ -117,11 +141,21 @@ class MoodCog(commands.Cog, name="Mood"):
         self.mood_reminder_loop.cancel()
         logger.info("MoodCog unloaded and reminder loop cancelled.")
 
-    async def _send_ctx(self, ctx: commands.Context, content: str, *, ephemeral: bool = True, embed: Optional[discord.Embed] = None) -> None:
+    async def _send_ctx(
+        self,
+        ctx: commands.Context,
+        content: str,
+        *,
+        ephemeral: bool = True,
+        embed: Optional[discord.Embed] = None,
+    ) -> None:
         if getattr(ctx, "interaction", None):
             # Ephemeral responses are not supported/meaningful in DMs; some clients/APIs reject them.
-            effective_ephemeral = bool(ephemeral) and (getattr(ctx, "guild", None) is not None)
-            await ctx.send(content=content if content else None, embed=embed, ephemeral=effective_ephemeral)
+            # To stay maximally compatible, we don't pass the `ephemeral` kwarg at all in DMs.
+            base_kwargs: Dict[str, Any] = {"content": content if content else None, "embed": embed}
+            if getattr(ctx, "guild", None) is not None:
+                base_kwargs["ephemeral"] = bool(ephemeral)
+            await ctx.send(**base_kwargs)
         else:
             await ctx.send(content=content if content else None, embed=embed)
 
@@ -475,7 +509,10 @@ class MoodCog(commands.Cog, name="Mood"):
                         try:
                             mood_arg = int(mood_in)
                         except Exception:
-                            await interaction2.response.send_message("❌ Mood must be a number 1–10.", ephemeral=True)
+                            if interaction2.guild is not None:
+                                await interaction2.response.send_message("❌ Mood must be a number 1–10.", ephemeral=True)
+                            else:
+                                await interaction2.response.send_message("❌ Mood must be a number 1–10.")
                             return
 
                     energy_unset = True
@@ -488,7 +525,12 @@ class MoodCog(commands.Cog, name="Mood"):
                             try:
                                 energy_arg = int(energy_in)
                             except Exception:
-                                await interaction2.response.send_message("❌ Energy must be a number 1–10 (or 'clear').", ephemeral=True)
+                                if interaction2.guild is not None:
+                                    await interaction2.response.send_message(
+                                        "❌ Energy must be a number 1–10 (or 'clear').", ephemeral=True
+                                    )
+                                else:
+                                    await interaction2.response.send_message("❌ Energy must be a number 1–10 (or 'clear').")
                                 return
 
                     note_unset = True
@@ -510,7 +552,10 @@ class MoodCog(commands.Cog, name="Mood"):
                         kwargs["note"] = note_arg
 
                     if not kwargs:
-                        await interaction2.response.send_message("No changes provided.", ephemeral=True)
+                        if interaction2.guild is not None:
+                            await interaction2.response.send_message("No changes provided.", ephemeral=True)
+                        else:
+                            await interaction2.response.send_message("No changes provided.")
                         return
 
                     ok = await self.cog.bot.loop.run_in_executor(
@@ -521,9 +566,17 @@ class MoodCog(commands.Cog, name="Mood"):
                         **kwargs,
                     )
                     if not ok:
-                        await interaction2.response.send_message("❌ Could not update that entry (check ranges 1–10).", ephemeral=True)
+                        if interaction2.guild is not None:
+                            await interaction2.response.send_message(
+                                "❌ Could not update that entry (check ranges 1–10).", ephemeral=True
+                            )
+                        else:
+                            await interaction2.response.send_message("❌ Could not update that entry (check ranges 1–10).")
                         return
-                    await interaction2.response.send_message(f"✅ Updated mood entry **#{self.entry_id}**.", ephemeral=True)
+                    if interaction2.guild is not None:
+                        await interaction2.response.send_message(f"✅ Updated mood entry **#{self.entry_id}**.", ephemeral=True)
+                    else:
+                        await interaction2.response.send_message(f"✅ Updated mood entry **#{self.entry_id}**.")
 
             class _SelectView(discord.ui.View):
                 def __init__(self, *, cog: "MoodCog"):
@@ -533,14 +586,20 @@ class MoodCog(commands.Cog, name="Mood"):
                 @discord.ui.select(placeholder="Select an entry to edit…", min_values=1, max_values=1, options=options)
                 async def select_cb(self, interaction3: discord.Interaction, select: discord.ui.Select):  # type: ignore
                     if interaction3.user.id != ctx.author.id:
-                        await interaction3.response.send_message("❌ This picker isn’t for you.", ephemeral=True)
+                        if interaction3.guild is not None:
+                            await interaction3.response.send_message("❌ This picker isn’t for you.", ephemeral=True)
+                        else:
+                            await interaction3.response.send_message("❌ This picker isn’t for you.")
                         return
                     entry_id = int(select.values[0])
                     await interaction3.response.send_modal(_EditModal(entry_id=entry_id, cog=self.cog))
 
             embed = discord.Embed(title="✏️ Edit mood entry", color=discord.Color.blurple())
             embed.description = "Pick an entry below to edit it. (Only you can see this.)"
-            await ctx.send(embed=embed, view=_SelectView(cog=self), ephemeral=True)
+            if ctx.guild is not None:
+                await ctx.send(embed=embed, view=_SelectView(cog=self), ephemeral=True)
+            else:
+                await ctx.send(embed=embed, view=_SelectView(cog=self))
             return
 
         # --- Prefix flow: reactions ---
@@ -712,15 +771,24 @@ class MoodCog(commands.Cog, name="Mood"):
                 @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger)
                 async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):  # type: ignore
                     if interaction.user.id != ctx.author.id:
-                        await interaction.response.send_message("❌ This isn’t for you.", ephemeral=True)
+                        if interaction.guild is not None:
+                            await interaction.response.send_message("❌ This isn’t for you.", ephemeral=True)
+                        else:
+                            await interaction.response.send_message("❌ This isn’t for you.")
                         return
                     ok = await self.cog.bot.loop.run_in_executor(
                         None, self.cog.db_manager.delete_mood_entry, int(interaction.user.id), int(self.entry_id)
                     )
                     if not ok:
-                        await interaction.response.send_message("❌ Could not delete that entry.", ephemeral=True)
+                        if interaction.guild is not None:
+                            await interaction.response.send_message("❌ Could not delete that entry.", ephemeral=True)
+                        else:
+                            await interaction.response.send_message("❌ Could not delete that entry.")
                         return
-                    await interaction.response.send_message(f"🗑️ Deleted mood entry **#{self.entry_id}**.", ephemeral=True)
+                    if interaction.guild is not None:
+                        await interaction.response.send_message(f"🗑️ Deleted mood entry **#{self.entry_id}**.", ephemeral=True)
+                    else:
+                        await interaction.response.send_message(f"🗑️ Deleted mood entry **#{self.entry_id}**.")
                     try:
                         self.stop()
                     except Exception:
@@ -729,9 +797,15 @@ class MoodCog(commands.Cog, name="Mood"):
                 @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
                 async def cancel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):  # type: ignore
                     if interaction.user.id != ctx.author.id:
-                        await interaction.response.send_message("❌ This isn’t for you.", ephemeral=True)
+                        if interaction.guild is not None:
+                            await interaction.response.send_message("❌ This isn’t for you.", ephemeral=True)
+                        else:
+                            await interaction.response.send_message("❌ This isn’t for you.")
                         return
-                    await interaction.response.send_message("Cancelled.", ephemeral=True)
+                    if interaction.guild is not None:
+                        await interaction.response.send_message("Cancelled.", ephemeral=True)
+                    else:
+                        await interaction.response.send_message("Cancelled.")
                     try:
                         self.stop()
                     except Exception:
@@ -745,18 +819,30 @@ class MoodCog(commands.Cog, name="Mood"):
                 @discord.ui.select(placeholder="Select an entry to delete…", min_values=1, max_values=1, options=options)
                 async def select_cb(self, interaction: discord.Interaction, select: discord.ui.Select):  # type: ignore
                     if interaction.user.id != ctx.author.id:
-                        await interaction.response.send_message("❌ This picker isn’t for you.", ephemeral=True)
+                        if interaction.guild is not None:
+                            await interaction.response.send_message("❌ This picker isn’t for you.", ephemeral=True)
+                        else:
+                            await interaction.response.send_message("❌ This picker isn’t for you.")
                         return
                     entry_id = int(select.values[0])
-                    await interaction.response.send_message(
-                        f"Delete mood entry **#{entry_id}**?\nThis can’t be undone.",
-                        view=_ConfirmView(cog=self.cog, entry_id=entry_id),
-                        ephemeral=True,
-                    )
+                    if interaction.guild is not None:
+                        await interaction.response.send_message(
+                            f"Delete mood entry **#{entry_id}**?\nThis can’t be undone.",
+                            view=_ConfirmView(cog=self.cog, entry_id=entry_id),
+                            ephemeral=True,
+                        )
+                    else:
+                        await interaction.response.send_message(
+                            f"Delete mood entry **#{entry_id}**?\nThis can’t be undone.",
+                            view=_ConfirmView(cog=self.cog, entry_id=entry_id),
+                        )
 
             embed = discord.Embed(title="🗑️ Delete mood entry", color=discord.Color.red())
             embed.description = "Pick an entry below to delete it (you’ll be asked to confirm)."
-            await ctx.send(embed=embed, view=_SelectDeleteView(cog=self), ephemeral=True)
+            if ctx.guild is not None:
+                await ctx.send(embed=embed, view=_SelectDeleteView(cog=self), ephemeral=True)
+            else:
+                await ctx.send(embed=embed, view=_SelectDeleteView(cog=self))
             return
 
         # Prefix flow: reactions + typed confirm
@@ -1113,11 +1199,15 @@ class MoodCog(commands.Cog, name="Mood"):
         msg = f"✅ Generated your **{p}** mood report ({tz_disp})."
         # Prefer ephemeral for privacy, but some Discord clients/versions can be picky with ephemeral attachments.
         if getattr(ctx, "interaction", None):
-            try:
-                await ctx.send(content=msg, files=files, ephemeral=True)
-            except Exception:
-                # Fallback to non-ephemeral so the export still works.
-                await ctx.send(content=msg + " (Sent non-ephemeral due to attachment limitation.)", files=files, ephemeral=False)
+            if ctx.guild is not None:
+                try:
+                    await ctx.send(content=msg, files=files, ephemeral=True)
+                except Exception:
+                    # Fallback to non-ephemeral so the export still works.
+                    await ctx.send(content=msg + " (Sent non-ephemeral due to attachment limitation.)", files=files)
+            else:
+                # DMs: don't pass ephemeral kwarg at all.
+                await ctx.send(content=msg, files=files)
         else:
             await ctx.send(content=msg, files=files)
 
