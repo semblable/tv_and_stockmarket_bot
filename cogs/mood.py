@@ -288,8 +288,7 @@ class MoodCog(commands.Cog, name="Mood"):
                 sent = await self._dm_user(
                     uid,
                     "🧠 Optional mood check-in: how are you feeling right now?\n"
-                    "Log it with `/mood log <1-10> [note]` (you can log multiple times per day). "
-                    "Gaps are okay—this is just information, not a score.",
+                    "Log it with `/mood log <1-10> [note]` (you can log multiple times per day).",
                 )
                 # Mark handled regardless to avoid spamming on failures/retries.
                 await self.bot.loop.run_in_executor(
@@ -318,16 +317,32 @@ class MoodCog(commands.Cog, name="Mood"):
             return
 
         msg = (
-            "**Mood tracking (opt-in)**\n"
-            "- `/mood enable` — turn mood tracking on\n"
-            "- `/mood disable` — turn it off (no reminders)\n"
-            "- `/mood reminder <HH:MM|off>` — set a daily reminder (uses your `settings timezone`)\n"
-            "- `/mood log <1-10> [note] [energy]` — log a mood (multiple times/day supported)\n"
-            "- `/mood edit [count]` — edit a recent entry (interactive)\n"
-            "- `/mood delete [count]` — delete a recent entry (interactive)\n"
-            "- `/mood today` — show today’s entries\n"
-            "- `/mood week` — simple 7-day summary (with neutral “gaps”)\n"
-            "- `/mood report <week|month|year> <html|csv|both>` — export files\n"
+            "**Mood tracking**\n"
+            "\n"
+            "**Getting started**\n"
+            "- `/mood enable` — turn it on\n"
+            "- `/mood log 7` — quick log (you can log multiple times per day)\n"
+            "\n"
+            "**Logging**\n"
+            "- `/mood log <1-10> [note] [energy]`\n"
+            "  - Example: `/mood log 6` \n"
+            "  - Example: `/mood log 4 note:stressed energy:3`\n"
+            "\n"
+            "**Review**\n"
+            "- `/mood today` — today’s entries\n"
+            "- `/mood week` — last 7 days summary\n"
+            "\n"
+            "**Edit / delete**\n"
+            "- `/mood edit [count]` — pick one of your most recent entries to edit\n"
+            "- `/mood delete [count]` — pick one of your most recent entries to delete\n"
+            "\n"
+            "**Reminders**\n"
+            "- `/mood reminder <HH:MM|off>` — daily DM reminder time (uses your `settings timezone`)\n"
+            "  - Example: `/mood reminder 21:30`\n"
+            "  - Example: `/mood reminder off`\n"
+            "\n"
+            "**Export**\n"
+            "- `/mood report <week|month|year|all> <html|csv|both>` — export an HTML/CSV report\n"
         )
         await self._send_ctx(ctx, msg, ephemeral=True)
 
@@ -352,6 +367,7 @@ class MoodCog(commands.Cog, name="Mood"):
         await self._send_ctx(ctx, "🛑 Mood tracking disabled. I won’t remind you about it.", ephemeral=True)
 
     @mood_group.command(name="reminder", description="Set or disable your daily mood reminder (HH:MM or off).")
+    @app_commands.describe(when="Daily reminder time in HH:MM (24h), or 'off' to disable.")
     async def mood_reminder(self, ctx: commands.Context, when: str):
         if not self.db_manager:
             await self._send_ctx(ctx, "Database is not available right now. Please try again later.", ephemeral=True)
@@ -380,6 +396,11 @@ class MoodCog(commands.Cog, name="Mood"):
         await self._send_ctx(ctx, f"✅ Daily mood reminder set for `{hm[0]:02d}:{hm[1]:02d}` ({tz_disp}).", ephemeral=True)
 
     @mood_group.command(name="log", description="Log your mood (1-10) with an optional note and energy (1-10).")
+    @app_commands.describe(
+        mood="Mood score from 1 to 10.",
+        note="Optional short note (what happened / context).",
+        energy="Optional energy score from 1 to 10.",
+    )
     async def mood_log(self, ctx: commands.Context, mood: int, note: Optional[str] = None, energy: Optional[int] = None):
         if not self.db_manager:
             await self._send_ctx(ctx, "Database is not available right now. Please try again later.", ephemeral=True)
@@ -417,12 +438,13 @@ class MoodCog(commands.Cog, name="Mood"):
         except Exception:
             pass
 
-        gentle = "Logged. Thanks for checking in—this is data, not a grade."
+        gentle = "Logged."
         if not (note or "").strip():
             gentle += " If you want, add a tiny note next time (e.g. “why” or “what happened”)."
         await self._send_ctx(ctx, f"✅ Mood entry **#{entry_id}** saved. {gentle}", ephemeral=True)
 
     @mood_group.command(name="edit", description="Edit one of your recent mood entries (interactive).")
+    @app_commands.describe(count="How many recent entries to offer (1-10).")
     async def mood_edit(self, ctx: commands.Context, count: int = 5):
         """
         Slash command: dropdown + modal.
@@ -707,6 +729,7 @@ class MoodCog(commands.Cog, name="Mood"):
         await ctx.send(f"✅ Updated mood entry **#{entry_id}**.")
 
     @mood_group.command(name="delete", description="Delete one of your recent mood entries (interactive).")
+    @app_commands.describe(count="How many recent entries to offer (1-10).")
     async def mood_delete(self, ctx: commands.Context, count: int = 5):
         """
         Slash command: dropdown + confirm buttons.
@@ -927,7 +950,7 @@ class MoodCog(commands.Cog, name="Mood"):
         if tz_disp in ("Europe/Warsaw", "CET", "CEST"):
             tz_disp = "CET/CEST"
         embed = discord.Embed(title="🧠 Mood — today", color=discord.Color.blurple())
-        embed.set_footer(text=f"Timezone: {tz_disp}. Gaps are okay.")
+        embed.set_footer(text=f"Timezone: {tz_disp}.")
         lines = []
         for r in rows[:25]:
             dt_utc = _parse_sqlite_utc_timestamp(r.get("created_at"))
@@ -988,7 +1011,7 @@ class MoodCog(commands.Cog, name="Mood"):
             tz_disp = "CET/CEST"
 
         embed = discord.Embed(title="🧠 Mood — last 7 days", color=discord.Color.blurple())
-        embed.set_footer(text=f"Timezone: {tz_disp}. Gaps are neutral.")
+        embed.set_footer(text=f"Timezone: {tz_disp}.")
         lines = []
         for i in range(6, -1, -1):
             d = (now_local.date() - timedelta(days=i)).isoformat()
@@ -1002,6 +1025,10 @@ class MoodCog(commands.Cog, name="Mood"):
         await self._send_ctx(ctx, "", ephemeral=True, embed=embed)
 
     @mood_group.command(name="report", description="Export a pretty mood report as a file (week/month/year).")
+    @app_commands.describe(
+        period="Which time range to export: week, month, year, or all.",
+        export="Which file(s) to export: html, csv, or both.",
+    )
     async def mood_report(self, ctx: commands.Context, period: str = "week", export: str = "both"):
         """
         Export report files:
@@ -1022,8 +1049,8 @@ class MoodCog(commands.Cog, name="Mood"):
             return
 
         p = (period or "").strip().lower()
-        if p not in ("week", "month", "year"):
-            await self._send_ctx(ctx, "❌ Invalid period. Use `week`, `month`, or `year`.", ephemeral=True)
+        if p not in ("week", "month", "year", "all"):
+            await self._send_ctx(ctx, "❌ Invalid period. Use `week`, `month`, `year`, or `all`.", ephemeral=True)
             return
         ex = (export or "").strip().lower()
         if ex not in ("html", "csv", "both"):
@@ -1056,13 +1083,28 @@ class MoodCog(commands.Cog, name="Mood"):
             end_local = datetime.combine(nm, dtime(0, 0), tzinfo=tz)
             bucket_kind = "day"
             period_label = f"Month {first.strftime('%Y-%m')}"
-        else:
+        elif p == "year":
             first = now_local.date().replace(month=1, day=1)
             ny = first.replace(year=first.year + 1, month=1, day=1)
             start_local = datetime.combine(first, dtime(0, 0), tzinfo=tz)
             end_local = datetime.combine(ny, dtime(0, 0), tzinfo=tz)
-            bucket_kind = "month"
+            # Use day buckets so the HTML export can render a true calendar heatmap.
+            bucket_kind = "day"
             period_label = f"Year {first.strftime('%Y')}"
+        else:
+            # All time: from first entry day to today (+1 day for inclusive end).
+            first_ts = await self.bot.loop.run_in_executor(
+                None, self.db_manager.get_first_mood_entry_created_at_utc, ctx.author.id
+            )
+            first_dt_utc = _parse_sqlite_utc_timestamp(first_ts) if isinstance(first_ts, str) else None
+            if first_dt_utc is None:
+                await self._send_ctx(ctx, "No mood entries found yet to export.", ephemeral=True)
+                return
+            first_local_day = first_dt_utc.astimezone(tz).date()
+            start_local = datetime.combine(first_local_day, dtime(0, 0), tzinfo=tz)
+            end_local = datetime.combine((now_local.date() + timedelta(days=1)), dtime(0, 0), tzinfo=tz)
+            bucket_kind = "day"
+            period_label = "All time"
 
         start_utc_s = _sqlite_utc_timestamp(start_local.astimezone(timezone.utc))
         end_utc_s = _sqlite_utc_timestamp(end_local.astimezone(timezone.utc))
@@ -1106,53 +1148,29 @@ class MoodCog(commands.Cog, name="Mood"):
         from utils.mood_report import MoodDaySummary, to_csv_bytes, to_html_report_bytes
         from utils.chart_utils import get_mood_daily_chart_image
 
+        # Build day-by-day summaries (includes gaps) for all report periods.
         summaries: list[MoodDaySummary] = []
-        if bucket_kind == "day":
-            cur = start_local.date()
-            while cur < end_local.date():
-                key = cur.isoformat()
-                b = by_key.get(key)
-                if not b or not b.get("moods"):
-                    summaries.append(MoodDaySummary(label=key, start_day=cur, n=0, avg_mood=None, avg_energy=None, min_mood=None, max_mood=None))
-                else:
-                    moods = list(b.get("moods") or [])
-                    ens = list(b.get("energies") or [])
-                    summaries.append(
-                        MoodDaySummary(
-                            label=key,
-                            start_day=cur,
-                            n=len(moods),
-                            avg_mood=(sum(moods) / len(moods)) if moods else None,
-                            avg_energy=(sum(ens) / len(ens)) if ens else None,
-                            min_mood=min(moods) if moods else None,
-                            max_mood=max(moods) if moods else None,
-                        )
+        cur = start_local.date()
+        while cur < end_local.date():
+            key = cur.isoformat()
+            b = by_key.get(key)
+            if not b or not b.get("moods"):
+                summaries.append(MoodDaySummary(label=key, start_day=cur, n=0, avg_mood=None, avg_energy=None, min_mood=None, max_mood=None))
+            else:
+                moods = list(b.get("moods") or [])
+                ens = list(b.get("energies") or [])
+                summaries.append(
+                    MoodDaySummary(
+                        label=key,
+                        start_day=cur,
+                        n=len(moods),
+                        avg_mood=(sum(moods) / len(moods)) if moods else None,
+                        avg_energy=(sum(ens) / len(ens)) if ens else None,
+                        min_mood=min(moods) if moods else None,
+                        max_mood=max(moods) if moods else None,
                     )
-                cur = cur + timedelta(days=1)
-        else:
-            # Month buckets for a year view: iterate month-by-month
-            y = start_local.date().year
-            m = 1
-            for m in range(1, 13):
-                key = f"{y:04d}-{m:02d}"
-                cur = date(y, m, 1)
-                b = by_key.get(key)
-                if not b or not b.get("moods"):
-                    summaries.append(MoodDaySummary(label=key, start_day=cur, n=0, avg_mood=None, avg_energy=None, min_mood=None, max_mood=None))
-                else:
-                    moods = list(b.get("moods") or [])
-                    ens = list(b.get("energies") or [])
-                    summaries.append(
-                        MoodDaySummary(
-                            label=key,
-                            start_day=cur,
-                            n=len(moods),
-                            avg_mood=(sum(moods) / len(moods)) if moods else None,
-                            avg_energy=(sum(ens) / len(ens)) if ens else None,
-                            min_mood=min(moods) if moods else None,
-                            max_mood=max(moods) if moods else None,
-                        )
-                    )
+                )
+            cur = cur + timedelta(days=1)
 
         # Chart data (use averages; gaps => None to break lines)
         labels = [s.label for s in summaries]
@@ -1164,19 +1182,21 @@ class MoodCog(commands.Cog, name="Mood"):
             energy_vals = None
 
         chart_png_bytes: Optional[bytes] = None
-        try:
-            chart_buf = get_mood_daily_chart_image(
-                f"Mood report — {period_label}",
-                labels,
-                mood_vals,
-                energy_vals,
-                chart_width=980,
-                chart_height=420,
-            )
-            if chart_buf is not None:
-                chart_png_bytes = chart_buf.getvalue()
-        except Exception:
-            chart_png_bytes = None
+        # Avoid generating enormous charts for long time ranges.
+        if len(labels) <= 370:
+            try:
+                chart_buf = get_mood_daily_chart_image(
+                    f"Mood report — {period_label}",
+                    labels,
+                    mood_vals,
+                    energy_vals,
+                    chart_width=980,
+                    chart_height=420,
+                )
+                if chart_buf is not None:
+                    chart_png_bytes = chart_buf.getvalue()
+            except Exception:
+                chart_png_bytes = None
 
         html_bytes = to_html_report_bytes(
             title=f"Mood report — {period_label}",

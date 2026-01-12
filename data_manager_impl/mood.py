@@ -211,3 +211,21 @@ class MoodMixin:
             or []
         )
 
+    def get_first_mood_entry_created_at_utc(self, user_id: int) -> Optional[str]:
+        """
+        Returns the earliest `created_at` timestamp (UTC SQLite string) for the user's mood entries.
+
+        This is useful for "all-time" reports.
+        """
+        q = """
+        SELECT MIN(created_at) AS created_at
+        FROM mood_entries
+        WHERE user_id = :user_id
+        """
+        row = self._execute_query(q, {"user_id": str(int(user_id))}, fetch_one=True)
+        v = (row or {}).get("created_at")
+        if not isinstance(v, str):
+            return None
+        s = v.strip()
+        return s if len(s) >= 19 else None
+

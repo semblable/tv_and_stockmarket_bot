@@ -25,6 +25,7 @@ def test_mood_entries_crud_basic(db_manager):
     assert len(day_rows) == 1
     assert int(day_rows[0].get("mood") or 0) == 7
     assert int(day_rows[0].get("energy") or 0) == 6
+    assert db_manager.get_first_mood_entry_created_at_utc(user_id) == "2025-01-01 10:00:00"
 
     # Update mood + clear note
     ok = db_manager.update_mood_entry(user_id, eid, mood=8, note=None)

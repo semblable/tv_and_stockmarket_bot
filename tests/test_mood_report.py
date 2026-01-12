@@ -24,7 +24,7 @@ def test_mood_report_csv_and_html_basic():
     )
     # Basic content present
     assert b"Mood report" in html_b
-    assert b"gaps are neutral" in html_b
+    assert b"Calendar" in html_b
     assert b"2025-01-02" in html_b
     assert b"gap" in html_b
 

@@ -2,7 +2,7 @@ import base64
 import csv
 import io
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Iterable, Optional, Sequence
 
 
@@ -85,12 +85,111 @@ def to_html_report_bytes(
     chart_png_bytes: Optional[bytes] = None,
 ) -> bytes:
     stats = _overall_stats(days)
-    start = days[0].label if days else ""
-    end = days[-1].label if days else ""
+    start = days[0].start_day.isoformat() if days else ""
+    end = days[-1].start_day.isoformat() if days else ""
     chart_uri = _b64_png_data_uri(chart_png_bytes)
 
     def fmt_opt(v: Optional[float]) -> str:
         return "—" if v is None else f"{v:.2f}"
+
+    def is_day_granularity() -> bool:
+        # Day-level summaries use ISO date labels like YYYY-MM-DD.
+        return bool(days) and all(isinstance(d.label, str) and len(d.label) >= 10 and d.label[4] == "-" for d in days[:3])
+
+    def mood_color(avg_mood: Optional[float], n: int) -> str:
+        # Return a CSS color for the calendar cell background.
+        if avg_mood is None or int(n or 0) <= 0:
+            return "rgba(255,255,255,0.05)"  # gap
+        try:
+            v = max(1.0, min(10.0, float(avg_mood)))
+        except Exception:
+            return "rgba(255,255,255,0.05)"
+        # Map 1..10 -> red..green hue
+        hue = (v - 1.0) / 9.0 * 120.0
+        return f"hsl({hue:.0f} 70% 45%)"
+
+    def calendar_html() -> str:
+        # Only meaningful for day-granularity exports.
+        if not days or not is_day_granularity():
+            return ""
+
+        by_day = {d.start_day: d for d in days if isinstance(d.start_day, date)}
+        start_day = min(by_day.keys()) if by_day else days[0].start_day
+        end_day = max(by_day.keys()) if by_day else days[-1].start_day
+
+        # Iterate month-by-month from the start month to the end month.
+        cur = date(start_day.year, start_day.month, 1)
+        last = date(end_day.year, end_day.month, 1)
+
+        parts: list[str] = []
+        parts.append("<div class='calendar'>")
+        parts.append("<div class='cal-head'>Calendar</div>")
+        parts.append(
+            "<div class='cal-legend'>"
+            "<span class='lg-label'>low</span>"
+            "<span class='lg-swatch' style='background:hsl(0 70% 45%)'></span>"
+            "<span class='lg-swatch' style='background:hsl(30 70% 45%)'></span>"
+            "<span class='lg-swatch' style='background:hsl(60 70% 45%)'></span>"
+            "<span class='lg-swatch' style='background:hsl(90 70% 45%)'></span>"
+            "<span class='lg-swatch' style='background:hsl(120 70% 45%)'></span>"
+            "<span class='lg-label'>high</span>"
+            "<span class='lg-gap'>gap</span>"
+            "</div>"
+        )
+
+        weekday_hdr = (
+            "<div class='cal-weekdays'>"
+            "<span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span>"
+            "</div>"
+        )
+
+        while cur <= last:
+            # Next month
+            if cur.month == 12:
+                next_month = date(cur.year + 1, 1, 1)
+            else:
+                next_month = date(cur.year, cur.month + 1, 1)
+            last_day = next_month - timedelta(days=1)
+
+            parts.append("<div class='cal-month'>")
+            parts.append(f"<div class='cal-month-title'>{cur.strftime('%B %Y')}</div>")
+            parts.append(weekday_hdr)
+            parts.append("<div class='cal-grid'>")
+
+            # Leading blanks (weekday(): Monday=0)
+            lead = int(cur.weekday())
+            for _ in range(lead):
+                parts.append("<div class='cal-cell cal-empty'></div>")
+
+            d = cur
+            while d <= last_day:
+                s = by_day.get(d)
+                n = int(getattr(s, "n", 0) or 0) if s else 0
+                avg_m = getattr(s, "avg_mood", None) if s else None
+                avg_e = getattr(s, "avg_energy", None) if s else None
+                bg = mood_color(avg_m, n)
+                title = f"{d.isoformat()}"
+                if n > 0 and avg_m is not None:
+                    title += f" • avg mood {float(avg_m):.1f}/10 • entries {n}"
+                    if avg_e is not None:
+                        title += f" • avg energy {float(avg_e):.1f}/10"
+                else:
+                    title += " • gap"
+                parts.append(
+                    "<div class='cal-cell' "
+                    f"style='background:{bg}' "
+                    f"title='{_safe(title)}'>"
+                    f"{d.day}"
+                    "</div>"
+                )
+                d = d + timedelta(days=1)
+
+            parts.append("</div>")  # grid
+            parts.append("</div>")  # month
+            cur = next_month
+
+        parts.append("</div>")  # calendar
+        return "\n".join(parts)
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -156,6 +255,76 @@ def to_html_report_bytes(
       font-size: 13px;
       line-height: 1.35;
     }}
+    .calendar {{
+      margin-top: 14px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+    }}
+    .cal-head {{ font-size: 14px; color: rgba(255,255,255,0.90); font-weight: 650; }}
+    .cal-legend {{
+      margin-top: 10px;
+      display:flex;
+      align-items:center;
+      gap: 8px;
+      color: var(--muted2);
+      font-size: 12px;
+      flex-wrap: wrap;
+    }}
+    .lg-swatch {{
+      width: 14px; height: 14px;
+      border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.14);
+    }}
+    .lg-label {{ color: var(--muted); }}
+    .lg-gap {{
+      margin-left: 10px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+    }}
+    .cal-month {{
+      margin-top: 12px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      padding-top: 12px;
+    }}
+    .cal-month:first-of-type {{ border-top: none; padding-top: 0; }}
+    .cal-month-title {{
+      font-size: 13px;
+      color: rgba(255,255,255,0.86);
+      margin-bottom: 6px;
+    }}
+    .cal-weekdays {{
+      display:grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 6px;
+      font-size: 11px;
+      color: var(--muted2);
+      margin-bottom: 6px;
+    }}
+    .cal-grid {{
+      display:grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 6px;
+    }}
+    .cal-cell {{
+      aspect-ratio: 1 / 1;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.10);
+      font-size: 10px;
+      color: rgba(255,255,255,0.92);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      user-select: none;
+    }}
+    .cal-empty {{
+      background: transparent !important;
+      border-color: transparent !important;
+    }}
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -215,7 +384,6 @@ def to_html_report_bytes(
           &nbsp;·&nbsp; timezone <strong>{_safe(tz_label)}</strong>
         </div>
       </div>
-      <div class="pill">gaps are neutral</div>
     </div>
 
     <div class="cards">
@@ -227,10 +395,9 @@ def to_html_report_bytes(
 
     <div class="chart">
       {"<img alt='Mood chart' src='" + chart_uri + "'/>" if chart_uri else "<div class='note'>Chart unavailable (could not generate).</div>"}
-      <div class="note">
-        This is descriptive, not evaluative. Missed days are shown as <em>gaps</em>—not failures.
-      </div>
     </div>
+
+    {calendar_html()}
 
     <table>
       <thead>
@@ -257,10 +424,6 @@ def to_html_report_bytes(
     html += """      </tbody>
     </table>
 
-    <div class="footer">
-      Export tip: this report is meant for reflection, not perfection.
-      You can keep raw data in the CSV and review trends periodically.
-    </div>
   </div>
 </body>
 </html>
