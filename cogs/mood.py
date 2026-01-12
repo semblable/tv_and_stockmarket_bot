@@ -264,11 +264,13 @@ class MoodCog(commands.Cog, name="Mood"):
 
     @commands.hybrid_group(name="mood", fallback="help", description="Track your mood (optional, no streaks).")
     async def mood_group(self, ctx: commands.Context):
-        if ctx.invoked_subcommand is None:
-            await self.mood_help(ctx)
+        # NOTE:
+        # For hybrid groups, `fallback="help"` registers the group callback itself as `/mood help`.
+        # Defining an additional `@mood_group.command(name="help")` would double-register the same
+        # slash subcommand and crash on startup with CommandAlreadyRegistered.
+        if ctx.invoked_subcommand is not None:
+            return
 
-    @mood_group.command(name="help", description="Show mood tracking commands.")
-    async def mood_help(self, ctx: commands.Context):
         msg = (
             "**Mood tracking (opt-in)**\n"
             "- `/mood enable` — turn mood tracking on\n"
