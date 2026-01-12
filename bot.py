@@ -27,18 +27,42 @@ def _enable_dm_for_app_commands(bot: commands.Bot) -> None:
     Discord's newer command context/installation rules can cause otherwise-correct slash commands
     (including hybrid commands) to not appear in DMs unless contexts/installs are explicitly allowed.
     """
+    def _patch(cmd: app_commands.AppCommand) -> None:
+        # Allow usage in guilds + DMs + private channels.
+        # Apply unconditionally: discord.py may set defaults that still exclude DMs.
+        app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(cmd)
+
+        # Allow both guild installs and user installs.
+        # User installs are required for most "use in DMs" setups.
+        app_commands.allowed_installs(guilds=True, users=True)(cmd)
+
     try:
+        # IMPORTANT:
+        # Some Discord clients will not show a slash *group* (e.g. `/mood`) in DMs unless the
+        # group itself is DM-enabled — even if its subcommands are.
+        # CommandTree.walk_commands() can miss top-level groups in some discord.py versions,
+        # so we patch groups explicitly and then their children.
+        top_level = list(bot.tree.get_commands() or [])
+        for top in top_level:
+            try:
+                _patch(top)
+            except Exception:
+                pass
+            try:
+                if isinstance(top, app_commands.Group):
+                    for child in top.walk_commands():
+                        try:
+                            _patch(child)
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+        # Also patch anything else discoverable via tree walking.
         for cmd in bot.tree.walk_commands():
             try:
-                # Allow usage in guilds + DMs + private channels.
-                # Apply unconditionally: discord.py may set defaults that still exclude DMs.
-                app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(cmd)
-
-                # Allow both guild installs and user installs.
-                # User installs are required for most "use in DMs" setups.
-                app_commands.allowed_installs(guilds=True, users=True)(cmd)
+                _patch(cmd)
             except Exception:
-                # Never fail startup/sync due to a single command.
                 continue
     except Exception:
         return
