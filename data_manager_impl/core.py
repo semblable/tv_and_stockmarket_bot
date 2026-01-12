@@ -675,6 +675,26 @@ class DataManagerCore:
         except Exception as e:
             logger.warning(f"Could not create reminders indexes: {e}")
 
+        # --- Mood tracking (optional; user opt-in only via preferences) ---
+        create_mood_entries_sql = """
+        CREATE TABLE IF NOT EXISTS mood_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            mood INTEGER NOT NULL, -- 1..10
+            energy INTEGER, -- optional 1..10
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        create_table_if_not_exists("mood_entries", create_mood_entries_sql)
+        try:
+            self._execute_query(
+                "CREATE INDEX IF NOT EXISTS idx_mood_entries_user_created ON mood_entries(user_id, created_at);",
+                commit=True,
+            )
+        except Exception as e:
+            logger.warning(f"Could not create mood_entries indexes: {e}")
+
         logger.info("Database initialization check complete.")
 
     # -------------------------

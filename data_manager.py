@@ -19,6 +19,7 @@ from data_manager_impl.prefs_weather import PrefsWeatherMixin
 from data_manager_impl.books import BooksMixin
 from data_manager_impl.reading import ReadingMixin
 from data_manager_impl.games import GamesMixin
+from data_manager_impl.mood import MoodMixin
 
 
 class DataManager(
@@ -31,6 +32,7 @@ class DataManager(
     BooksMixin,
     ReadingMixin,
     GamesMixin,
+    MoodMixin,
 ):
     def __init__(self) -> None:
         super().__init__(db_path=SQLITE_DB_PATH)

@@ -4,6 +4,7 @@ import json
 import urllib.parse
 import requests
 import io
+from typing import Optional
 
 QUICKCHART_BASE_URL = "https://quickchart.io/chart"
 QUICKCHART_SHORT_URL = "https://quickchart.io/chart/create"
@@ -437,6 +438,107 @@ def get_habit_weekday_chart_image(
     Generates a habit weekday distribution bar chart as bytes (io.BytesIO).
     """
     chart_config = _create_habit_weekday_chart_config(title, labels, values)
+    if not chart_config:
+        return None
+    try:
+        post_payload = {
+            "chart": chart_config,
+            "width": chart_width,
+            "height": chart_height,
+            "backgroundColor": "white",
+            "format": "png",
+        }
+        response = requests.post(QUICKCHART_BASE_URL, json=post_payload, timeout=30)
+        if response.status_code == 200:
+            return io.BytesIO(response.content)
+        return None
+    except Exception:
+        return None
+
+
+def _create_mood_daily_chart_config(title: str, labels: list, mood_values: list, energy_values: Optional[list] = None):
+    """
+    Line chart for mood (and optional energy) over time.
+    Uses `null` values to represent gaps (breaks the line).
+    """
+    if not labels or mood_values is None or len(labels) != len(mood_values):
+        return None
+    if energy_values is not None and len(energy_values) != len(labels):
+        return None
+
+    # Cap to keep payload small
+    if len(labels) > 400:
+        labels = labels[-400:]
+        mood_values = mood_values[-400:]
+        if energy_values is not None:
+            energy_values = energy_values[-400:]
+
+    datasets = [
+        {
+            "label": "mood (avg)",
+            "data": mood_values,
+            "fill": False,
+            "borderColor": "rgba(124, 58, 237, 1)",
+            "backgroundColor": "rgba(124, 58, 237, 0.15)",
+            "borderWidth": 3,
+            "pointRadius": 3,
+            "pointHoverRadius": 5,
+            "spanGaps": False,
+            "tension": 0.25,
+        }
+    ]
+    if energy_values is not None:
+        datasets.append(
+            {
+                "label": "energy (avg)",
+                "data": energy_values,
+                "fill": False,
+                "borderColor": "rgba(16, 185, 129, 1)",
+                "backgroundColor": "rgba(16, 185, 129, 0.15)",
+                "borderWidth": 2,
+                "pointRadius": 2,
+                "pointHoverRadius": 4,
+                "spanGaps": False,
+                "tension": 0.25,
+            }
+        )
+
+    return {
+        "type": "line",
+        "data": {"labels": labels, "datasets": datasets},
+        "options": {
+            "responsive": True,
+            "plugins": {
+                "title": {"display": True, "text": title, "font": {"size": 18}},
+                "legend": {"display": True},
+            },
+            "scales": {
+                "x": {"grid": {"display": False}},
+                "y": {
+                    "beginAtZero": True,
+                    "min": 0,
+                    "max": 10,
+                    "grid": {"color": "rgba(0, 0, 0, 0.06)"},
+                    "ticks": {"stepSize": 1},
+                },
+            },
+        },
+    }
+
+
+def get_mood_daily_chart_image(
+    title: str,
+    labels: list,
+    mood_values: list,
+    energy_values: Optional[list] = None,
+    *,
+    chart_width: int = 980,
+    chart_height: int = 420,
+):
+    """
+    Generates a mood line chart image (PNG) and returns it as bytes (io.BytesIO).
+    """
+    chart_config = _create_mood_daily_chart_config(title, labels, mood_values, energy_values)
     if not chart_config:
         return None
     try:
