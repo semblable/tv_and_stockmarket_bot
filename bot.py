@@ -20,7 +20,7 @@ import random # For placeholder chart data
 log = logger.get_logger(__name__)
 log.info("Bot script started. Logging configured via logger.py.")
 
-def _enable_dm_for_app_commands() -> None:
+def _enable_dm_for_app_commands(bot: commands.Bot) -> None:
     """
     Ensure application (slash) commands are allowed in DMs/private channels and for user installs.
 
@@ -31,11 +31,12 @@ def _enable_dm_for_app_commands() -> None:
         for cmd in bot.tree.walk_commands():
             try:
                 # Allow usage in guilds + DMs + private channels.
-                if getattr(cmd, "allowed_contexts", None) is None:
-                    app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(cmd)
-                # Allow both guild installs and user installs (needed for DM availability in many setups).
-                if getattr(cmd, "allowed_installs", None) is None:
-                    app_commands.allowed_installs(guilds=True, users=True)(cmd)
+                # Apply unconditionally: discord.py may set defaults that still exclude DMs.
+                app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(cmd)
+
+                # Allow both guild installs and user installs.
+                # User installs are required for most "use in DMs" setups.
+                app_commands.allowed_installs(guilds=True, users=True)(cmd)
             except Exception:
                 # Never fail startup/sync due to a single command.
                 continue
@@ -166,7 +167,7 @@ async def on_ready():
     commands_synced = False
     try:
         # Make sure commands are DM-capable before syncing them to Discord.
-        _enable_dm_for_app_commands()
+        _enable_dm_for_app_commands(bot)
 
         # Guild sync is the only way to make new slash commands appear immediately.
         # The old code synced only to bot.guilds[0], which is easy to miss if you test in another server.
@@ -240,7 +241,7 @@ async def sync_prefix(ctx: commands.Context):
     This works as a PREFIX command: !sync
     """
     try:
-        _enable_dm_for_app_commands()
+        _enable_dm_for_app_commands(bot)
         guild_id = ctx.guild.id
         bot.tree.copy_global_to(guild=discord.Object(id=guild_id))
         synced = await bot.tree.sync(guild=discord.Object(id=guild_id))

@@ -105,7 +105,9 @@ class MoodCog(commands.Cog, name="Mood"):
 
     async def _send_ctx(self, ctx: commands.Context, content: str, *, ephemeral: bool = True, embed: Optional[discord.Embed] = None) -> None:
         if getattr(ctx, "interaction", None):
-            await ctx.send(content=content if content else None, embed=embed, ephemeral=ephemeral)
+            # Ephemeral responses are not supported/meaningful in DMs; some clients/APIs reject them.
+            effective_ephemeral = bool(ephemeral) and (getattr(ctx, "guild", None) is not None)
+            await ctx.send(content=content if content else None, embed=embed, ephemeral=effective_ephemeral)
         else:
             await ctx.send(content=content if content else None, embed=embed)
 
