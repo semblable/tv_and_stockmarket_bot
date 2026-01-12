@@ -1,6 +1,7 @@
 import logging
 import re
 from datetime import datetime, timedelta, timezone, time as dtime, date
+from functools import partial
 from typing import Optional, Tuple, Dict, Any
 
 import discord
@@ -392,12 +393,14 @@ class MoodCog(commands.Cog, name="Mood"):
 
         entry_id = await self.bot.loop.run_in_executor(
             None,
-            self.db_manager.create_mood_entry,
-            ctx.author.id,
-            int(mood),
-            energy=energy,
-            note=note,
-            created_at_utc=_sqlite_utc_timestamp(_utc_now()),
+            partial(
+                self.db_manager.create_mood_entry,
+                ctx.author.id,
+                int(mood),
+                energy=energy,
+                note=note,
+                created_at_utc=_sqlite_utc_timestamp(_utc_now()),
+            ),
         )
         if not entry_id:
             await self._send_ctx(ctx, "❌ Could not log that. Mood and energy must be 1–10.", ephemeral=True)
@@ -695,7 +698,9 @@ class MoodCog(commands.Cog, name="Mood"):
             await ctx.send("No valid changes found.")
             return
 
-        ok = await self.bot.loop.run_in_executor(None, self.db_manager.update_mood_entry, ctx.author.id, entry_id, **kwargs)
+        ok = await self.bot.loop.run_in_executor(
+            None, partial(self.db_manager.update_mood_entry, ctx.author.id, entry_id, **kwargs)
+        )
         if not ok:
             await ctx.send("❌ Could not update that entry (check ranges 1–10).")
             return
