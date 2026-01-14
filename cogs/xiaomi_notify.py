@@ -40,7 +40,9 @@ class XiaomiNotifyCog(commands.Cog, name="Xiaomi / Notify"):
         # Fallback: user must replace with their public bot URL.
         return f"https://YOUR-BOT-DOMAIN.example/webhook/xiaomi/{token}"
 
-    @commands.hybrid_group(name="xiaomi", fallback="status")
+    # NOTE: don't use fallback="status" here because it implicitly registers a "status"
+    # subcommand, which conflicts with our explicit /xiaomi status command.
+    @commands.hybrid_group(name="xiaomi")
     async def xiaomi_group(self, ctx: commands.Context) -> None:
         """Manage Notify for Xiaomi webhook ingestion."""
         if ctx.invoked_subcommand is None:
