@@ -20,6 +20,7 @@ from data_manager_impl.books import BooksMixin
 from data_manager_impl.reading import ReadingMixin
 from data_manager_impl.games import GamesMixin
 from data_manager_impl.mood import MoodMixin
+from data_manager_impl.notify_xiaomi import NotifyXiaomiMixin
 
 
 class DataManager(
@@ -33,6 +34,7 @@ class DataManager(
     ReadingMixin,
     GamesMixin,
     MoodMixin,
+    NotifyXiaomiMixin,
 ):
     def __init__(self) -> None:
         super().__init__(db_path=SQLITE_DB_PATH)

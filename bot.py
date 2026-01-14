@@ -11,10 +11,12 @@ import os
 from cogs.help import MyCustomHelpCommand # Import the custom help command
 import asyncio
 import traceback # Added for detailed error logging
-from flask import Flask
+from flask import Flask, request
 from threading import Thread
 from data_manager import DataManager # For API endpoints
 import random # For placeholder chart data
+import json
+import textwrap
 
 # Get logger
 log = logger.get_logger(__name__)
@@ -98,6 +100,7 @@ INITIAL_EXTENSIONS = [
     "cogs.productivity",  # To-dos + habits + escalating reminders
     "cogs.reminders",  # One-off + repeating reminders (timezone-aware)
     "cogs.mood",  # Optional mood tracking + daily reminder (opt-in)
+    "cogs.xiaomi_notify",  # Notify for Xiaomi ingestion (sleep/health -> webhook -> DM)
     # "cogs.help" # Not loaded as a cog, but assigned directly
 ]
 
@@ -149,6 +152,147 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
     return "Bot is alive and kicking!", 200 # Endpoint for uptime monitor
+
+
+def _extract_incoming_payload() -> dict:
+    """
+    Best-effort parsing for:
+    - JSON POST bodies
+    - form-encoded bodies
+    - querystring (Tasker sometimes uses this)
+    """
+    body_text = ""
+    try:
+        body_text = request.get_data(as_text=True) or ""
+    except Exception:
+        body_text = ""
+
+    json_body = None
+    try:
+        json_body = request.get_json(silent=True)
+    except Exception:
+        json_body = None
+
+    form_body = {}
+    try:
+        form_body = request.form.to_dict(flat=True) if request.form else {}
+    except Exception:
+        form_body = {}
+
+    args = {}
+    try:
+        args = request.args.to_dict(flat=True) if request.args else {}
+    except Exception:
+        args = {}
+
+    payload = {
+        "headers": {k: v for k, v in request.headers.items()},
+        "json": json_body,
+        "form": form_body,
+        "query": args,
+        "raw": body_text[:50000],
+        "path": request.path,
+        "method": request.method,
+    }
+    return payload
+
+
+def _format_xiaomi_message(payload: dict) -> str:
+    """
+    Create a readable DM message from arbitrary webhook payloads.
+    We keep it generic, but try to surface common fields (value1/value2/value3, event/type).
+    """
+    data = payload.get("json") if isinstance(payload.get("json"), dict) else None
+    form = payload.get("form") if isinstance(payload.get("form"), dict) else {}
+    query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
+
+    # Common fields used by webhooks/IFTTT/Tasker patterns
+    def pick(*keys: str) -> str:
+        for k in keys:
+            if data and k in data and data[k] is not None:
+                return str(data[k])
+            if k in form and form[k] is not None:
+                return str(form[k])
+            if k in query and query[k] is not None:
+                return str(query[k])
+        return ""
+
+    event = pick("event", "type", "action", "name")
+    v1 = pick("value1", "v1", "title")
+    v2 = pick("value2", "v2", "message", "text")
+    v3 = pick("value3", "v3", "extra", "details")
+
+    lines = ["📥 **Xiaomi/Notify webhook received**"]
+    if event:
+        lines.append(f"**Event:** `{event}`")
+    if v1 or v2 or v3:
+        if v1:
+            lines.append(f"**value1:** {v1}")
+        if v2:
+            lines.append(f"**value2:** {v2}")
+        if v3:
+            lines.append(f"**value3:** {v3}")
+
+    # Attach a compact JSON snippet for debugging
+    snippet_obj = data if data is not None else {"form": form, "query": query}
+    try:
+        snippet = json.dumps(snippet_obj, ensure_ascii=False, indent=2)
+    except Exception:
+        snippet = str(snippet_obj)
+    snippet = snippet[:1500]
+    lines.append("```json\n" + snippet + "\n```")
+    return "\n".join(lines)
+
+
+@flask_app.route("/webhook/xiaomi/<token>", methods=["POST"])
+def xiaomi_webhook(token: str):
+    # Token is the only authentication mechanism; keep it secret per user.
+    if not token or len(token) < 10:
+        return "invalid token", 400
+
+    if not getattr(bot, "db_manager", None):
+        return "db not ready", 503
+
+    user_id = None
+    try:
+        user_id = bot.db_manager.get_xiaomi_user_id_by_token(str(token))
+    except Exception as e:
+        log.error(f"Xiaomi webhook lookup failed: {e}", exc_info=True)
+        return "lookup failed", 500
+
+    if not user_id:
+        return "unknown token", 404
+
+    payload = _extract_incoming_payload()
+    try:
+        bot.db_manager.touch_xiaomi_webhook_last_seen(user_id, payload)
+    except Exception as e:
+        log.warning(f"Could not persist Xiaomi webhook payload: {e}")
+
+    # Deliver to Discord DM via the bot event loop.
+    try:
+        msg = _format_xiaomi_message(payload)
+        asyncio.run_coroutine_threadsafe(_deliver_xiaomi_dm(int(user_id), msg), bot.loop)
+    except Exception as e:
+        log.error(f"Failed to schedule Xiaomi DM delivery: {e}", exc_info=True)
+        return "delivery failed", 500
+
+    return "ok", 200
+
+
+async def _deliver_xiaomi_dm(user_id: int, content: str) -> None:
+    try:
+        user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        if not user:
+            return
+        # Discord hard limit is 2000 chars; keep it safe.
+        if len(content) <= 1900:
+            await user.send(content)
+            return
+        for chunk in textwrap.wrap(content, width=1800, break_long_words=False, replace_whitespace=False):
+            await user.send(chunk)
+    except Exception as e:
+        log.error(f"Failed to DM Xiaomi webhook content to user {user_id}: {e}", exc_info=True)
 
 # --- Initialize DataManager ---
 # This should be done once, and the instance can be shared.

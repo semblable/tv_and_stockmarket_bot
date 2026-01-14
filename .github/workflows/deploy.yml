@@ -140,6 +140,7 @@ jobs:
           docker run -d \
             --name bot-container \
             --restart unless-stopped \
+            -p 5000:5000 \
             -v \"\$HOME/data:/app/data\" \
             --env-file \"\$HOME/.env\" \
             \"$IMAGE\"

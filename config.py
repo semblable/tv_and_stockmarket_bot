@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     OPENWEATHERMAP_API_KEY: str
     GEMINI_API_KEY: str
     SQLITE_DB_PATH: str = "data/app.db"
+    # Optional: used to generate correct public webhook URLs in Discord
+    # Example: https://your-service.onrender.com
+    PUBLIC_BASE_URL: str = ""
 
     # Config for pydantic settings
     model_config = SettingsConfigDict(
@@ -36,6 +39,7 @@ try:
     OPENWEATHERMAP_API_KEY = settings.OPENWEATHERMAP_API_KEY
     GEMINI_API_KEY = settings.GEMINI_API_KEY
     SQLITE_DB_PATH = settings.SQLITE_DB_PATH
+    PUBLIC_BASE_URL = settings.PUBLIC_BASE_URL
     
     logger.info("Configuration loaded successfully via Pydantic.")
 

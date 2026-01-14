@@ -55,6 +55,7 @@ TMDB_API_KEY=your_tmdb_key
 ALPHA_VANTAGE_API_KEY=your_av_key
 OPENWEATHERMAP_API_KEY=your_owm_key
 GEMINI_API_KEY=your_gemini_key
+PUBLIC_BASE_URL=https://your-public-https-domain
 ```
 
 ---
@@ -126,6 +127,56 @@ If you add the bot to a new server and slash commands don’t appear immediately
    ```
 
 Note: port `5000` is used by the built-in Flask uptime endpoint and can be omitted if you don’t need to expose it.
+
+---
+
+## Xiaomi Band / Notify for Xiaomi → Webhook → Discord (per-user)
+
+This bot supports ingesting health/sleep events via an HTTP webhook and routing them **per Discord user** using a secret URL.
+
+### 1) Set your public base URL
+
+Set `PUBLIC_BASE_URL` in `.env` to your public HTTPS domain (recommended), for example:
+
+```env
+PUBLIC_BASE_URL=https://your-service.onrender.com
+```
+
+### 2) Generate your personal secret webhook URL
+
+In Discord (DM or server):
+
+- `/xiaomi webhook`
+
+The bot will DM you a URL like:
+
+- `https://your-service.onrender.com/webhook/xiaomi/<YOUR_SECRET_TOKEN>`
+
+Keep it private. Anyone who has it can POST data as “you”.
+
+### 3) Configure Notify for Xiaomi (Android)
+
+There are two common ways; both end with POSTing to your secret URL.
+
+- **Option A — Notify “Custom Webhook” (if available in your app version)**
+  - Create an automation/trigger for **sleep processed** (or sleep sync completed).
+  - Set the action to **POST** to your secret URL above.
+  - If Notify lets you choose body fields, include at least `event`, and optionally `value1/value2/value3`.
+
+- **Option B — Tasker integration (recommended for reliability/custom payloads)**
+  - Enable Notify’s **Tasker integration**.
+  - In Tasker, create a Profile that triggers on the Notify event you want (sleep processed).
+  - Add an action **Net → HTTP Request**:
+    - Method: `POST`
+    - URL: your secret URL
+    - Body: JSON (example):
+      ```json
+      {"event":"sleep_processed","value1":"%someStart","value2":"%someEnd","value3":"%someSummary"}
+      ```
+
+### 4) What happens
+
+When the bot receives a POST at your secret URL, it will DM you a summary + a small JSON snippet of what it received (useful for iterating on Notify/Tasker payloads).
 
 ## 📂 Data Persistence
 The bot uses an SQLite database located at `data/app.db`.
