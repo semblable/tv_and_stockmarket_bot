@@ -144,13 +144,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
 
 # --- Flask Web Server for Render Uptime ---
 flask_app = Flask(__name__)
-# Prevent accidental huge uploads from exhausting memory.
-# Automate CSV exports are usually small, but this keeps the endpoint safer.
-try:
-    _max_mb = int(os.environ.get("XIAOMI_MAX_UPLOAD_MB", "25"))
-except Exception:
-    _max_mb = 25
-flask_app.config["MAX_CONTENT_LENGTH"] = max(1, _max_mb) * 1024 * 1024
 # flask_app.logger.critical("!!!!!!!!!! BOT.PY HAS STARTED - LOGGER TEST !!!!!!!!!!") # New test log
 
 @flask_app.route('/')
