@@ -11,8 +11,8 @@ def test_mood_report_csv_and_html_basic():
     ]
 
     csv_b = to_csv_bytes(days)
-    assert b"bucket,entries,avg_mood,avg_energy,min_mood,max_mood" in csv_b
-    assert b"2025-01-01,2,6.50,5.00,6,7" in csv_b
+    assert b"bucket,entries,avg_mood,avg_energy,min_mood,max_mood,sleep_total_min" in csv_b
+    assert b"2025-01-01,2,6.50,5.00,6,7," in csv_b
     assert b"2025-01-02,0" in csv_b
 
     html_b = to_html_report_bytes(

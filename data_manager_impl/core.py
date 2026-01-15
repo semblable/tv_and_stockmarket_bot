@@ -712,6 +712,34 @@ class DataManagerCore:
         except Exception as e:
             logger.warning(f"Could not create idx_xiaomi_webhooks_token: {e}")
 
+        # --- Notify for Xiaomi: sleep CSV imports (per-user) ---
+        create_xiaomi_sleep_sql = """
+        CREATE TABLE IF NOT EXISTS xiaomi_sleep_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            sleep_date TEXT NOT NULL, -- YYYY-MM-DD (local date from CSV)
+            start_text TEXT,
+            end_text TEXT,
+            duration_min INTEGER,
+            deep_min INTEGER,
+            light_min INTEGER,
+            rem_min INTEGER,
+            awake_min INTEGER,
+            sleep_score REAL,
+            source_filename TEXT,
+            raw_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        create_table_if_not_exists("xiaomi_sleep_entries", create_xiaomi_sleep_sql)
+        try:
+            self._execute_query(
+                "CREATE INDEX IF NOT EXISTS idx_xiaomi_sleep_user_date ON xiaomi_sleep_entries(user_id, sleep_date);",
+                commit=True,
+            )
+        except Exception as e:
+            logger.warning(f"Could not create idx_xiaomi_sleep_user_date: {e}")
+
         logger.info("Database initialization check complete.")
 
     # -------------------------

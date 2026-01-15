@@ -1117,6 +1117,16 @@ class MoodCog(commands.Cog, name="Mood"):
             5000,
         )
 
+        # Pull sleep data for the same date range (local date strings).
+        sleep_rows = await self.bot.loop.run_in_executor(
+            None,
+            self.db_manager.list_xiaomi_sleep_entries_between,
+            ctx.author.id,
+            start_local.date().isoformat(),
+            (end_local.date() - timedelta(days=1)).isoformat(),
+            20000,
+        )
+
         # Build buckets
         # day_key -> list of moods/energies
         by_key: Dict[str, Dict[str, list]] = {}
@@ -1145,6 +1155,51 @@ class MoodCog(commands.Cog, name="Mood"):
             if ev_i is not None:
                 b["energies"].append(ev_i)
 
+        # Aggregate sleep rows by day (local date string already).
+        sleep_by_day: Dict[str, Dict[str, Any]] = {}
+        for r in sleep_rows or []:
+            day = str(r.get("sleep_date") or "").strip()
+            if not day:
+                continue
+            b = sleep_by_day.setdefault(
+                day,
+                {
+                    "total_min": 0,
+                    "deep_min": 0,
+                    "light_min": 0,
+                    "rem_min": 0,
+                    "awake_min": 0,
+                    "score_sum": 0.0,
+                    "score_n": 0,
+                    "has_any": False,
+                },
+            )
+
+            def add_int(key: str, field: str) -> None:
+                v = r.get(field)
+                try:
+                    if v is None:
+                        return
+                    b[key] += int(v)
+                    b["has_any"] = True
+                except Exception:
+                    return
+
+            add_int("total_min", "duration_min")
+            add_int("deep_min", "deep_min")
+            add_int("light_min", "light_min")
+            add_int("rem_min", "rem_min")
+            add_int("awake_min", "awake_min")
+
+            score = r.get("sleep_score")
+            try:
+                if score is not None:
+                    b["score_sum"] += float(score)
+                    b["score_n"] += 1
+                    b["has_any"] = True
+            except Exception:
+                pass
+
         from utils.mood_report import MoodDaySummary, to_csv_bytes, to_html_report_bytes
         from utils.chart_utils import get_mood_daily_chart_image
 
@@ -1154,8 +1209,36 @@ class MoodCog(commands.Cog, name="Mood"):
         while cur < end_local.date():
             key = cur.isoformat()
             b = by_key.get(key)
+            sleep = sleep_by_day.get(key, {})
+            sleep_score = None
+            if sleep.get("score_n"):
+                try:
+                    sleep_score = float(sleep.get("score_sum", 0.0)) / float(sleep.get("score_n", 1))
+                except Exception:
+                    sleep_score = None
+            sleep_total_min = sleep.get("total_min") if sleep.get("has_any") else None
+            sleep_deep_min = sleep.get("deep_min") if sleep.get("has_any") else None
+            sleep_light_min = sleep.get("light_min") if sleep.get("has_any") else None
+            sleep_rem_min = sleep.get("rem_min") if sleep.get("has_any") else None
+            sleep_awake_min = sleep.get("awake_min") if sleep.get("has_any") else None
             if not b or not b.get("moods"):
-                summaries.append(MoodDaySummary(label=key, start_day=cur, n=0, avg_mood=None, avg_energy=None, min_mood=None, max_mood=None))
+                summaries.append(
+                    MoodDaySummary(
+                        label=key,
+                        start_day=cur,
+                        n=0,
+                        avg_mood=None,
+                        avg_energy=None,
+                        min_mood=None,
+                        max_mood=None,
+                        sleep_total_min=sleep_total_min,
+                        sleep_score=sleep_score,
+                        sleep_deep_min=sleep_deep_min,
+                        sleep_light_min=sleep_light_min,
+                        sleep_rem_min=sleep_rem_min,
+                        sleep_awake_min=sleep_awake_min,
+                    )
+                )
             else:
                 moods = list(b.get("moods") or [])
                 ens = list(b.get("energies") or [])
@@ -1168,6 +1251,12 @@ class MoodCog(commands.Cog, name="Mood"):
                         avg_energy=(sum(ens) / len(ens)) if ens else None,
                         min_mood=min(moods) if moods else None,
                         max_mood=max(moods) if moods else None,
+                        sleep_total_min=sleep_total_min,
+                        sleep_score=sleep_score,
+                        sleep_deep_min=sleep_deep_min,
+                        sleep_light_min=sleep_light_min,
+                        sleep_rem_min=sleep_rem_min,
+                        sleep_awake_min=sleep_awake_min,
                     )
                 )
             cur = cur + timedelta(days=1)

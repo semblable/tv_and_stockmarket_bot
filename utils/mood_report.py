@@ -15,12 +15,33 @@ class MoodDaySummary:
     avg_energy: Optional[float]  # 1..10
     min_mood: Optional[int]
     max_mood: Optional[int]
+    sleep_total_min: Optional[int] = None
+    sleep_score: Optional[float] = None
+    sleep_deep_min: Optional[int] = None
+    sleep_light_min: Optional[int] = None
+    sleep_rem_min: Optional[int] = None
+    sleep_awake_min: Optional[int] = None
 
 
 def to_csv_bytes(days: Sequence[MoodDaySummary]) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["bucket", "entries", "avg_mood", "avg_energy", "min_mood", "max_mood"])
+    w.writerow(
+        [
+            "bucket",
+            "entries",
+            "avg_mood",
+            "avg_energy",
+            "min_mood",
+            "max_mood",
+            "sleep_total_min",
+            "sleep_score",
+            "sleep_deep_min",
+            "sleep_light_min",
+            "sleep_rem_min",
+            "sleep_awake_min",
+        ]
+    )
     for d in days:
         w.writerow(
             [
@@ -30,6 +51,12 @@ def to_csv_bytes(days: Sequence[MoodDaySummary]) -> bytes:
                 ("" if d.avg_energy is None else f"{d.avg_energy:.2f}"),
                 ("" if d.min_mood is None else str(int(d.min_mood))),
                 ("" if d.max_mood is None else str(int(d.max_mood))),
+                ("" if d.sleep_total_min is None else str(int(d.sleep_total_min))),
+                ("" if d.sleep_score is None else f"{float(d.sleep_score):.2f}"),
+                ("" if d.sleep_deep_min is None else str(int(d.sleep_deep_min))),
+                ("" if d.sleep_light_min is None else str(int(d.sleep_light_min))),
+                ("" if d.sleep_rem_min is None else str(int(d.sleep_rem_min))),
+                ("" if d.sleep_awake_min is None else str(int(d.sleep_awake_min))),
             ]
         )
     return buf.getvalue().encode("utf-8")
@@ -107,6 +134,19 @@ def to_html_report_bytes(
         # Map 1..10 -> red..green hue
         hue = (v - 1.0) / 9.0 * 120.0
         return f"hsl({hue:.0f} 70% 45%)"
+
+    def fmt_sleep_minutes(v: Optional[int]) -> str:
+        if v is None:
+            return "—"
+        try:
+            total = max(0, int(v))
+        except Exception:
+            return "—"
+        hh = total // 60
+        mm = total % 60
+        if hh <= 0:
+            return f"{mm}m"
+        return f"{hh}h {mm:02d}m"
 
     def calendar_html() -> str:
         # Only meaningful for day-granularity exports.
@@ -402,24 +442,35 @@ def to_html_report_bytes(
     <table>
       <thead>
         <tr>
-          <th style="width: 28%;">Date (local)</th>
-          <th style="width: 12%;">Entries</th>
-          <th style="width: 20%;">Avg mood</th>
-          <th style="width: 20%;">Avg energy</th>
-          <th style="width: 20%;">Min–Max</th>
+          <th style="width: 22%;">Date (local)</th>
+          <th style="width: 10%;">Entries</th>
+          <th style="width: 16%;">Avg mood</th>
+          <th style="width: 16%;">Avg energy</th>
+          <th style="width: 16%;">Min–Max</th>
+          <th style="width: 10%;">Sleep</th>
+          <th style="width: 10%;">Score</th>
         </tr>
       </thead>
       <tbody>
 """
 
     for d in days:
+        sleep_text = fmt_sleep_minutes(d.sleep_total_min)
+        sleep_score = "—" if d.sleep_score is None else f"{float(d.sleep_score):.0f}"
         if d.n <= 0 or d.avg_mood is None:
-            html += f"<tr><td>{_safe(d.label)}</td><td class='gap'>0</td><td class='gap'>gap</td><td class='gap'>—</td><td class='gap'>—</td></tr>\n"
+            html += (
+                f"<tr><td>{_safe(d.label)}</td><td class='gap'>0</td>"
+                f"<td class='gap'>gap</td><td class='gap'>—</td><td class='gap'>—</td>"
+                f"<td>{_safe(sleep_text)}</td><td>{_safe(sleep_score)}</td></tr>\n"
+            )
             continue
         avg_m = f"{float(d.avg_mood):.2f}"
         avg_e = "—" if d.avg_energy is None else f"{float(d.avg_energy):.2f}"
         mm = "—" if d.min_mood is None or d.max_mood is None else f"{int(d.min_mood)}–{int(d.max_mood)}"
-        html += f"<tr><td>{_safe(d.label)}</td><td>{int(d.n)}</td><td><strong>{avg_m}</strong></td><td>{avg_e}</td><td>{mm}</td></tr>\n"
+        html += (
+            f"<tr><td>{_safe(d.label)}</td><td>{int(d.n)}</td><td><strong>{avg_m}</strong></td>"
+            f"<td>{avg_e}</td><td>{mm}</td><td>{_safe(sleep_text)}</td><td>{_safe(sleep_score)}</td></tr>\n"
+        )
 
     html += """      </tbody>
     </table>

@@ -20,7 +20,8 @@ import json
 import textwrap
 import datetime
 import csv
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+import re
 
 # Get logger
 log = logger.get_logger(__name__)
@@ -215,6 +216,228 @@ def _summarize_csv(path: str, *, max_rows: int = 200000) -> Dict[str, Any]:
         return result
 
 
+def _normalize_header(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (s or "").strip().lower())
+
+
+def _parse_date_text(s: str) -> Optional[datetime.date]:
+    txt = (s or "").strip()
+    if not txt:
+        return None
+    # Try ISO-ish first
+    try:
+        if "T" in txt:
+            return datetime.datetime.fromisoformat(txt.replace("Z", "+00:00")).date()
+    except Exception:
+        pass
+    # Try datetime formats
+    for fmt in (
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%d.%m.%Y %H:%M",
+        "%m/%d/%Y %H:%M",
+        "%d/%m/%Y %H:%M",
+    ):
+        try:
+            return datetime.datetime.strptime(txt, fmt).date()
+        except Exception:
+            continue
+    # Try date-only formats
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d.%m.%Y", "%m/%d/%Y", "%d/%m/%Y"):
+        try:
+            return datetime.datetime.strptime(txt, fmt).date()
+        except Exception:
+            continue
+    return None
+
+
+def _parse_datetime_text(s: str) -> Optional[datetime.datetime]:
+    txt = (s or "").strip()
+    if not txt:
+        return None
+    try:
+        if "T" in txt:
+            return datetime.datetime.fromisoformat(txt.replace("Z", "+00:00"))
+    except Exception:
+        pass
+    for fmt in (
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%d.%m.%Y %H:%M",
+        "%m/%d/%Y %H:%M",
+        "%d/%m/%Y %H:%M",
+    ):
+        try:
+            return datetime.datetime.strptime(txt, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _parse_duration_minutes(s: str) -> Optional[int]:
+    txt = (s or "").strip().lower()
+    if not txt:
+        return None
+
+    # HH:MM(:SS)
+    if ":" in txt:
+        parts = [p for p in txt.split(":") if p.strip().isdigit()]
+        if len(parts) >= 2:
+            try:
+                hh = int(parts[0])
+                mm = int(parts[1])
+                return max(0, hh * 60 + mm)
+            except Exception:
+                pass
+
+    # "7h 30m" or "7.5h"
+    m_h = re.search(r"(\d+(?:\.\d+)?)\s*h", txt)
+    m_m = re.search(r"(\d+(?:\.\d+)?)\s*m", txt)
+    if m_h or m_m:
+        total = 0.0
+        if m_h:
+            total += float(m_h.group(1)) * 60.0
+        if m_m:
+            total += float(m_m.group(1))
+        return max(0, int(round(total)))
+
+    # Plain number (minutes or hours)
+    try:
+        num = float(txt.replace(",", "."))
+        if num <= 24:
+            # Heuristic: small numbers are usually hours in sleep exports.
+            return max(0, int(round(num * 60.0)))
+        return max(0, int(round(num)))
+    except Exception:
+        return None
+
+
+def _parse_sleep_csv(path: str, *, source_filename: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Parse Notify-for-Xiaomi sleep CSV into normalized entries.
+    Returns list of dicts ready for DB insertion.
+    """
+    entries: List[Dict[str, Any]] = []
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames:
+                return entries
+            header_map = {_normalize_header(h): h for h in reader.fieldnames if h}
+
+            def pick(row: Dict[str, Any], keys: List[str]) -> str:
+                for k in keys:
+                    h = header_map.get(k)
+                    if h is None:
+                        continue
+                    v = row.get(h)
+                    if v is not None and str(v).strip():
+                        return str(v).strip()
+                return ""
+
+            date_keys = ["date", "sleepdate", "day", "sleepday"]
+            start_keys = ["start", "starttime", "startdatetime", "sleepstart", "bedtime", "begin"]
+            end_keys = ["end", "endtime", "enddatetime", "sleepend", "waketime", "wake", "wakeuptime"]
+            duration_keys = ["duration", "totalsleep", "totalsleepduration", "sleeptime", "sleepduration", "total"]
+            deep_keys = ["deep", "deepsleep", "deepduration"]
+            light_keys = ["light", "lightsleep", "lightduration"]
+            rem_keys = ["rem", "remsleep", "remduration"]
+            awake_keys = ["awake", "awakeduration", "awaketotal", "awake_time"]
+            score_keys = ["score", "sleepscore", "sleepquality", "quality"]
+
+            for row in reader:
+                date_text = pick(row, date_keys)
+                start_text = pick(row, start_keys)
+                end_text = pick(row, end_keys)
+
+                sleep_date = _parse_date_text(date_text)
+                if sleep_date is None and start_text:
+                    sleep_date = _parse_date_text(start_text)
+
+                if sleep_date is None:
+                    continue
+
+                duration_min = _parse_duration_minutes(pick(row, duration_keys))
+
+                # If duration missing, try compute from start/end.
+                if duration_min is None and start_text and end_text:
+                    start_dt = _parse_datetime_text(start_text)
+                    end_dt = _parse_datetime_text(end_text)
+                    if start_dt and end_dt:
+                        if end_dt < start_dt:
+                            end_dt = end_dt + datetime.timedelta(days=1)
+                        delta = end_dt - start_dt
+                        duration_min = max(0, int(round(delta.total_seconds() / 60.0)))
+
+                deep_min = _parse_duration_minutes(pick(row, deep_keys))
+                light_min = _parse_duration_minutes(pick(row, light_keys))
+                rem_min = _parse_duration_minutes(pick(row, rem_keys))
+                awake_min = _parse_duration_minutes(pick(row, awake_keys))
+
+                score = None
+                score_text = pick(row, score_keys)
+                if score_text:
+                    try:
+                        score = float(score_text.replace(",", "."))
+                    except Exception:
+                        score = None
+
+                try:
+                    raw_json = json.dumps(row, ensure_ascii=False)[:50000]
+                except Exception:
+                    raw_json = None
+
+                entries.append(
+                    {
+                        "sleep_date": sleep_date.isoformat(),
+                        "start_text": start_text or None,
+                        "end_text": end_text or None,
+                        "duration_min": duration_min,
+                        "deep_min": deep_min,
+                        "light_min": light_min,
+                        "rem_min": rem_min,
+                        "awake_min": awake_min,
+                        "sleep_score": score,
+                        "source_filename": source_filename,
+                        "raw_json": raw_json,
+                    }
+                )
+    except Exception:
+        return entries
+
+    return entries
+
+
+def _process_xiaomi_sleep_files(user_id: str, files_meta: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not files_meta or not getattr(bot, "db_manager", None):
+        return None
+    summary = {"files": 0, "rows": 0, "days": 0, "inserted": 0, "names": []}
+    for f in files_meta:
+        saved_as = f.get("saved_as") if isinstance(f, dict) else None
+        if not saved_as:
+            continue
+        file_path = os.path.join(_xiaomi_upload_dir(user_id), str(saved_as))
+        if not os.path.exists(file_path):
+            continue
+        entries = _parse_sleep_csv(file_path, source_filename=str(f.get("filename") or saved_as))
+        if not entries:
+            continue
+        try:
+            inserted = bot.db_manager.replace_xiaomi_sleep_entries(int(user_id), entries)
+        except Exception:
+            inserted = 0
+        summary["files"] += 1
+        summary["rows"] += len(entries)
+        summary["inserted"] += int(inserted or 0)
+        summary["names"].append(str(f.get("filename") or saved_as))
+        summary["days"] += len({e.get("sleep_date") for e in entries if e.get("sleep_date")})
+    if summary["files"] <= 0:
+        return None
+    return summary
+
+
 def _ingest_uploaded_files_for_xiaomi(user_id: str) -> List[Dict[str, Any]]:
     """
     Save any uploaded multipart files (e.g., Automate -> multipart/form-data) and return metadata.
@@ -345,6 +568,7 @@ def _format_xiaomi_message(payload: dict) -> str:
     form = payload.get("form") if isinstance(payload.get("form"), dict) else {}
     query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
     files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    sleep_import = payload.get("sleep_import") if isinstance(payload.get("sleep_import"), dict) else {}
 
     # Common fields used by webhooks/IFTTT/Tasker patterns
     def pick(*keys: str) -> str:
@@ -383,6 +607,17 @@ def _format_xiaomi_message(payload: dict) -> str:
                 truncated = bool(csv_info.get("truncated"))
                 suffix = " (truncated)" if truncated else ""
                 lines.append(f"  - CSV: `{len(hdrs)}` columns, `{rows}` rows{suffix}")
+    if sleep_import:
+        try:
+            rows = int(sleep_import.get("rows") or 0)
+        except Exception:
+            rows = 0
+        try:
+            days = int(sleep_import.get("days") or 0)
+        except Exception:
+            days = 0
+        if rows or days:
+            lines.append(f"**Sleep import:** `{rows}` rows → `{days}` day(s)")
     if event:
         lines.append(f"**Event:** `{event}`")
     if v1 or v2 or v3:
@@ -429,6 +664,9 @@ def xiaomi_webhook(token: str):
         files_meta = _ingest_uploaded_files_for_xiaomi(str(user_id))
         if files_meta:
             payload["files"] = files_meta
+            sleep_import = _process_xiaomi_sleep_files(str(user_id), files_meta)
+            if sleep_import:
+                payload["sleep_import"] = sleep_import
     except Exception as e:
         payload["files"] = [{"error": str(e)}]
     try:

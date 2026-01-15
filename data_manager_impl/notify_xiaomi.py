@@ -1,7 +1,7 @@
 import secrets
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -106,5 +106,102 @@ class NotifyXiaomiMixin:
                 params={"user_id": str(user_id), "payload": payload_text},
                 commit=True,
             )
+        )
+
+    # ---- Sleep CSV ingestion ----
+    def replace_xiaomi_sleep_entries(self, user_id: int, entries: List[Dict[str, Any]]) -> int:
+        """
+        Replace sleep entries for the dates present in `entries`.
+        Returns number of rows inserted.
+        """
+        uid = str(int(user_id))
+        if not entries:
+            return 0
+
+        dates = sorted({str(e.get("sleep_date") or "").strip() for e in entries if e.get("sleep_date")})
+        dates = [d for d in dates if len(d) >= 8]
+        if not dates:
+            return 0
+
+        # Delete existing rows for those dates to avoid duplicates on re-upload.
+        placeholders = []
+        params: Dict[str, Any] = {"user_id": uid}
+        for i, d in enumerate(dates):
+            key = f"d{i}"
+            placeholders.append(f":{key}")
+            params[key] = d
+        q_del = f"""
+        DELETE FROM xiaomi_sleep_entries
+        WHERE user_id = :user_id AND sleep_date IN ({", ".join(placeholders)})
+        """
+        self._execute_query(q_del, params=params, commit=True)
+
+        q_ins = """
+        INSERT INTO xiaomi_sleep_entries (
+            user_id, sleep_date, start_text, end_text,
+            duration_min, deep_min, light_min, rem_min, awake_min,
+            sleep_score, source_filename, raw_json
+        )
+        VALUES (
+            :user_id, :sleep_date, :start_text, :end_text,
+            :duration_min, :deep_min, :light_min, :rem_min, :awake_min,
+            :sleep_score, :source_filename, :raw_json
+        )
+        """
+        inserted = 0
+        for e in entries:
+            params = {
+                "user_id": uid,
+                "sleep_date": str(e.get("sleep_date") or "").strip(),
+                "start_text": e.get("start_text"),
+                "end_text": e.get("end_text"),
+                "duration_min": e.get("duration_min"),
+                "deep_min": e.get("deep_min"),
+                "light_min": e.get("light_min"),
+                "rem_min": e.get("rem_min"),
+                "awake_min": e.get("awake_min"),
+                "sleep_score": e.get("sleep_score"),
+                "source_filename": e.get("source_filename"),
+                "raw_json": e.get("raw_json"),
+            }
+            ok = self._execute_query(q_ins, params=params, commit=True)
+            if ok:
+                inserted += 1
+        return inserted
+
+    def list_xiaomi_sleep_entries_between(
+        self,
+        user_id: int,
+        start_date: str,
+        end_date: str,
+        limit: int = 5000,
+    ) -> List[Dict[str, Any]]:
+        """
+        Returns sleep entries in [start_date, end_date] (inclusive), using YYYY-MM-DD strings.
+        """
+        uid = str(int(user_id))
+        lim = max(1, min(20000, int(limit)))
+        s = str(start_date or "").strip()
+        e = str(end_date or "").strip()
+        if len(s) < 8 or len(e) < 8:
+            return []
+        q = """
+        SELECT id, user_id, sleep_date, start_text, end_text,
+               duration_min, deep_min, light_min, rem_min, awake_min,
+               sleep_score, source_filename, raw_json, created_at
+        FROM xiaomi_sleep_entries
+        WHERE user_id = :user_id
+          AND sleep_date >= :start_date
+          AND sleep_date <= :end_date
+        ORDER BY sleep_date ASC, id ASC
+        LIMIT :lim
+        """
+        return (
+            self._execute_query(
+                q,
+                {"user_id": uid, "start_date": s, "end_date": e, "lim": lim},
+                fetch_all=True,
+            )
+            or []
         )
 
