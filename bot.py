@@ -12,11 +12,15 @@ from cogs.help import MyCustomHelpCommand # Import the custom help command
 import asyncio
 import traceback # Added for detailed error logging
 from flask import Flask, request
+from werkzeug.utils import secure_filename
 from threading import Thread
 from data_manager import DataManager # For API endpoints
 import random # For placeholder chart data
 import json
 import textwrap
+import datetime
+import csv
+from typing import Any, Dict, List
 
 # Get logger
 log = logger.get_logger(__name__)
@@ -147,11 +151,129 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
 
 # --- Flask Web Server for Render Uptime ---
 flask_app = Flask(__name__)
+# Prevent accidental huge uploads from exhausting memory.
+# Automate CSV exports are usually small, but this keeps the endpoint safer.
+try:
+    _max_mb = int(os.environ.get("XIAOMI_MAX_UPLOAD_MB", "25"))
+except Exception:
+    _max_mb = 25
+flask_app.config["MAX_CONTENT_LENGTH"] = max(1, _max_mb) * 1024 * 1024
 # flask_app.logger.critical("!!!!!!!!!! BOT.PY HAS STARTED - LOGGER TEST !!!!!!!!!!") # New test log
 
 @flask_app.route('/')
 def home():
     return "Bot is alive and kicking!", 200 # Endpoint for uptime monitor
+
+
+def _data_dir() -> str:
+    # Keep uploads alongside the SQLite DB so Docker volume mapping persists them.
+    db_path = getattr(config, "SQLITE_DB_PATH", "") or "data/app.db"
+    base = os.path.dirname(db_path) or "data"
+    return base
+
+
+def _xiaomi_upload_dir(user_id: str) -> str:
+    base = _data_dir()
+    path = os.path.join(base, "xiaomi_uploads", str(user_id))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _read_file_head_text(path: str, *, max_bytes: int = 4096) -> str:
+    try:
+        with open(path, "rb") as f:
+            data = f.read(max_bytes)
+        return data.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _summarize_csv(path: str, *, max_rows: int = 200000) -> Dict[str, Any]:
+    """
+    Lightweight CSV summary for DM/debugging.
+    - Handles UTF-8 with BOM.
+    - Limits row counting to avoid worst-case slow parsing.
+    """
+    result: Dict[str, Any] = {"headers": [], "rows": 0, "truncated": False}
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as f:
+            reader = csv.reader(f)
+            headers = next(reader, None)
+            if headers is None:
+                return result
+            result["headers"] = [h.strip() for h in headers]
+            rows = 0
+            for _ in reader:
+                rows += 1
+                if rows >= max_rows:
+                    result["truncated"] = True
+                    break
+            result["rows"] = rows
+            return result
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+
+
+def _ingest_uploaded_files_for_xiaomi(user_id: str) -> List[Dict[str, Any]]:
+    """
+    Save any uploaded multipart files (e.g., Automate -> multipart/form-data) and return metadata.
+    Expected field from Automate flow: 'file'
+    """
+    files_meta: List[Dict[str, Any]] = []
+    try:
+        if not request.files:
+            return files_meta
+    except Exception:
+        return files_meta
+
+    upload_dir = _xiaomi_upload_dir(user_id)
+    ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+    try:
+        field_names = list(request.files.keys())
+    except Exception:
+        field_names = []
+
+    for field in field_names:
+        try:
+            file_list = request.files.getlist(field)
+        except Exception:
+            file_list = []
+        for storage in file_list:
+            try:
+                orig_name = (getattr(storage, "filename", None) or "").strip() or "upload.bin"
+                safe_name = secure_filename(orig_name) or "upload.bin"
+                save_name = f"{ts}_{safe_name}"
+                save_path = os.path.join(upload_dir, save_name)
+
+                storage.save(save_path)
+
+                try:
+                    size_bytes = int(os.path.getsize(save_path))
+                except Exception:
+                    size_bytes = None
+
+                head_text = _read_file_head_text(save_path)
+                ct = (getattr(storage, "content_type", "") or "").lower()
+                is_csv = safe_name.lower().endswith(".csv") or ("text/csv" in ct)
+                csv_summary = _summarize_csv(save_path) if is_csv else None
+
+                files_meta.append(
+                    {
+                        "field": field,
+                        "filename": safe_name,
+                        "saved_as": save_name,
+                        "content_type": getattr(storage, "content_type", None),
+                        "size_bytes": size_bytes,
+                        "head": head_text[:1500],
+                        "csv": csv_summary,
+                    }
+                )
+            except Exception as e:
+                files_meta.append({"field": field, "error": str(e)})
+
+    return files_meta
 
 
 def _extract_incoming_payload() -> dict:
@@ -160,12 +282,27 @@ def _extract_incoming_payload() -> dict:
     - JSON POST bodies
     - form-encoded bodies
     - querystring (Tasker sometimes uses this)
+    - multipart file uploads (Automate export CSV)
     """
-    body_text = ""
+    content_type = ""
     try:
-        body_text = request.get_data(as_text=True) or ""
+        content_type = (request.content_type or "").lower()
     except Exception:
-        body_text = ""
+        content_type = ""
+
+    content_length = None
+    try:
+        content_length = request.content_length
+    except Exception:
+        content_length = None
+
+    # IMPORTANT: for multipart uploads, don't read the whole body into memory.
+    body_text = ""
+    if not content_type.startswith("multipart/"):
+        try:
+            body_text = request.get_data(as_text=True) or ""
+        except Exception:
+            body_text = ""
 
     json_body = None
     try:
@@ -191,6 +328,8 @@ def _extract_incoming_payload() -> dict:
         "form": form_body,
         "query": args,
         "raw": body_text[:50000],
+        "content_type": content_type,
+        "content_length": content_length,
         "path": request.path,
         "method": request.method,
     }
@@ -205,6 +344,7 @@ def _format_xiaomi_message(payload: dict) -> str:
     data = payload.get("json") if isinstance(payload.get("json"), dict) else None
     form = payload.get("form") if isinstance(payload.get("form"), dict) else {}
     query = payload.get("query") if isinstance(payload.get("query"), dict) else {}
+    files = payload.get("files") if isinstance(payload.get("files"), list) else []
 
     # Common fields used by webhooks/IFTTT/Tasker patterns
     def pick(*keys: str) -> str:
@@ -223,6 +363,26 @@ def _format_xiaomi_message(payload: dict) -> str:
     v3 = pick("value3", "v3", "extra", "details")
 
     lines = ["📥 **Xiaomi/Notify webhook received**"]
+    if files:
+        lines.append(f"**Upload:** `{len(files)}` file(s)")
+        for f in files[:2]:
+            if not isinstance(f, dict):
+                continue
+            if f.get("error"):
+                lines.append(f"- `{f.get('field','file')}`: ❌ {f.get('error')}")
+                continue
+            fname = f.get("filename") or "upload"
+            saved_as = f.get("saved_as") or fname
+            size_b = f.get("size_bytes")
+            size_s = f"{size_b} bytes" if isinstance(size_b, int) else "unknown size"
+            lines.append(f"- `{fname}` saved as `{saved_as}` ({size_s})")
+            csv_info = f.get("csv") if isinstance(f.get("csv"), dict) else None
+            if csv_info:
+                hdrs = csv_info.get("headers") if isinstance(csv_info.get("headers"), list) else []
+                rows = csv_info.get("rows")
+                truncated = bool(csv_info.get("truncated"))
+                suffix = " (truncated)" if truncated else ""
+                lines.append(f"  - CSV: `{len(hdrs)}` columns, `{rows}` rows{suffix}")
     if event:
         lines.append(f"**Event:** `{event}`")
     if v1 or v2 or v3:
@@ -264,6 +424,13 @@ def xiaomi_webhook(token: str):
         return "unknown token", 404
 
     payload = _extract_incoming_payload()
+    # If Automate sends a CSV via multipart/form-data, save it and include metadata in the payload.
+    try:
+        files_meta = _ingest_uploaded_files_for_xiaomi(str(user_id))
+        if files_meta:
+            payload["files"] = files_meta
+    except Exception as e:
+        payload["files"] = [{"error": str(e)}]
     try:
         bot.db_manager.touch_xiaomi_webhook_last_seen(user_id, payload)
     except Exception as e:
