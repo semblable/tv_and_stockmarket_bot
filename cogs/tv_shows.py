@@ -833,7 +833,6 @@ class TVShows(commands.Cog):
 
         try:
             subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tv_subscriptions, user_id)
-            logger.info(f"tv_schedule: Fetched {len(subscriptions)} subscriptions for user {user_id}: {subscriptions}")
         except Exception as e:
             logger.error(f"Error getting subscriptions for user {user_id} in tv_schedule: {e}")
             await self.send_response(ctx, "Sorry, there was an error fetching your subscriptions. Please try again later.", ephemeral=True)
@@ -944,7 +943,6 @@ class TVShows(commands.Cog):
             except Exception as e:
                 logger.error(f"Generic error fetching/processing show ID {show_id} (user {user_id}) in tv_schedule: {e}")
 
-        logger.info(f"tv_schedule: Final upcoming_episodes_by_date for user {user_id}: {upcoming_episodes_by_date}")
         if not upcoming_episodes_by_date:
             logger.info(f"tv_schedule: No upcoming episodes found for user {user_id}. Sending corresponding message.")
             await self.send_response(ctx, f"✨ No episodes for your subscribed shows are scheduled to air in the next {days} days.", ephemeral=True)

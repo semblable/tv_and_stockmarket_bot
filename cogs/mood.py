@@ -658,10 +658,12 @@ class MoodCog(commands.Cog, name="Mood"):
 
                     ok = await self.cog.bot.loop.run_in_executor(
                         None,
-                        self.cog.db_manager.update_mood_entry,
-                        int(interaction2.user.id),
-                        int(self.entry_id),
-                        **kwargs,
+                        partial(
+                            self.cog.db_manager.update_mood_entry,
+                            int(interaction2.user.id),
+                            int(self.entry_id),
+                            **kwargs,
+                        ),
                     )
                     if not ok:
                         if interaction2.guild is not None:
