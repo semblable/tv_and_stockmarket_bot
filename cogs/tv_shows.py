@@ -813,17 +813,20 @@ class TVShows(commands.Cog):
             await self.send_response(ctx, "An unexpected error occurred while displaying TV show info.", ephemeral=True)
 
     @commands.hybrid_command(name="tv_schedule", description="Displays your upcoming TV show episode schedule.")
-    @discord.app_commands.describe(days="Number of days to show schedule for (7, 30, or 90). Default is 7.")
-    @discord.app_commands.choices(days=[
-        discord.app_commands.Choice(name="Next 7 Days", value=7),
-        discord.app_commands.Choice(name="Next 30 Days", value=30),
-        discord.app_commands.Choice(name="Next 90 Days", value=90)
-    ])
+    @discord.app_commands.describe(days="Number of days ahead to show schedule (any positive number). Default is 7.")
     async def tv_schedule(self, ctx: commands.Context, days: int = 7):
         """
         Displays a personalized schedule of upcoming TV episodes for the shows
         a user is subscribed to, within the specified number of days (default 7).
         """
+        try:
+            days = int(days or 7)
+        except Exception:
+            days = 7
+        if days < 1:
+            await self.send_response(ctx, "Please provide a positive number of days (e.g., 7).", ephemeral=True)
+            return
+
         user_id = ctx.author.id
         logger.info(f"tv_schedule: Generating schedule for user_id: {user_id}, days: {days}")
         await ctx.defer(ephemeral=True)

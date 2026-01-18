@@ -83,6 +83,22 @@ def _parse_hhmm(s: str) -> Optional[Tuple[int, int]]:
     return hh, mm
 
 
+def _parse_local_date_input(s: str, tz) -> Optional[datetime]:
+    text = (s or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            if fmt == "%Y-%m-%d":
+                # Noon local time avoids DST edge cases around midnight.
+                dt = datetime.combine(dt.date(), dtime(12, 0))
+            return dt.replace(tzinfo=tz)
+        except Exception:
+            continue
+    return None
+
+
 class MoodCog(commands.Cog, name="Mood"):
     """
     Mood tracking (opt-in).
@@ -324,16 +340,17 @@ class MoodCog(commands.Cog, name="Mood"):
             "- `/mood log 7` — quick log (you can log multiple times per day)\n"
             "\n"
             "**Logging**\n"
-            "- `/mood log <1-10> [note] [energy]`\n"
-            "  - Example: `/mood log 6` \n"
+            "- `/mood log <1-10> [note] [energy] [date]`\n"
+            "  - Example: `/mood log 6`\n"
             "  - Example: `/mood log 4 note:stressed energy:3`\n"
+            "  - Example: `/mood log 7 log_date:2025-01-15`\n"
             "\n"
             "**Review**\n"
             "- `/mood today` — today’s entries\n"
             "- `/mood week` — last 7 days summary\n"
             "\n"
             "**Edit / delete**\n"
-            "- `/mood edit [count]` — pick one of your most recent entries to edit\n"
+            "- `/mood edit [count]` — pick one of your most recent entries to edit (including date)\n"
             "- `/mood delete [count]` — pick one of your most recent entries to delete\n"
             "\n"
             "**Reminders**\n"
@@ -400,8 +417,16 @@ class MoodCog(commands.Cog, name="Mood"):
         mood="Mood score from 1 to 10.",
         note="Optional short note (what happened / context).",
         energy="Optional energy score from 1 to 10.",
+        log_date="Optional date to log (YYYY-MM-DD or YYYY-MM-DD HH:MM).",
     )
-    async def mood_log(self, ctx: commands.Context, mood: int, note: Optional[str] = None, energy: Optional[int] = None):
+    async def mood_log(
+        self,
+        ctx: commands.Context,
+        mood: int,
+        note: Optional[str] = None,
+        energy: Optional[int] = None,
+        log_date: Optional[str] = None,
+    ):
         if not self.db_manager:
             await self._send_ctx(ctx, "Database is not available right now. Please try again later.", ephemeral=True)
             return
@@ -412,6 +437,25 @@ class MoodCog(commands.Cog, name="Mood"):
             await self._send_ctx(ctx, "Mood tracking is currently off. Enable it with `/mood enable`.", ephemeral=True)
             return
 
+        created_at_utc = None
+        log_local_date = None
+        if log_date:
+            tz_name = await self.bot.loop.run_in_executor(
+                None, self.db_manager.get_user_preference, ctx.author.id, "timezone", "Europe/Warsaw"
+            )
+            tz_name_s = str(tz_name or "Europe/Warsaw")
+            tz = _tzinfo_from_name(tz_name_s)
+            local_dt = _parse_local_date_input(log_date, tz)
+            if local_dt is None:
+                await self._send_ctx(
+                    ctx,
+                    "❌ Invalid date format. Use `YYYY-MM-DD` or `YYYY-MM-DD HH:MM` (24h).",
+                    ephemeral=True,
+                )
+                return
+            created_at_utc = _sqlite_utc_timestamp(local_dt.astimezone(timezone.utc))
+            log_local_date = local_dt.date()
+
         entry_id = await self.bot.loop.run_in_executor(
             None,
             partial(
@@ -420,28 +464,37 @@ class MoodCog(commands.Cog, name="Mood"):
                 int(mood),
                 energy=energy,
                 note=note,
-                created_at_utc=_sqlite_utc_timestamp(_utc_now()),
+                created_at_utc=created_at_utc or _sqlite_utc_timestamp(_utc_now()),
             ),
         )
         if not entry_id:
             await self._send_ctx(ctx, "❌ Could not log that. Mood and energy must be 1–10.", ephemeral=True)
             return
 
-        # Mark today's reminder as handled so we don't ping again after logging.
+        # Mark today's reminder as handled so we don't ping again after logging today.
         try:
             tz_name = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, "timezone", "Europe/Warsaw")
             tz = _tzinfo_from_name(str(tz_name or "Europe/Warsaw"))
-            today_s = _utc_now().astimezone(tz).date().isoformat()
-            await self.bot.loop.run_in_executor(
-                None, self.db_manager.set_user_preference, ctx.author.id, PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE, today_s
-            )
+            today_local = _utc_now().astimezone(tz).date()
+            if log_local_date is None or log_local_date == today_local:
+                today_s = today_local.isoformat()
+                await self.bot.loop.run_in_executor(
+                    None, self.db_manager.set_user_preference, ctx.author.id, PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE, today_s
+                )
         except Exception:
             pass
 
         gentle = "Logged."
         if not (note or "").strip():
             gentle += " If you want, add a tiny note next time (e.g. “why” or “what happened”)."
-        await self._send_ctx(ctx, f"✅ Mood entry **#{entry_id}** saved. {gentle}", ephemeral=True)
+        if log_local_date is not None:
+            await self._send_ctx(
+                ctx,
+                f"✅ Mood entry **#{entry_id}** saved for `{log_local_date.isoformat()}`. {gentle}",
+                ephemeral=True,
+            )
+        else:
+            await self._send_ctx(ctx, f"✅ Mood entry **#{entry_id}** saved. {gentle}", ephemeral=True)
 
     @mood_group.command(name="edit", description="Edit one of your recent mood entries (interactive).")
     @app_commands.describe(count="How many recent entries to offer (1-10).")
@@ -503,6 +556,11 @@ class MoodCog(commands.Cog, name="Mood"):
             class _EditModal(discord.ui.Modal, title="Edit mood entry"):
                 new_mood = discord.ui.TextInput(label="Mood (1-10)", required=False, placeholder="Leave blank to keep unchanged")
                 new_energy = discord.ui.TextInput(label="Energy (1-10) or 'clear'", required=False, placeholder="Leave blank to keep unchanged")
+                new_date = discord.ui.TextInput(
+                    label="Date (YYYY-MM-DD or YYYY-MM-DD HH:MM)",
+                    required=False,
+                    placeholder="Leave blank to keep unchanged",
+                )
                 new_note = discord.ui.TextInput(
                     label="Note (optional; empty clears)",
                     required=False,
@@ -511,15 +569,17 @@ class MoodCog(commands.Cog, name="Mood"):
                     max_length=1000,
                 )
 
-                def __init__(self, *, entry_id: int, cog: "MoodCog"):
+                def __init__(self, *, entry_id: int, cog: "MoodCog", tz):
                     super().__init__()
                     self.entry_id = int(entry_id)
                     self.cog = cog
+                    self.tz = tz
 
                 async def on_submit(self, interaction2: discord.Interaction):  # type: ignore
                     # Map fields: blank => keep; energy: empty string explicitly clears; note: empty clears.
                     mood_in = (str(self.new_mood.value) if self.new_mood.value is not None else "").strip()
                     energy_in = (str(self.new_energy.value) if self.new_energy.value is not None else "").strip()
+                    date_in = (str(self.new_date.value) if self.new_date.value is not None else "").strip()
                     note_in = (str(self.new_note.value) if self.new_note.value is not None else "").strip()
 
                     mood_arg = None
@@ -560,6 +620,24 @@ class MoodCog(commands.Cog, name="Mood"):
                         else:
                             note_arg = note_in
 
+                    date_unset = True
+                    created_at_utc = None
+                    if date_in:
+                        date_unset = False
+                        local_dt = _parse_local_date_input(date_in, self.tz)
+                        if local_dt is None:
+                            if interaction2.guild is not None:
+                                await interaction2.response.send_message(
+                                    "❌ Invalid date format. Use `YYYY-MM-DD` or `YYYY-MM-DD HH:MM` (24h).",
+                                    ephemeral=True,
+                                )
+                            else:
+                                await interaction2.response.send_message(
+                                    "❌ Invalid date format. Use `YYYY-MM-DD` or `YYYY-MM-DD HH:MM` (24h)."
+                                )
+                            return
+                        created_at_utc = _sqlite_utc_timestamp(local_dt.astimezone(timezone.utc))
+
                     # If user wants explicit clears, they can type "clear"/"none" for energy.
                     kwargs = {}
                     if mood_arg is not None:
@@ -568,6 +646,8 @@ class MoodCog(commands.Cog, name="Mood"):
                         kwargs["energy"] = energy_arg
                     if not note_unset:
                         kwargs["note"] = note_arg
+                    if not date_unset:
+                        kwargs["created_at_utc"] = created_at_utc
 
                     if not kwargs:
                         if interaction2.guild is not None:
@@ -610,7 +690,7 @@ class MoodCog(commands.Cog, name="Mood"):
                             await interaction3.response.send_message("❌ This picker isn’t for you.")
                         return
                     entry_id = int(select.values[0])
-                    await interaction3.response.send_modal(_EditModal(entry_id=entry_id, cog=self.cog))
+                    await interaction3.response.send_modal(_EditModal(entry_id=entry_id, cog=self.cog, tz=tz))
 
             embed = discord.Embed(title="✏️ Edit mood entry", color=discord.Color.blurple())
             embed.description = "Pick an entry below to edit it. (Only you can see this.)"
@@ -658,6 +738,7 @@ class MoodCog(commands.Cog, name="Mood"):
             "- `energy=4`\n"
             "- `note=had a stressful meeting`\n"
             "- `mood=6 energy=5 note=felt better after walk`\n"
+            "- `date=2025-01-15`\n"
             "Use `energy=clear` to clear energy. Use `note=clear` to clear note."
         )
 
@@ -705,6 +786,18 @@ class MoodCog(commands.Cog, name="Mood"):
             else:
                 note_arg = nv[:1000]
 
+        date_provided = False
+        created_at_utc = None
+        m_date = re.search(r"\bdate=([^\s]+)\b", text, flags=re.IGNORECASE)
+        if m_date:
+            date_provided = True
+            dv = (m_date.group(1) or "").strip()
+            local_dt = _parse_local_date_input(dv, tz)
+            if local_dt is None:
+                await ctx.send("❌ Invalid date. Use `date=YYYY-MM-DD` or `date=YYYY-MM-DDTHH:MM`.")
+                return
+            created_at_utc = _sqlite_utc_timestamp(local_dt.astimezone(timezone.utc))
+
         kwargs = {}
         if mood_arg is not None:
             kwargs["mood"] = mood_arg
@@ -715,6 +808,8 @@ class MoodCog(commands.Cog, name="Mood"):
             kwargs["energy"] = energy_arg
         if note_provided:
             kwargs["note"] = note_arg
+        if date_provided:
+            kwargs["created_at_utc"] = created_at_utc
 
         if not kwargs:
             await ctx.send("No valid changes found.")

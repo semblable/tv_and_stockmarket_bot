@@ -97,6 +97,7 @@ class MoodMixin:
         mood: Optional[int] = None,
         energy: object = _UNSET,  # int 1..10, None to clear, _UNSET to keep
         note: object = _UNSET,  # str, None/"" to clear, _UNSET to keep
+        created_at_utc: object = _UNSET,  # "YYYY-MM-DD HH:MM:SS" (UTC), _UNSET to keep
     ) -> bool:
         """
         Update fields on a mood entry owned by user.
@@ -149,6 +150,15 @@ class MoodMixin:
                 else:
                     sets.append("note = :note")
                     params["note"] = n[:1000]
+
+        if created_at_utc is not _UNSET:
+            if not isinstance(created_at_utc, str):
+                return False
+            ts = created_at_utc.strip()
+            if len(ts) < 19:
+                return False
+            sets.append("created_at = :created_at")
+            params["created_at"] = ts
 
         if not sets:
             return False
