@@ -2135,9 +2135,17 @@ class ProductivityCog(commands.Cog, name="Productivity"):
             content = "\n".join(msg_lines)
 
             class HabitDigestView(discord.ui.View):
-                def __init__(self, items: list[dict], timeout: int = 120):
+                def __init__(
+                    self,
+                    items: list[dict],
+                    bot: commands.Bot,
+                    db_manager,
+                    timeout: int = 120,
+                ):
                     super().__init__(timeout=timeout)
                     self.items = items[:10]
+                    self.bot = bot
+                    self.db_manager = db_manager
                     for it in self.items:
                         hid2 = int(it["habit_id"])
                         label = f"✅ #{hid2}"
@@ -2190,7 +2198,7 @@ class ProductivityCog(commands.Cog, name="Productivity"):
                         btn.callback = _cb  # type: ignore[assignment]
                         self.add_item(btn)
 
-            view = HabitDigestView(missed)
+            view = HabitDigestView(missed, self.bot, self.db_manager)
             try:
                 await user.send(content=content, view=view)
             except discord.Forbidden:
