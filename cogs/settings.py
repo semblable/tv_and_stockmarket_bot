@@ -80,6 +80,19 @@ def create_settings_embed(ctx, user_preferences, weather_schedules):
         inline=False,
     )
 
+    # Report Webhook Link
+    report_base = user_preferences.get("report_webhook_base_url")
+    report_base_display = report_base if report_base else "Default (server-configured)"
+    embed.add_field(
+        name="🔗 Report Webhook Link",
+        value=(
+            f"Base URL: `{report_base_display}`\n"
+            f"`{ctx.prefix}settings webhook_link`\n"
+            f"`{ctx.prefix}settings webhook_base <url|clear>`"
+        ),
+        inline=False,
+    )
+
     embed.set_footer(text=f"Use '{ctx.prefix}settings <command> <value>' to change a setting.")
     return embed
 
@@ -116,6 +129,7 @@ class SettingsCog(commands.Cog, name="Settings"):
             "dnd_end_time": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "dnd_end_time", "07:00"),
             "weather_default_location": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "weather_default_location", "Not Set"),
             "timezone": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "timezone", "Europe/Warsaw"),
+            "report_webhook_base_url": await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, user_id, "report_webhook_base_url", None),
         }
         weather_schedules = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_weather_schedules, user_id)
         
@@ -328,7 +342,10 @@ class SettingsCog(commands.Cog, name="Settings"):
                 None, self.db_manager.set_user_preference, user_id, "report_webhook_token", token
             )
 
-        base_url = str(getattr(config, "WEBHOOK_BASE_URL", "http://localhost:5000") or "http://localhost:5000")
+        pref_base_url = await self.bot.loop.run_in_executor(
+            None, self.db_manager.get_user_preference, user_id, "report_webhook_base_url", None
+        )
+        base_url = str(pref_base_url or getattr(config, "WEBHOOK_BASE_URL", "http://localhost:5000") or "http://localhost:5000")
         base_url = base_url.rstrip("/")
         link = f"{base_url}/webhook/report/{token}"
 
@@ -344,6 +361,52 @@ class SettingsCog(commands.Cog, name="Settings"):
             "Use `/settings webhook_link reset:true` to rotate the link."
         )
         await self._send_ctx(ctx, message, ephemeral=True)
+
+    @settings_group.command(name="webhook_base", aliases=["webhook_base_url", "report_webhook_base"])
+    @app_commands.describe(base_url="Base URL for your webhook link (e.g. https://mybot.example.com)")
+    async def webhook_base(self, ctx: commands.Context, *, base_url: str):
+        """
+        Set or clear a custom base URL for your report webhook link.
+        """
+        raw = (base_url or "").strip()
+        if not raw:
+            await self._send_ctx(ctx, "❌ Please provide a base URL (or `clear`).", ephemeral=True)
+            return
+
+        if raw.lower() in {"clear", "reset", "default"}:
+            await self.bot.loop.run_in_executor(
+                None, self.db_manager.delete_user_preference, ctx.author.id, "report_webhook_base_url"
+            )
+            await self._send_ctx(ctx, "✅ Report webhook base URL cleared (using server default).", ephemeral=True)
+            return
+
+        # If user pastes full webhook link, strip to base.
+        marker = "/webhook/report/"
+        if marker in raw:
+            raw = raw.split(marker, 1)[0]
+
+        if not re.match(r"^https?://", raw, flags=re.IGNORECASE):
+            raw = f"https://{raw}"
+
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(raw)
+            if not parsed.scheme or not parsed.netloc:
+                raise ValueError("invalid_url")
+        except Exception:
+            await self._send_ctx(
+                ctx,
+                "❌ Invalid URL. Example: `https://mybot.example.com`",
+                ephemeral=True,
+            )
+            return
+
+        base = raw.rstrip("/")
+        await self.bot.loop.run_in_executor(
+            None, self.db_manager.set_user_preference, ctx.author.id, "report_webhook_base_url", base
+        )
+        await self._send_ctx(ctx, f"✅ Report webhook base URL set to: `{base}`", ephemeral=True)
 
     @settings_group.command(name="webhook_reset", aliases=["webhook_rotate", "report_webhook_reset"])
     async def webhook_reset(self, ctx: commands.Context):
