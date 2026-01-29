@@ -345,6 +345,13 @@ class SettingsCog(commands.Cog, name="Settings"):
         )
         await self._send_ctx(ctx, message, ephemeral=True)
 
+    @settings_group.command(name="webhook_reset", aliases=["webhook_rotate", "report_webhook_reset"])
+    async def webhook_reset(self, ctx: commands.Context):
+        """
+        Generate a new per-user webhook link (invalidates the old one).
+        """
+        await self.webhook_link(ctx, reset=True)
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(SettingsCog(bot, db_manager=bot.db_manager))
     logger.info("SettingsCog has been loaded.")
