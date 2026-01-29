@@ -11,10 +11,11 @@ import os
 from cogs.help import MyCustomHelpCommand # Import the custom help command
 import asyncio
 import traceback # Added for detailed error logging
-from flask import Flask
+from flask import Flask, request, jsonify
 from threading import Thread
 from data_manager import DataManager # For API endpoints
 import random # For placeholder chart data
+from typing import Optional
 
 # Get logger
 log = logger.get_logger(__name__)
@@ -149,6 +150,65 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
     return "Bot is alive and kicking!", 200 # Endpoint for uptime monitor
+
+async def _deliver_webhook_report(user_id: int, content: str, title: Optional[str] = None) -> None:
+    """
+    Send a report DM to the user.
+    """
+    try:
+        user = bot.get_user(user_id)
+        if not user:
+            user = await bot.fetch_user(user_id)
+        if not user:
+            log.warning(f"Webhook report: user {user_id} not found.")
+            return
+        message = content.strip()
+        if title and isinstance(title, str) and title.strip():
+            message = f"**{title.strip()}**\n{message}"
+        await user.send(message)
+    except discord.Forbidden:
+        log.warning(f"Webhook report: cannot DM user {user_id} (Forbidden).")
+    except Exception as e:
+        log.error(f"Webhook report: failed to send DM to {user_id}: {e}", exc_info=True)
+
+@flask_app.route("/webhook/report/<token>", methods=["POST"])
+def webhook_report(token: str):
+    """
+    Receives a report payload and forwards it to the user who owns the token.
+    """
+    if not token:
+        return jsonify({"ok": False, "error": "missing_token"}), 400
+    if not getattr(bot, "db_manager", None):
+        return jsonify({"ok": False, "error": "db_not_ready"}), 503
+
+    try:
+        user_id = bot.db_manager.get_user_id_for_preference_value("report_webhook_token", token)
+    except Exception as e:
+        log.error(f"Webhook report: token lookup failed: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": "lookup_failed"}), 500
+
+    if not user_id:
+        return jsonify({"ok": False, "error": "invalid_token"}), 404
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
+
+    content = payload.get("content") or payload.get("message") or ""
+    title = payload.get("title")
+    if not isinstance(content, str) or not content.strip():
+        return jsonify({"ok": False, "error": "missing_content"}), 400
+
+    try:
+        asyncio.run_coroutine_threadsafe(
+            _deliver_webhook_report(int(user_id), content.strip(), title),
+            bot.loop,
+        )
+    except Exception as e:
+        log.error(f"Webhook report: failed to schedule send: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": "dispatch_failed"}), 503
+
+    return jsonify({"ok": True}), 202
 # --- Initialize DataManager ---
 # This should be done once, and the instance can be shared.
 try:

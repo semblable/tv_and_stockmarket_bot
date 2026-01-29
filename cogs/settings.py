@@ -1,12 +1,15 @@
 # cogs/settings.py
 import discord
 from discord.ext import commands
+from discord import app_commands
 import re # For DND time validation
 from datetime import datetime, time # For DND time checking (though not used in this file directly yet)
 import logging # Import logging
 from typing import Optional, List
+import secrets
 
 from data_manager import DataManager # Import DataManager class#
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +311,39 @@ class SettingsCog(commands.Cog, name="Settings"):
             await ctx.send("✅ Timezone set to `CET/CEST`.")
         else:
             await ctx.send(f"✅ Timezone set to `{name}`.")
+
+    @settings_group.command(name="webhook_link", aliases=["webhook", "report_link", "report_webhook"])
+    @app_commands.describe(reset="Generate a new link (invalidates the old one).")
+    async def webhook_link(self, ctx: commands.Context, reset: bool = False):
+        """
+        Generate a per-user webhook link for receiving reports.
+        """
+        user_id = ctx.author.id
+        token = await self.bot.loop.run_in_executor(
+            None, self.db_manager.get_user_preference, user_id, "report_webhook_token", None
+        )
+        if reset or not token:
+            token = secrets.token_urlsafe(32)
+            await self.bot.loop.run_in_executor(
+                None, self.db_manager.set_user_preference, user_id, "report_webhook_token", token
+            )
+
+        base_url = str(getattr(config, "WEBHOOK_BASE_URL", "http://localhost:5000") or "http://localhost:5000")
+        base_url = base_url.rstrip("/")
+        link = f"{base_url}/webhook/report/{token}"
+
+        message = (
+            "✅ Your report webhook link is ready:\n"
+            f"{link}\n\n"
+            "Send a JSON POST like:\n"
+            "```\n"
+            f"POST {link}\n"
+            "Content-Type: application/json\n"
+            "{ \"content\": \"Hello from another app\" }\n"
+            "```\n"
+            "Use `/settings webhook_link reset:true` to rotate the link."
+        )
+        await self._send_ctx(ctx, message, ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SettingsCog(bot, db_manager=bot.db_manager))

@@ -83,6 +83,18 @@ class PrefsWeatherMixin:
             out.append({"user_id": uid, "value": val})
         return out
 
+    def get_user_id_for_preference_value(self, key: str, value: Any) -> Optional[str]:
+        """
+        Returns the user_id that has pref_key=key and pref_value=value (JSON-encoded).
+        """
+        value_json = json.dumps(value)
+        query = "SELECT user_id FROM user_preferences WHERE pref_key = :key AND pref_value = :value_json"
+        params = {"key": key, "value_json": value_json}
+        result = self._execute_query(query, params, fetch_one=True)
+        if result and isinstance(result.get("user_id"), str):
+            return result["user_id"]
+        return None
+
     # --- Currency Rates ---
     def update_currency_rate(self, currency_pair: str, rate: float) -> bool:
         query = """
