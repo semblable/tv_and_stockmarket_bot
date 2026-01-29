@@ -16,6 +16,11 @@ from threading import Thread
 from data_manager import DataManager # For API endpoints
 import random # For placeholder chart data
 from typing import Optional
+from utils.activity_report import (
+    parse_activity_report_text,
+    normalize_activity_report_payload,
+    get_activity_report_chart_image,
+)
 
 # Get logger
 log = logger.get_logger(__name__)
@@ -151,7 +156,12 @@ flask_app = Flask(__name__)
 def home():
     return "Bot is alive and kicking!", 200 # Endpoint for uptime monitor
 
-async def _deliver_webhook_report(user_id: int, content: str, title: Optional[str] = None) -> None:
+async def _deliver_webhook_report(
+    user_id: int,
+    content: str,
+    title: Optional[str] = None,
+    payload: Optional[dict] = None,
+) -> None:
     """
     Send a report DM to the user.
     """
@@ -162,10 +172,75 @@ async def _deliver_webhook_report(user_id: int, content: str, title: Optional[st
         if not user:
             log.warning(f"Webhook report: user {user_id} not found.")
             return
-        message = content.strip()
+        content_text = (content or "").strip()
+        message = content_text
         if title and isinstance(title, str) and title.strip():
-            message = f"**{title.strip()}**\n{message}"
-        await user.send(message)
+            message = f"**{title.strip()}**\n{message}" if message else f"**{title.strip()}**"
+
+        embed = None
+        file = None
+
+        # Try to format activity reports into a nicer embed + chart.
+        report_payload = None
+        if isinstance(payload, dict):
+            report_payload = normalize_activity_report_payload(payload)
+        if not report_payload and content_text:
+            report_payload = parse_activity_report_text(content_text)
+
+        if report_payload:
+            period_label = report_payload.get("period_label") or "Custom range"
+            totals = report_payload.get("totals") or {}
+            total_words = totals.get("words")
+            total_minutes = totals.get("minutes")
+            by_lang = report_payload.get("by_language") or []
+
+            embed_title = f"📈 Activity report — {period_label}"
+            embed = discord.Embed(title=embed_title, color=discord.Color.blurple())
+
+            if total_words is not None:
+                embed.add_field(name="Total words", value=f"**{int(total_words)}**", inline=True)
+            if total_minutes is not None:
+                minutes_val = float(total_minutes)
+                minutes_disp = f"{minutes_val:.0f}m" if minutes_val >= 1 else f"{minutes_val * 60:.0f}s"
+                embed.add_field(name="Listening time", value=f"**{minutes_disp}**", inline=True)
+
+            if by_lang:
+                lines = []
+                labels = []
+                words = []
+                minutes = []
+                for row in by_lang:
+                    lang = str(row.get("language") or "Unknown").strip()
+                    w = int(row.get("words") or 0)
+                    m = row.get("minutes")
+                    labels.append(lang)
+                    words.append(w)
+                    minutes.append(float(m) if m is not None else 0.0)
+                    if m is not None and float(m) > 0:
+                        lines.append(f"• **{lang}**: {w} words, {float(m):.0f}m")
+                    else:
+                        lines.append(f"• **{lang}**: {w} words")
+                embed.add_field(name="By language", value="\n".join(lines)[:1024], inline=False)
+
+                chart = await bot.loop.run_in_executor(
+                    None,
+                    get_activity_report_chart_image,
+                    "Words & listening time by language",
+                    labels,
+                    words,
+                    minutes,
+                )
+                if chart:
+                    file = discord.File(fp=chart, filename="activity_report.png")
+                    embed.set_image(url="attachment://activity_report.png")
+
+        if embed or file:
+            if file:
+                await user.send(content=message if message else None, embed=embed, file=file)
+            else:
+                await user.send(content=message if message else None, embed=embed)
+        else:
+            await user.send(message)
     except discord.Forbidden:
         log.warning(f"Webhook report: cannot DM user {user_id} (Forbidden).")
     except Exception as e:
@@ -201,7 +276,7 @@ def webhook_report(token: str):
 
     try:
         asyncio.run_coroutine_threadsafe(
-            _deliver_webhook_report(int(user_id), content.strip(), title),
+            _deliver_webhook_report(int(user_id), content.strip(), title, payload),
             bot.loop,
         )
     except Exception as e:
