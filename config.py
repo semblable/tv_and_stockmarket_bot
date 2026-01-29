@@ -10,6 +10,9 @@ import sys
 # ideally bot.py sets up logging before importing config.
 logger = logging.getLogger(__name__)
 
+_ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
+
+
 class Settings(BaseSettings):
     DISCORD_BOT_TOKEN: str
     TMDB_API_KEY: str
@@ -21,7 +24,7 @@ class Settings(BaseSettings):
 
     # Config for pydantic settings
     model_config = SettingsConfigDict(
-        env_file=".env", 
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",  # Try utf-8 first. If BOM issues persist, we might need handling.
         extra="ignore"
     )
