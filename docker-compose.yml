@@ -1,0 +1,11 @@
+services:
+  discordbot:
+    build:
+      context: .
+      dockerfile: bot.Dockerfile
+    container_name: discordbot
+    restart: unless-stopped
+    environment:
+      - PORT=5000
+    ports:
+      - "5000:5000"
