@@ -16,6 +16,10 @@ from threading import Thread
 from data_manager import DataManager # For API endpoints
 import random # For placeholder chart data
 from typing import Optional
+import time
+import hmac
+import hashlib
+from collections import deque
 from utils.activity_report import (
     parse_activity_report_text,
     normalize_activity_report_payload,
@@ -25,6 +29,36 @@ from utils.activity_report import (
 # Get logger
 log = logger.get_logger(__name__)
 log.info("Bot script started. Logging configured via logger.py.")
+
+# --- Webhook security helpers ---
+_WEBHOOK_RATE_BUCKETS: dict[str, deque[float]] = {}
+
+def _rate_limit(key: str, limit: int, window_s: int) -> bool:
+    """
+    Sliding window rate limiter.
+    Returns True if request should be allowed, False if rate-limited.
+    """
+    if limit <= 0 or window_s <= 0:
+        return True
+    now = time.time()
+    bucket = _WEBHOOK_RATE_BUCKETS.get(key)
+    if bucket is None:
+        bucket = deque()
+        _WEBHOOK_RATE_BUCKETS[key] = bucket
+    cutoff = now - window_s
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        return False
+    bucket.append(now)
+    return True
+
+def _get_client_ip() -> str:
+    # Best-effort client IP extraction (handles common proxy header).
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
 
 def _enable_dm_for_app_commands(bot: commands.Bot) -> None:
     """
@@ -222,25 +256,28 @@ async def _deliver_webhook_report(
                         lines.append(f"• **{lang}**: {w} words")
                 embed.add_field(name="By language", value="\n".join(lines)[:1024], inline=False)
 
-                chart = await bot.loop.run_in_executor(
-                    None,
-                    get_activity_report_chart_image,
-                    "Words & listening time by language",
-                    labels,
-                    words,
-                    minutes,
-                )
-                if chart:
-                    file = discord.File(fp=chart, filename="activity_report.png")
-                    embed.set_image(url="attachment://activity_report.png")
+                allow_external = bool(getattr(config, "ALLOW_EXTERNAL_CHARTS", True))
+                if allow_external:
+                    chart = await bot.loop.run_in_executor(
+                        None,
+                        get_activity_report_chart_image,
+                        "Words & listening time by language",
+                        labels,
+                        words,
+                        minutes,
+                    )
+                    if chart:
+                        file = discord.File(fp=chart, filename="activity_report.png")
+                        embed.set_image(url="attachment://activity_report.png")
 
+        allowed_mentions = discord.AllowedMentions.none()
         if embed or file:
             if file:
-                await user.send(content=message if message else None, embed=embed, file=file)
+                await user.send(content=message if message else None, embed=embed, file=file, allowed_mentions=allowed_mentions)
             else:
-                await user.send(content=message if message else None, embed=embed)
+                await user.send(content=message if message else None, embed=embed, allowed_mentions=allowed_mentions)
         else:
-            await user.send(message)
+            await user.send(message, allowed_mentions=allowed_mentions)
     except discord.Forbidden:
         log.warning(f"Webhook report: cannot DM user {user_id} (Forbidden).")
     except Exception as e:
@@ -255,6 +292,27 @@ def webhook_report(token: str):
         return jsonify({"ok": False, "error": "missing_token"}), 400
     if not getattr(bot, "db_manager", None):
         return jsonify({"ok": False, "error": "db_not_ready"}), 503
+
+    # Basic request size guard (default 50 KB, configurable)
+    max_bytes = int(getattr(config, "WEBHOOK_MAX_BYTES", 50 * 1024) or 50 * 1024)
+    if request.content_length is not None and request.content_length > max_bytes:
+        return jsonify({"ok": False, "error": "payload_too_large"}), 413
+
+    # Optional signature verification (HMAC-SHA256)
+    shared_secret = str(getattr(config, "WEBHOOK_SHARED_SECRET", "") or "").encode("utf-8")
+    if shared_secret:
+        signature = request.headers.get("X-Webhook-Signature", "")
+        raw_body = request.get_data(cache=True) or b""
+        expected = hmac.new(shared_secret, raw_body, hashlib.sha256).hexdigest()
+        expected_header = f"sha256={expected}"
+        if not hmac.compare_digest(signature, expected_header):
+            return jsonify({"ok": False, "error": "invalid_signature"}), 401
+
+    # Rate limit per token + IP (default 30 req/min)
+    rl_limit = int(getattr(config, "WEBHOOK_RATE_LIMIT_PER_MIN", 30) or 30)
+    rl_key = f"{token}:{_get_client_ip()}"
+    if not _rate_limit(rl_key, rl_limit, 60):
+        return jsonify({"ok": False, "error": "rate_limited"}), 429
 
     try:
         user_id = bot.db_manager.get_user_id_for_preference_value("report_webhook_token", token)

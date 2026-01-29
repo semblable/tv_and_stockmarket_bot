@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str
     SQLITE_DB_PATH: str = "data/app.db"
     WEBHOOK_BASE_URL: str = "http://localhost:5000"
+    WEBHOOK_SHARED_SECRET: str = ""
+    WEBHOOK_MAX_BYTES: int = 50 * 1024
+    WEBHOOK_RATE_LIMIT_PER_MIN: int = 30
+    ALLOW_EXTERNAL_CHARTS: bool = True
 
     # Config for pydantic settings
     model_config = SettingsConfigDict(
@@ -41,6 +45,10 @@ try:
     GEMINI_API_KEY = settings.GEMINI_API_KEY
     SQLITE_DB_PATH = settings.SQLITE_DB_PATH
     WEBHOOK_BASE_URL = settings.WEBHOOK_BASE_URL
+    WEBHOOK_SHARED_SECRET = settings.WEBHOOK_SHARED_SECRET
+    WEBHOOK_MAX_BYTES = settings.WEBHOOK_MAX_BYTES
+    WEBHOOK_RATE_LIMIT_PER_MIN = settings.WEBHOOK_RATE_LIMIT_PER_MIN
+    ALLOW_EXTERNAL_CHARTS = settings.ALLOW_EXTERNAL_CHARTS
     
     logger.info("Configuration loaded successfully via Pydantic.")
 

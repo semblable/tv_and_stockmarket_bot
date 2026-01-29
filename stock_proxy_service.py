@@ -9,6 +9,8 @@ from flask import Flask, jsonify, request
 import sys
 import os
 import logging
+import time
+from collections import deque
 
 # Add the current directory to Python path to import our modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -18,6 +20,50 @@ from api_clients.yahoo_finance_client import get_stock_price, get_daily_time_ser
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- Basic security controls ---
+_RATE_BUCKETS: dict[str, deque[float]] = {}
+
+def _rate_limit(key: str, limit: int, window_s: int) -> bool:
+    if limit <= 0 or window_s <= 0:
+        return True
+    now = time.time()
+    bucket = _RATE_BUCKETS.get(key)
+    if bucket is None:
+        bucket = deque()
+        _RATE_BUCKETS[key] = bucket
+    cutoff = now - window_s
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        return False
+    bucket.append(now)
+    return True
+
+def _get_client_ip() -> str:
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+def _require_auth() -> bool:
+    # Optional shared secret; if unset, skip auth for compatibility.
+    expected = os.environ.get("STOCK_PROXY_TOKEN", "").strip()
+    if not expected:
+        return True
+    provided = request.headers.get("X-Proxy-Token", "").strip()
+    return provided == expected
+
+@app.before_request
+def _guard_requests():
+    if request.path.startswith("/stock/"):
+        if not _require_auth():
+            return jsonify({"error": "unauthorized"}), 401
+        # Rate limit per IP (default 60 req/min)
+        limit = int(os.environ.get("STOCK_PROXY_RATE_LIMIT_PER_MIN", "60"))
+        key = _get_client_ip()
+        if not _rate_limit(key, limit, 60):
+            return jsonify({"error": "rate_limited"}), 429
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -96,4 +142,5 @@ if __name__ == '__main__':
     print("   Container access: http://host.docker.internal:9999")
     print("")
     
-    app.run(host='0.0.0.0', port=9999, debug=False) 
+    host = os.environ.get("STOCK_PROXY_BIND", "127.0.0.1")
+    app.run(host=host, port=9999, debug=False)
