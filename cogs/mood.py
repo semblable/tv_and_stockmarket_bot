@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 # Preferences (stored in user_preferences table)
 PREF_MOOD_ENABLED = "mood_enabled"
 PREF_MOOD_REMINDER_TIME = "mood_reminder_time"  # "HH:MM" in user's timezone
-PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE = "mood_reminder_last_handled_local_date"  # "YYYY-MM-DD" in user's tz
+PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE = "mood_reminder_last_handled_local_date"  # Deprecated
+PREF_MOOD_REMINDER_LAST_HANDLED = "mood_reminder_last_handled"  # "YYYY-MM-DD HH:MM" in user's tz
 
 # Late-window: avoid sending a missed reminder many hours late on startup.
 REMINDER_GRACE = timedelta(hours=2)
@@ -81,6 +82,22 @@ def _parse_hhmm(s: str) -> Optional[Tuple[int, int]]:
     if not (0 <= hh <= 23 and 0 <= mm <= 59):
         return None
     return hh, mm
+
+
+def _parse_multiple_hhmm(s: str) -> Optional[str]:
+    """Parse comma-separated HH:MM strings and return a sorted, unique comma-separated string."""
+    parts = s.split(",")
+    times = []
+    for part in parts:
+        parsed = _parse_hhmm(part)
+        if not parsed:
+            return None
+        times.append(f"{parsed[0]:02d}:{parsed[1]:02d}")
+    if not times:
+        return None
+    # Sort the unique times strings lexicographically
+    return ",".join(sorted(list(set(times))))
+
 
 
 def _parse_local_date_input(s: str, tz) -> Optional[datetime]:
@@ -261,7 +278,7 @@ class MoodCog(commands.Cog, name="Mood"):
             return
 
         now_utc = _utc_now()
-        for uid, hhmm in reminder_by_uid.items():
+        for uid, times_str in reminder_by_uid.items():
             try:
                 # DND respected (best effort)
                 if await self._is_user_in_dnd(uid):
@@ -274,30 +291,56 @@ class MoodCog(commands.Cog, name="Mood"):
                 today_s = now_local.date().isoformat()
 
                 last_handled = await self.bot.loop.run_in_executor(
-                    None, self.db_manager.get_user_preference, uid, PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE, None
+                    None, self.db_manager.get_user_preference, uid, PREF_MOOD_REMINDER_LAST_HANDLED, None
                 )
-                if isinstance(last_handled, str) and last_handled.strip() == today_s:
-                    continue
 
-                hm = _parse_hhmm(hhmm)
-                if hm is None:
+                # Find the most recent applicable time for today
+                most_recent_time = None
+                most_recent_dt = None
+                
+                for hhmm in times_str.split(","):
+                    hm = _parse_hhmm(hhmm.strip())
+                    if hm is None:
+                        continue
+                    hh, mm = hm
+                    scheduled_local = datetime.combine(now_local.date(), dtime(hh, mm), tzinfo=tz)
+                    if now_local >= scheduled_local:
+                        if most_recent_dt is None or scheduled_local > most_recent_dt:
+                            most_recent_dt = scheduled_local
+                            most_recent_time = f"{hh:02d}:{mm:02d}"
+
+                if most_recent_dt is None or most_recent_time is None:
                     continue
-                hh, mm = hm
-                scheduled_local = datetime.combine(now_local.date(), dtime(hh, mm), tzinfo=tz)
-                if now_local < scheduled_local:
+                    
+                current_interval_str = f"{today_s} {most_recent_time}"
+
+                if isinstance(last_handled, str) and last_handled.strip() == current_interval_str:
                     continue
 
                 # Avoid sending many hours late.
-                if (now_local - scheduled_local) > REMINDER_GRACE:
+                if (now_local - most_recent_dt) > REMINDER_GRACE:
                     await self.bot.loop.run_in_executor(
-                        None, self.db_manager.set_user_preference, uid, PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE, today_s
+                        None, self.db_manager.set_user_preference, uid, PREF_MOOD_REMINDER_LAST_HANDLED, current_interval_str
                     )
                     continue
 
-                # If user already logged today, skip the reminder.
-                if await self._user_has_mood_entry_today(uid, tz_name_s):
+                # If user already logged AFTER this most recent reminder, skip the reminder.
+                # End of day in UTC
+                next_day_local = most_recent_dt + timedelta(days=1)
+                end_local = datetime.combine(next_day_local.date(), dtime(0, 0), tzinfo=tz)
+                
+                start_utc = _sqlite_utc_timestamp(most_recent_dt.astimezone(timezone.utc))
+                end_utc = _sqlite_utc_timestamp(end_local.astimezone(timezone.utc))
+                
+                rows = await self.bot.loop.run_in_executor(
+                    None, self.db_manager.list_mood_entries_between, int(uid), start_utc, end_utc, 1
+                )
+                
+                has_logged_since_reminder = bool(rows)
+
+                if has_logged_since_reminder:
                     await self.bot.loop.run_in_executor(
-                        None, self.db_manager.set_user_preference, uid, PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE, today_s
+                        None, self.db_manager.set_user_preference, uid, PREF_MOOD_REMINDER_LAST_HANDLED, current_interval_str
                     )
                     continue
 
@@ -308,7 +351,7 @@ class MoodCog(commands.Cog, name="Mood"):
                 )
                 # Mark handled regardless to avoid spamming on failures/retries.
                 await self.bot.loop.run_in_executor(
-                    None, self.db_manager.set_user_preference, uid, PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE, today_s
+                    None, self.db_manager.set_user_preference, uid, PREF_MOOD_REMINDER_LAST_HANDLED, current_interval_str
                 )
                 if not sent:
                     # If DMs are blocked, we quietly stop for the day (user can still use commands).
@@ -355,7 +398,9 @@ class MoodCog(commands.Cog, name="Mood"):
             "\n"
             "**Reminders**\n"
             "- `/mood reminder <HH:MM|off>` — daily DM reminder time (uses your `settings timezone`)\n"
+            "  - You can also set multiple times separated by commas.\n"
             "  - Example: `/mood reminder 21:30`\n"
+            "  - Example: `/mood reminder 09:00, 14:00, 20:00`\n"
             "  - Example: `/mood reminder off`\n"
             "\n"
             "**Export**\n"
@@ -383,8 +428,8 @@ class MoodCog(commands.Cog, name="Mood"):
         await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, ctx.author.id, PREF_MOOD_ENABLED, False)
         await self._send_ctx(ctx, "🛑 Mood tracking disabled. I won’t remind you about it.", ephemeral=True)
 
-    @mood_group.command(name="reminder", description="Set or disable your daily mood reminder (HH:MM or off).")
-    @app_commands.describe(when="Daily reminder time in HH:MM (24h), or 'off' to disable.")
+    @mood_group.command(name="reminder", description="Set or disable your daily mood reminder (HH:MM or off, multiple allowed separated by comma).")
+    @app_commands.describe(when="Daily reminder time(s) in HH:MM (24h), e.g., '09:00, 14:00', or 'off' to disable.")
     async def mood_reminder(self, ctx: commands.Context, when: str):
         if not self.db_manager:
             await self._send_ctx(ctx, "Database is not available right now. Please try again later.", ephemeral=True)
@@ -392,25 +437,27 @@ class MoodCog(commands.Cog, name="Mood"):
         w = (when or "").strip().lower()
         if w in ("off", "disable", "none", "no", "stop"):
             await self.bot.loop.run_in_executor(None, self.db_manager.delete_user_preference, ctx.author.id, PREF_MOOD_REMINDER_TIME)
-            await self.bot.loop.run_in_executor(None, self.db_manager.delete_user_preference, ctx.author.id, PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE)
+            await self.bot.loop.run_in_executor(None, self.db_manager.delete_user_preference, ctx.author.id, PREF_MOOD_REMINDER_LAST_HANDLED)
             await self._send_ctx(ctx, "✅ Mood reminder disabled.", ephemeral=True)
             return
 
-        hm = _parse_hhmm(w)
-        if hm is None:
-            await self._send_ctx(ctx, "❌ Invalid time. Use `HH:MM` (24h), e.g. `21:30`, or `off`.", ephemeral=True)
+        times_str = _parse_multiple_hhmm(w)
+        if times_str is None:
+            await self._send_ctx(ctx, "❌ Invalid time(s). Use `HH:MM` (24h), optionally comma-separated, e.g. `09:00, 21:30`, or `off`.", ephemeral=True)
             return
 
         # Setting a reminder implies opt-in.
         await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, ctx.author.id, PREF_MOOD_ENABLED, True)
-        await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, ctx.author.id, PREF_MOOD_REMINDER_TIME, f"{hm[0]:02d}:{hm[1]:02d}")
-        await self.bot.loop.run_in_executor(None, self.db_manager.delete_user_preference, ctx.author.id, PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE)
+        await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, ctx.author.id, PREF_MOOD_REMINDER_TIME, times_str)
+        await self.bot.loop.run_in_executor(None, self.db_manager.delete_user_preference, ctx.author.id, PREF_MOOD_REMINDER_LAST_HANDLED)
 
         tz_name = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, "timezone", "Europe/Warsaw")
         tz_disp = str(tz_name or "Europe/Warsaw").strip()
         if tz_disp in ("Europe/Warsaw", "CET", "CEST"):
             tz_disp = "CET/CEST"
-        await self._send_ctx(ctx, f"✅ Daily mood reminder set for `{hm[0]:02d}:{hm[1]:02d}` ({tz_disp}).", ephemeral=True)
+        
+        times_formatted = times_str.replace(",", ", ")
+        await self._send_ctx(ctx, f"✅ Daily mood reminder(s) set for `{times_formatted}` ({tz_disp}).", ephemeral=True)
 
     @mood_group.command(name="log", description="Log your mood (1-10) with an optional note and energy (1-10).")
     @app_commands.describe(
@@ -471,17 +518,30 @@ class MoodCog(commands.Cog, name="Mood"):
             await self._send_ctx(ctx, "❌ Could not log that. Mood and energy must be 1–10.", ephemeral=True)
             return
 
-        # Mark today's reminder as handled so we don't ping again after logging today.
+        # Mark today's reminder for the current interval as handled so we don't ping again after logging.
         try:
             tz_name = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, "timezone", "Europe/Warsaw")
             tz = _tzinfo_from_name(str(tz_name or "Europe/Warsaw"))
-            today_local = _utc_now().astimezone(tz).date()
+            now_local = _utc_now().astimezone(tz)
+            today_local = now_local.date()
             if log_local_date is None or log_local_date == today_local:
-                today_s = today_local.isoformat()
-                await self.bot.loop.run_in_executor(
-                    None, self.db_manager.set_user_preference, ctx.author.id, PREF_MOOD_REMINDER_LAST_HANDLED_LOCAL_DATE, today_s
-                )
-        except Exception:
+                times_str_pref = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, PREF_MOOD_REMINDER_TIME, None)
+                if isinstance(times_str_pref, str):
+                    most_recent_time = None
+                    for hhmm in times_str_pref.split(","):
+                        hm = _parse_hhmm(hhmm.strip())
+                        if hm:
+                            hh, mm = hm
+                            scheduled_local = datetime.combine(today_local, dtime(hh, mm), tzinfo=tz)
+                            if now_local >= scheduled_local:
+                                most_recent_time = f"{hh:02d}:{mm:02d}"
+                    if most_recent_time:
+                        current_interval_str = f"{today_local.isoformat()} {most_recent_time}"
+                        await self.bot.loop.run_in_executor(
+                            None, self.db_manager.set_user_preference, ctx.author.id, PREF_MOOD_REMINDER_LAST_HANDLED, current_interval_str
+                        )
+        except Exception as e:
+            logger.debug(f"Error marking reminder as handled after log: {e}")
             pass
 
         gentle = "Logged."
