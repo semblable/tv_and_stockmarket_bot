@@ -253,7 +253,8 @@ class MoodCog(commands.Cog, name="Mood"):
         enabled_uids = set()
         for r in enabled_rows or []:
             try:
-                if bool(r.get("value")):
+                v = r.get("value")
+                if v in (True, "True", "true", 1, "1"):
                     enabled_uids.add(int(r.get("user_id")))
             except Exception:
                 continue
@@ -459,6 +460,29 @@ class MoodCog(commands.Cog, name="Mood"):
         times_formatted = times_str.replace(",", ", ")
         await self._send_ctx(ctx, f"✅ Daily mood reminder(s) set for `{times_formatted}` ({tz_disp}).", ephemeral=True)
 
+    @mood_group.command(name="reminder_show", description="Show your current daily mood reminder(s).")
+    async def mood_reminder_show(self, ctx: commands.Context):
+        if not self.db_manager:
+            await self._send_ctx(ctx, "Database is not available right now. Please try again later.", ephemeral=True)
+            return
+
+        enabled = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, PREF_MOOD_ENABLED, False)
+        if str(enabled).lower() not in ("true", "1"):
+            await self._send_ctx(ctx, "Mood tracking is disabled. Enable with `/mood enable`.", ephemeral=True)
+            return
+
+        times_str = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, PREF_MOOD_REMINDER_TIME, None)
+        if not times_str:
+            await self._send_ctx(ctx, "You have no mood reminders set. Set one with `/mood reminder HH:MM`.", ephemeral=True)
+            return
+
+        tz_name = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, "timezone", "Europe/Warsaw")
+        tz_disp = str(tz_name or "Europe/Warsaw").strip()
+        if tz_disp in ("Europe/Warsaw", "CET", "CEST"):
+            tz_disp = "CET/CEST"
+
+        await self._send_ctx(ctx, f"Your daily mood reminder(s) are set for: `{str(times_str).replace(',', ', ')}` ({tz_disp}).", ephemeral=True)
+
     @mood_group.command(name="log", description="Log your mood (1-10) with an optional note and energy (1-10).")
     @app_commands.describe(
         mood="Mood score from 1 to 10.",
@@ -469,9 +493,9 @@ class MoodCog(commands.Cog, name="Mood"):
     async def mood_log(
         self,
         ctx: commands.Context,
-        mood: int,
+        mood: str,
         note: Optional[str] = None,
-        energy: Optional[int] = None,
+        energy: Optional[str] = None,
         log_date: Optional[str] = None,
     ):
         if not self.db_manager:
@@ -480,9 +504,23 @@ class MoodCog(commands.Cog, name="Mood"):
 
         # Must be explicitly enabled (avoid accidental tracking).
         enabled = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, PREF_MOOD_ENABLED, False)
-        if not enabled:
+        if str(enabled).lower() not in ("true", "1"):
             await self._send_ctx(ctx, "Mood tracking is currently off. Enable it with `/mood enable`.", ephemeral=True)
             return
+
+        try:
+            mood_val = float(mood.strip().replace(",", "."))
+        except Exception:
+            await self._send_ctx(ctx, "❌ Mood must be a number 1–10 (e.g. 7 or 5.5).", ephemeral=True)
+            return
+
+        energy_val = None
+        if energy is not None:
+            try:
+                energy_val = float(energy.strip().replace(",", "."))
+            except Exception:
+                await self._send_ctx(ctx, "❌ Energy must be a number 1–10 (e.g. 7 or 5.5).", ephemeral=True)
+                return
 
         created_at_utc = None
         log_local_date = None
@@ -508,8 +546,8 @@ class MoodCog(commands.Cog, name="Mood"):
             partial(
                 self.db_manager.create_mood_entry,
                 ctx.author.id,
-                int(mood),
-                energy=energy,
+                mood_val,
+                energy=energy_val,
                 note=note,
                 created_at_utc=created_at_utc or _sqlite_utc_timestamp(_utc_now()),
             ),
@@ -567,7 +605,7 @@ class MoodCog(commands.Cog, name="Mood"):
             await self._send_ctx(ctx, "Database is not available right now. Please try again later.", ephemeral=True)
             return
         enabled = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_preference, ctx.author.id, PREF_MOOD_ENABLED, False)
-        if not enabled:
+        if str(enabled).lower() not in ("true", "1"):
             await self._send_ctx(ctx, "Mood tracking is currently off. Enable it with `/mood enable`.", ephemeral=True)
             return
 
@@ -645,12 +683,12 @@ class MoodCog(commands.Cog, name="Mood"):
                     mood_arg = None
                     if mood_in:
                         try:
-                            mood_arg = int(mood_in)
+                            mood_arg = float(mood_in.replace(",", "."))
                         except Exception:
                             if interaction2.guild is not None:
-                                await interaction2.response.send_message("❌ Mood must be a number 1–10.", ephemeral=True)
+                                await interaction2.response.send_message("❌ Mood must be a number 1–10 (e.g. 7 or 5.5).", ephemeral=True)
                             else:
-                                await interaction2.response.send_message("❌ Mood must be a number 1–10.")
+                                await interaction2.response.send_message("❌ Mood must be a number 1–10 (e.g. 7 or 5.5).")
                             return
 
                     energy_unset = True
@@ -661,14 +699,14 @@ class MoodCog(commands.Cog, name="Mood"):
                             energy_arg = None
                         else:
                             try:
-                                energy_arg = int(energy_in)
+                                energy_arg = float(energy_in.replace(",", "."))
                             except Exception:
                                 if interaction2.guild is not None:
                                     await interaction2.response.send_message(
-                                        "❌ Energy must be a number 1–10 (or 'clear').", ephemeral=True
+                                        "❌ Energy must be a number 1–10 or 'clear' (e.g. 7 or 5.5).", ephemeral=True
                                     )
                                 else:
-                                    await interaction2.response.send_message("❌ Energy must be a number 1–10 (or 'clear').")
+                                    await interaction2.response.send_message("❌ Energy must be a number 1–10 or 'clear' (e.g. 7 or 5.5).")
                                 return
 
                     note_unset = True

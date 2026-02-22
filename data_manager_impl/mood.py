@@ -19,9 +19,9 @@ class MoodMixin:
     def create_mood_entry(
         self,
         user_id: int,
-        mood: int,
+        mood: float,
         *,
-        energy: Optional[int] = None,
+        energy: Optional[float] = None,
         note: Optional[str] = None,
         created_at_utc: Optional[str] = None,
     ) -> Optional[int]:
@@ -33,7 +33,7 @@ class MoodMixin:
                            If omitted, CURRENT_TIMESTAMP is used.
         """
         try:
-            m = int(mood)
+            m = float(mood)
         except Exception:
             return None
         if not (1 <= m <= 10):
@@ -42,7 +42,7 @@ class MoodMixin:
         e: Optional[int] = None
         if energy is not None:
             try:
-                e = int(energy)
+                e = float(energy)
             except Exception:
                 return None
             if not (1 <= e <= 10):
@@ -94,8 +94,8 @@ class MoodMixin:
         user_id: int,
         entry_id: int,
         *,
-        mood: Optional[int] = None,
-        energy: object = _UNSET,  # int 1..10, None to clear, _UNSET to keep
+        mood: Optional[float] = None,
+        energy: object = _UNSET,  # float 1..10, None to clear, _UNSET to keep
         note: object = _UNSET,  # str, None/"" to clear, _UNSET to keep
         created_at_utc: object = _UNSET,  # "YYYY-MM-DD HH:MM:SS" (UTC), _UNSET to keep
     ) -> bool:
@@ -103,10 +103,9 @@ class MoodMixin:
         Update fields on a mood entry owned by user.
 
         Args:
-            mood: int 1..10 or None to leave unchanged
-            energy: int 1..10, None to leave unchanged, or explicit null via energy=None is ambiguous in Python.
-                    To clear energy, pass energy=0 is NOT allowed; instead pass energy="" at command level and map to note=None?
-                    This DB method supports clearing energy via energy set to None *only when explicitly passed from caller*
+            mood: float 1..10 or None to leave unchanged
+            energy: float 1..10, None to leave unchanged, or explicit null via energy=None is ambiguous in Python.
+                    To clear energy, pass energy=None *only when explicitly passed from caller*
                     using energy=(None) and note parameter to signal "explicit". Caller should use this signature carefully.
             note: string, None to leave unchanged, or "" (empty) to clear
         """
@@ -119,7 +118,7 @@ class MoodMixin:
 
         if mood is not None:
             try:
-                m = int(mood)
+                m = float(mood)
             except Exception:
                 return False
             if not (1 <= m <= 10):
@@ -132,7 +131,7 @@ class MoodMixin:
                 sets.append("energy = NULL")
             else:
                 try:
-                    e = int(energy)
+                    e = float(energy)
                 except Exception:
                     return False
                 if not (1 <= e <= 10):
