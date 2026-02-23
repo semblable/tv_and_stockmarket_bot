@@ -272,7 +272,7 @@ class MoodCog(commands.Cog, name="Mood"):
             if uid not in enabled_uids:
                 continue
             v = r.get("value")
-            if isinstance(v, str) and _parse_hhmm(v):
+            if isinstance(v, str) and _parse_multiple_hhmm(v):
                 reminder_by_uid[uid] = v.strip()
 
         if not reminder_by_uid:
