@@ -13,8 +13,9 @@ class MoodDaySummary:
     n: int
     avg_mood: Optional[float]  # 1..10
     avg_energy: Optional[float]  # 1..10
-    min_mood: Optional[int]
-    max_mood: Optional[int]
+    min_mood: Optional[float]
+    max_mood: Optional[float]
+    notes: tuple = ()  # tuple of non-empty note strings for the day (optional)
 
 
 def to_csv_bytes(days: Sequence[MoodDaySummary]) -> bytes:
@@ -57,16 +58,21 @@ def _overall_stats(days: Sequence[MoodDaySummary]) -> dict:
     total_entries = sum(int(d.n) for d in days)
     days_with_data = sum(1 for d in days if (d.n or 0) > 0)
     gaps = len(days) - days_with_data
-    moods: list[float] = []
-    energies: list[float] = []
+    # Weighted sums so averages are correct across multiple entries per day.
+    mood_sum: float = 0.0
+    mood_count: int = 0
+    energy_sum: float = 0.0
+    energy_count: int = 0
     for d in days:
         if d.avg_mood is not None and d.n > 0:
-            moods.append(float(d.avg_mood))
+            mood_sum += float(d.avg_mood) * int(d.n)
+            mood_count += int(d.n)
         if d.avg_energy is not None and d.n > 0:
-            energies.append(float(d.avg_energy))
+            energy_sum += float(d.avg_energy) * int(d.n)
+            energy_count += int(d.n)
 
-    overall_avg_mood = (sum(moods) / len(moods)) if moods else None
-    overall_avg_energy = (sum(energies) / len(energies)) if energies else None
+    overall_avg_mood = (mood_sum / mood_count) if mood_count > 0 else None
+    overall_avg_energy = (energy_sum / energy_count) if energy_count > 0 else None
     return {
         "total_entries": total_entries,
         "days_with_data": days_with_data,
@@ -167,14 +173,19 @@ def to_html_report_bytes(
                 n = int(getattr(s, "n", 0) or 0) if s else 0
                 avg_m = getattr(s, "avg_mood", None) if s else None
                 avg_e = getattr(s, "avg_energy", None) if s else None
+                notes = list(getattr(s, "notes", None) or []) if s else []
                 bg = mood_color(avg_m, n)
-                title = f"{d.isoformat()}"
+                title_parts = [d.isoformat()]
                 if n > 0 and avg_m is not None:
-                    title += f" • avg mood {float(avg_m):.1f}/10 • entries {n}"
+                    title_parts.append(f"avg mood {float(avg_m):.1f}/10 • entries {n}")
                     if avg_e is not None:
-                        title += f" • avg energy {float(avg_e):.1f}/10"
+                        title_parts.append(f"avg energy {float(avg_e):.1f}/10")
+                    if notes:
+                        for note_text in notes[:5]:  # cap at 5 notes in tooltip
+                            title_parts.append(f"📝 {note_text[:120]}")
                 else:
-                    title += " • gap"
+                    title_parts.append("gap")
+                title = " • ".join(title_parts)
                 parts.append(
                     "<div class='cal-cell' "
                     f"style='background:{bg}' "

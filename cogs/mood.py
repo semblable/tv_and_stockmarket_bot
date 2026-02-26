@@ -1189,14 +1189,14 @@ class MoodCog(commands.Cog, name="Mood"):
         )
 
         # Bucket by local date -> list of moods
-        by_day: Dict[str, list[int]] = {}
+        by_day: Dict[str, list[float]] = {}
         for r in rows or []:
             dt_utc = _parse_sqlite_utc_timestamp(r.get("created_at"))
             if dt_utc is None:
                 continue
             day = dt_utc.astimezone(tz).date().isoformat()
             try:
-                mv = int(r.get("mood"))
+                mv = float(r.get("mood"))
             except Exception:
                 continue
             by_day.setdefault(day, []).append(mv)
@@ -1327,18 +1327,21 @@ class MoodCog(commands.Cog, name="Mood"):
                 key = local_dt.strftime("%Y-%m")
                 start_day = local_dt.date().replace(day=1)
             try:
-                mv = int(r.get("mood"))
+                mv = float(r.get("mood"))
             except Exception:
                 continue
             ev = r.get("energy")
             try:
-                ev_i = int(ev) if ev is not None else None
+                ev_i = float(ev) if ev is not None else None
             except Exception:
                 ev_i = None
-            b = by_key.setdefault(key, {"moods": [], "energies": [], "start_day": [start_day]})
+            note_v = (r.get("note") or "").strip()
+            b = by_key.setdefault(key, {"moods": [], "energies": [], "notes": [], "start_day": [start_day]})
             b["moods"].append(mv)
             if ev_i is not None:
                 b["energies"].append(ev_i)
+            if note_v:
+                b["notes"].append(note_v)
 
         from utils.mood_report import MoodDaySummary, to_csv_bytes, to_html_report_bytes
         from utils.chart_utils import get_mood_daily_chart_image
@@ -1354,6 +1357,7 @@ class MoodCog(commands.Cog, name="Mood"):
             else:
                 moods = list(b.get("moods") or [])
                 ens = list(b.get("energies") or [])
+                notes = list(b.get("notes") or [])
                 summaries.append(
                     MoodDaySummary(
                         label=key,
@@ -1363,6 +1367,7 @@ class MoodCog(commands.Cog, name="Mood"):
                         avg_energy=(sum(ens) / len(ens)) if ens else None,
                         min_mood=min(moods) if moods else None,
                         max_mood=max(moods) if moods else None,
+                        notes=tuple(notes),
                     )
                 )
             cur = cur + timedelta(days=1)
