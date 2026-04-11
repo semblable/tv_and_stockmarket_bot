@@ -116,6 +116,7 @@ jobs:
           ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
           FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
           FIREBASE_DATABASE_SECRET: ${{ secrets.FIREBASE_DATABASE_SECRET }}
+          TIMER_OWNER_ID: ${{ secrets.TIMER_OWNER_ID }}
           DISCORD_SYNC_SECRET: ${{ secrets.DISCORD_SYNC_SECRET }}
           TIMER_AUTH_PASSWORD: ${{ secrets.TIMER_AUTH_PASSWORD }}
         run: |
@@ -127,6 +128,7 @@ jobs:
           awk '
             /^FIREBASE_DATABASE_URL=/ { next }
             /^FIREBASE_DATABASE_SECRET=/ { next }
+            /^TIMER_OWNER_ID=/ { next }
             /^DISCORD_SYNC_SECRET=/ { next }
             /^TIMER_AUTH_PASSWORD=/ { next }
             { print }
@@ -134,6 +136,7 @@ jobs:
           # Append from GitHub secrets (only non-empty — empty secret = do not inject that key)
           [ -n "$FIREBASE_DATABASE_URL" ] && echo "FIREBASE_DATABASE_URL=$FIREBASE_DATABASE_URL" >> .env
           [ -n "$FIREBASE_DATABASE_SECRET" ] && echo "FIREBASE_DATABASE_SECRET=$FIREBASE_DATABASE_SECRET" >> .env
+          [ -n "$TIMER_OWNER_ID" ] && echo "TIMER_OWNER_ID=$TIMER_OWNER_ID" >> .env
           [ -n "$DISCORD_SYNC_SECRET" ] && echo "DISCORD_SYNC_SECRET=$DISCORD_SYNC_SECRET" >> .env
           [ -n "$TIMER_AUTH_PASSWORD" ] && echo "TIMER_AUTH_PASSWORD=$TIMER_AUTH_PASSWORD" >> .env
 

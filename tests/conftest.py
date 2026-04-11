@@ -12,6 +12,7 @@ os.environ["ALPHA_VANTAGE_API_KEY"] = "dummy_av_key"
 os.environ["OPENWEATHERMAP_API_KEY"] = "dummy_owm_key"
 os.environ["GEMINI_API_KEY"] = "dummy_gemini_key"
 os.environ["SQLITE_DB_PATH"] = "bot_data.db" # Optional
+os.environ["TIMER_OWNER_ID"] = "123"
 
 # Add the root project path to sys.path
 # Assuming tests/conftest.py is one level deep from root

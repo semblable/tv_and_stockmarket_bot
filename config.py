@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     # Timer / Firebase sync (owner-only feature)
     FIREBASE_DATABASE_URL: str = ""
     FIREBASE_DATABASE_SECRET: str = ""
+    TIMER_OWNER_ID: int = 0
     DISCORD_SYNC_SECRET: str = ""
     TIMER_AUTH_PASSWORD: str = ""
 
@@ -57,6 +58,7 @@ try:
     ALLOW_EXTERNAL_CHARTS = settings.ALLOW_EXTERNAL_CHARTS
     FIREBASE_DATABASE_URL = settings.FIREBASE_DATABASE_URL
     FIREBASE_DATABASE_SECRET = settings.FIREBASE_DATABASE_SECRET
+    TIMER_OWNER_ID = settings.TIMER_OWNER_ID
     DISCORD_SYNC_SECRET = settings.DISCORD_SYNC_SECRET
     TIMER_AUTH_PASSWORD = settings.TIMER_AUTH_PASSWORD
     
