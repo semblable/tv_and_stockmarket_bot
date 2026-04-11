@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     WEBHOOK_RATE_LIMIT_PER_MIN: int = 30
     ALLOW_EXTERNAL_CHARTS: bool = True
 
+    # Timer / Firebase sync (owner-only feature)
+    FIREBASE_DATABASE_URL: str = ""
+    FIREBASE_DATABASE_SECRET: str = ""
+    DISCORD_SYNC_SECRET: str = ""
+    TIMER_AUTH_PASSWORD: str = ""
+
     # Config for pydantic settings
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE,
@@ -49,6 +55,10 @@ try:
     WEBHOOK_MAX_BYTES = settings.WEBHOOK_MAX_BYTES
     WEBHOOK_RATE_LIMIT_PER_MIN = settings.WEBHOOK_RATE_LIMIT_PER_MIN
     ALLOW_EXTERNAL_CHARTS = settings.ALLOW_EXTERNAL_CHARTS
+    FIREBASE_DATABASE_URL = settings.FIREBASE_DATABASE_URL
+    FIREBASE_DATABASE_SECRET = settings.FIREBASE_DATABASE_SECRET
+    DISCORD_SYNC_SECRET = settings.DISCORD_SYNC_SECRET
+    TIMER_AUTH_PASSWORD = settings.TIMER_AUTH_PASSWORD
     
     logger.info("Configuration loaded successfully via Pydantic.")
 

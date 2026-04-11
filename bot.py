@@ -138,6 +138,7 @@ INITIAL_EXTENSIONS = [
     "cogs.productivity",  # To-dos + habits + escalating reminders
     "cogs.reminders",  # One-off + repeating reminders (timezone-aware)
     "cogs.mood",  # Optional mood tracking + daily reminder (opt-in)
+    "cogs.timer",  # Owner-only timer commands via Firebase relay
     # "cogs.help" # Not loaded as a cog, but assigned directly
 ]
 

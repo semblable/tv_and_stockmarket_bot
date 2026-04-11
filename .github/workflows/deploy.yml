@@ -114,9 +114,18 @@ jobs:
       - name: Create .env file from secret
         env:
           ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
+          FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
+          FIREBASE_DATABASE_SECRET: ${{ secrets.FIREBASE_DATABASE_SECRET }}
+          DISCORD_SYNC_SECRET: ${{ secrets.DISCORD_SYNC_SECRET }}
+          TIMER_AUTH_PASSWORD: ${{ secrets.TIMER_AUTH_PASSWORD }}
         run: |
           # Preserve content exactly (including newlines)
           printf '%s' "$ENV_FILE_CONTENT" > .env
+          # Append timer secrets as individual lines
+          [ -n "$FIREBASE_DATABASE_URL" ] && echo "FIREBASE_DATABASE_URL=$FIREBASE_DATABASE_URL" >> .env
+          [ -n "$FIREBASE_DATABASE_SECRET" ] && echo "FIREBASE_DATABASE_SECRET=$FIREBASE_DATABASE_SECRET" >> .env
+          [ -n "$DISCORD_SYNC_SECRET" ] && echo "DISCORD_SYNC_SECRET=$DISCORD_SYNC_SECRET" >> .env
+          [ -n "$TIMER_AUTH_PASSWORD" ] && echo "TIMER_AUTH_PASSWORD=$TIMER_AUTH_PASSWORD" >> .env
 
       - name: Copy .env to server
         run: |
