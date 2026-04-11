@@ -121,11 +121,54 @@ class TimerCog(commands.Cog, name="Timer"):
         self.bot = bot
         self._authorized_ids: set[int] = _load_authorized_ids()
 
+    async def cog_load(self):
+        # Patch the top-level hybrid group directly since some discord.py versions
+        # do not expose it reliably via generic tree walking before sync.
+        def _patch(cmd: app_commands.AppCommand) -> None:
+            app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(cmd)
+            app_commands.allowed_installs(guilds=True, users=True)(cmd)
+
+        try:
+            hybrid_group = getattr(self, "timer", None)
+            app_group = getattr(hybrid_group, "app_command", None)
+            if app_group is not None:
+                try:
+                    _patch(app_group)
+                except Exception:
+                    pass
+                try:
+                    for child in app_group.walk_commands():
+                        try:
+                            _patch(child)
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        logger.info("TimerCog loaded and DM contexts patched.")
+
+    async def _send_ctx(
+        self,
+        ctx: commands.Context,
+        content: str,
+        *,
+        ephemeral: bool = True,
+    ) -> None:
+        if getattr(ctx, "interaction", None):
+            kwargs = {"content": content}
+            if getattr(ctx, "guild", None) is not None:
+                kwargs["ephemeral"] = bool(ephemeral)
+            await ctx.send(**kwargs)
+        else:
+            await ctx.send(content)
+
     async def _check_configured(self, ctx: commands.Context) -> bool:
         """Return True if Firebase env vars are set; otherwise send an error and return False."""
         missing = _missing_firebase_config()
         if missing:
-            await ctx.send(
+            await self._send_ctx(
+                ctx,
                 "Timer is not configured. Missing: **"
                 + "**, **".join(missing)
                 + "**. "
@@ -148,10 +191,17 @@ class TimerCog(commands.Cog, name="Timer"):
         self._authorized_ids.discard(user_id)
         _save_authorized_ids(self._authorized_ids)
 
-    @commands.hybrid_group(name="timer", invoke_without_command=True)
+    @commands.hybrid_group(
+        name="timer",
+        invoke_without_command=True,
+        description="Relay timer actions to the local tracker.",
+    )
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    @app_commands.allowed_installs(guilds=True, users=True)
     async def timer(self, ctx: commands.Context):
         """Timer commands. Use a subcommand: auth, start, stop, status, projects, goals."""
-        await ctx.send(
+        await self._send_ctx(
+            ctx,
             "**Timer commands:**\n"
             "`!timer auth <password>` — enable timer access for your account\n"
             "`!timer revoke` — remove your timer access\n"
@@ -173,30 +223,31 @@ class TimerCog(commands.Cog, name="Timer"):
             return
         configured = config.TIMER_AUTH_PASSWORD
         if not configured:
-            await ctx.send(
+            await self._send_ctx(
+                ctx,
                 "Timer auth is not configured (TIMER_AUTH_PASSWORD is not set).",
                 ephemeral=True,
             )
             return
 
         if password != configured:
-            await ctx.send("Incorrect password.", ephemeral=True)
+            await self._send_ctx(ctx, "Incorrect password.", ephemeral=True)
             logger.warning("Failed timer auth attempt by user %s", ctx.author.id)
             return
 
         self._authorize(ctx.author.id)
-        await ctx.send("You now have access to timer commands.", ephemeral=True)
+        await self._send_ctx(ctx, "You now have access to timer commands.", ephemeral=True)
         logger.info("Timer access granted to user %s (%s)", ctx.author.id, ctx.author)
 
     @timer.command(name="revoke")
     async def timer_revoke(self, ctx: commands.Context):
         """Remove your own timer access."""
         if not self._is_authorized(ctx.author.id):
-            await ctx.send("You don't have timer access.", ephemeral=True)
+            await self._send_ctx(ctx, "You don't have timer access.", ephemeral=True)
             return
 
         self._deauthorize(ctx.author.id)
-        await ctx.send("Your timer access has been removed.", ephemeral=True)
+        await self._send_ctx(ctx, "Your timer access has been removed.", ephemeral=True)
         logger.info("Timer access revoked for user %s (%s)", ctx.author.id, ctx.author)
 
     # --- Timer commands ---
@@ -218,7 +269,8 @@ class TimerCog(commands.Cog, name="Timer"):
         if not await self._check_configured(ctx):
             return
         if not self._is_authorized(ctx.author.id):
-            await ctx.send(
+            await self._send_ctx(
+                ctx,
                 "You don't have timer access. Use `!timer auth <password>` first.",
                 ephemeral=True,
             )
@@ -232,14 +284,14 @@ class TimerCog(commands.Cog, name="Timer"):
         if goal:
             cmd["goal"] = goal
 
-        await ctx.send("Starting timer...")
+        await self._send_ctx(ctx, "Starting timer...", ephemeral=False)
         try:
             result = await asyncio.to_thread(_send_timer_command, cmd)
         except Exception as exc:
             logger.exception("Error sending timer start command")
-            await ctx.send(f"Error communicating with Firebase: {exc}")
+            await self._send_ctx(ctx, f"Error communicating with Firebase: {exc}", ephemeral=False)
             return
-        await ctx.send(result["message"])
+        await self._send_ctx(ctx, result["message"], ephemeral=False)
 
     @timer.command(name="stop")
     async def timer_stop(self, ctx: commands.Context):
@@ -247,20 +299,21 @@ class TimerCog(commands.Cog, name="Timer"):
         if not await self._check_configured(ctx):
             return
         if not self._is_authorized(ctx.author.id):
-            await ctx.send(
+            await self._send_ctx(
+                ctx,
                 "You don't have timer access. Use `!timer auth <password>` first.",
                 ephemeral=True,
             )
             return
 
-        await ctx.send("Stopping timer...")
+        await self._send_ctx(ctx, "Stopping timer...", ephemeral=False)
         try:
             result = await asyncio.to_thread(_send_timer_command, {"type": "stop"})
         except Exception as exc:
             logger.exception("Error sending timer stop command")
-            await ctx.send(f"Error communicating with Firebase: {exc}")
+            await self._send_ctx(ctx, f"Error communicating with Firebase: {exc}", ephemeral=False)
             return
-        await ctx.send(result["message"])
+        await self._send_ctx(ctx, result["message"], ephemeral=False)
 
     @timer.command(name="status")
     async def timer_status(self, ctx: commands.Context):
@@ -268,7 +321,8 @@ class TimerCog(commands.Cog, name="Timer"):
         if not await self._check_configured(ctx):
             return
         if not self._is_authorized(ctx.author.id):
-            await ctx.send(
+            await self._send_ctx(
+                ctx,
                 "You don't have timer access. Use `!timer auth <password>` first.",
                 ephemeral=True,
             )
@@ -278,9 +332,9 @@ class TimerCog(commands.Cog, name="Timer"):
             msg = await asyncio.to_thread(_read_timer_status)
         except Exception as exc:
             logger.exception("Error reading timer status")
-            await ctx.send(f"Error communicating with Firebase: {exc}")
+            await self._send_ctx(ctx, f"Error communicating with Firebase: {exc}", ephemeral=False)
             return
-        await ctx.send(msg)
+        await self._send_ctx(ctx, msg, ephemeral=False)
 
     @timer.command(name="projects")
     async def timer_projects(self, ctx: commands.Context):
@@ -288,7 +342,8 @@ class TimerCog(commands.Cog, name="Timer"):
         if not await self._check_configured(ctx):
             return
         if not self._is_authorized(ctx.author.id):
-            await ctx.send(
+            await self._send_ctx(
+                ctx,
                 "You don't have timer access. Use `!timer auth <password>` first.",
                 ephemeral=True,
             )
@@ -298,9 +353,9 @@ class TimerCog(commands.Cog, name="Timer"):
             result = await asyncio.to_thread(_send_timer_command, {"type": "projects"})
         except Exception as exc:
             logger.exception("Error sending timer projects command")
-            await ctx.send(f"Error communicating with Firebase: {exc}")
+            await self._send_ctx(ctx, f"Error communicating with Firebase: {exc}", ephemeral=False)
             return
-        await ctx.send(result["message"])
+        await self._send_ctx(ctx, result["message"], ephemeral=False)
 
     @timer.command(name="goals")
     @app_commands.describe(project="Filter goals by project name (optional)")
@@ -309,7 +364,8 @@ class TimerCog(commands.Cog, name="Timer"):
         if not await self._check_configured(ctx):
             return
         if not self._is_authorized(ctx.author.id):
-            await ctx.send(
+            await self._send_ctx(
+                ctx,
                 "You don't have timer access. Use `!timer auth <password>` first.",
                 ephemeral=True,
             )
@@ -323,9 +379,9 @@ class TimerCog(commands.Cog, name="Timer"):
             result = await asyncio.to_thread(_send_timer_command, cmd)
         except Exception as exc:
             logger.exception("Error sending timer goals command")
-            await ctx.send(f"Error communicating with Firebase: {exc}")
+            await self._send_ctx(ctx, f"Error communicating with Firebase: {exc}", ephemeral=False)
             return
-        await ctx.send(result["message"])
+        await self._send_ctx(ctx, result["message"], ephemeral=False)
 
 
 async def setup(bot: commands.Bot):
