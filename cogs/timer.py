@@ -47,8 +47,14 @@ def _save_authorized_ids(ids: set[int]) -> None:
 # Firebase helpers
 # ---------------------------------------------------------------------------
 
-def _firebase_configured() -> bool:
-    return bool(config.FIREBASE_DATABASE_URL and config.FIREBASE_DATABASE_SECRET)
+def _missing_firebase_config() -> list[str]:
+    """Return which env vars are unset (empty or whitespace). Both are required for Firebase REST."""
+    missing: list[str] = []
+    if not (config.FIREBASE_DATABASE_URL or "").strip():
+        missing.append("FIREBASE_DATABASE_URL")
+    if not (config.FIREBASE_DATABASE_SECRET or "").strip():
+        missing.append("FIREBASE_DATABASE_SECRET")
+    return missing
 
 
 def _fb_url(path: str) -> str:
@@ -117,10 +123,15 @@ class TimerCog(commands.Cog, name="Timer"):
 
     async def _check_configured(self, ctx: commands.Context) -> bool:
         """Return True if Firebase env vars are set; otherwise send an error and return False."""
-        if not _firebase_configured():
+        missing = _missing_firebase_config()
+        if missing:
             await ctx.send(
-                "Timer is not configured yet. "
-                "Set `FIREBASE_DATABASE_URL` and `FIREBASE_DATABASE_SECRET` in the environment.",
+                "Timer is not configured. Missing: **"
+                + "**, **".join(missing)
+                + "**. "
+                "They must be in the container environment (usually from `~/.env` on the host via "
+                "`docker run --env-file`). Add them as GitHub Actions repository secrets and redeploy, "
+                "or edit `~/.env` on the server and `docker restart bot-container`.",
                 ephemeral=True,
             )
             return False
