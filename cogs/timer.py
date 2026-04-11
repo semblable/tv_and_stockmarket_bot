@@ -4,6 +4,7 @@ import logging
 import re
 import time
 
+import discord
 import requests
 from discord import app_commands
 from discord.ext import commands
@@ -159,6 +160,35 @@ def parse_start_args(args_str: str) -> dict[str, str | None]:
     return {"description": description, "project": project, "goal": goal}
 
 
+def _normalize_start_inputs(
+    description: str | None,
+    project: str | None,
+    goal: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Support structured slash options while keeping prefix tag parsing working."""
+    raw_description = (description or "").strip()
+    raw_project = (project or "").strip() or None
+    raw_goal = (goal or "").strip() or None
+
+    if raw_project or raw_goal:
+        return raw_description or "Discord timer", raw_project, raw_goal
+
+    parsed = parse_start_args(raw_description)
+    return (
+        parsed["description"] or "Discord timer",
+        parsed["project"],
+        parsed["goal"],
+    )
+
+
+def _normalize_goal_filter(project: str | None) -> str | None:
+    raw_project = (project or "").strip()
+    if not raw_project:
+        return None
+    parsed = parse_start_args(raw_project)
+    return parsed["project"] or raw_project
+
+
 def _build_available_names(items: list[dict], key: str, limit: int = 10) -> str:
     names = [str(item.get(key, "")) for item in items if item.get(key)]
     names = names[:limit]
@@ -307,6 +337,52 @@ class TimerCog(commands.Cog, name="Timer"):
         await self._send_ctx(ctx, "You don't have access to timer commands.", ephemeral=True)
         return False
 
+    async def _project_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        try:
+            projects = await asyncio.to_thread(_get_projects)
+        except Exception:
+            logger.warning("Project autocomplete failed", exc_info=True)
+            return []
+
+        current_lower = current.lower()
+        matches = [
+            str(project.get("name", "")).strip()
+            for project in projects
+            if project.get("name")
+            and (not current_lower or current_lower in str(project.get("name", "")).lower())
+        ]
+        return [app_commands.Choice(name=name, value=name) for name in matches[:25]]
+
+    async def _goal_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        try:
+            goals = await asyncio.to_thread(_get_goals)
+        except Exception:
+            logger.warning("Goal autocomplete failed", exc_info=True)
+            return []
+
+        project_name = getattr(interaction.namespace, "project", "") or ""
+        if project_name:
+            project = await asyncio.to_thread(_resolve_project, str(project_name))
+            if project:
+                goals = [goal for goal in goals if goal.get("projectId") == project.get("id")]
+
+        current_lower = current.lower()
+        matches = [
+            str(goal.get("description", "")).strip()
+            for goal in goals
+            if goal.get("description")
+            and (not current_lower or current_lower in str(goal.get("description", "")).lower())
+        ]
+        return [app_commands.Choice(name=name, value=name) for name in matches[:25]]
+
     @commands.hybrid_group(
         name="timer",
         invoke_without_command=True,
@@ -329,22 +405,36 @@ class TimerCog(commands.Cog, name="Timer"):
 
     @timer.command(name="start")
     @app_commands.describe(
-        args="Format: description project:<name> goal:<name>",
+        description="What you're working on",
+        project="Optional project name",
+        goal="Optional goal name",
     )
-    async def timer_start(self, ctx: commands.Context, *, args: str = ""):
-        """Start a timer with optional description, project, and goal tags."""
+    @app_commands.autocomplete(project=_project_autocomplete, goal=_goal_autocomplete)
+    async def timer_start(
+        self,
+        ctx: commands.Context,
+        *,
+        description: str = "",
+        project: str = "",
+        goal: str = "",
+    ):
+        """Start a timer with optional description, project, and goal."""
         if not await self._check_configured(ctx):
             return
         if not await self._check_owner_access(ctx):
             return
 
-        parsed = parse_start_args(args)
+        normalized_description, normalized_project, normalized_goal = _normalize_start_inputs(
+            description,
+            project,
+            goal,
+        )
         try:
             _, message = await asyncio.to_thread(
                 _timer_start,
-                parsed["description"] or "Discord timer",
-                parsed["project"],
-                parsed["goal"],
+                normalized_description,
+                normalized_project,
+                normalized_goal,
             )
         except Exception as exc:
             logger.exception("Error sending timer start command")
@@ -401,16 +491,16 @@ class TimerCog(commands.Cog, name="Timer"):
         await self._send_ctx(ctx, message, ephemeral=False)
 
     @timer.command(name="goals")
-    @app_commands.describe(args="Optional project filter, e.g. project:Web App")
-    async def timer_goals(self, ctx: commands.Context, *, args: str = ""):
+    @app_commands.describe(project="Optional project filter")
+    @app_commands.autocomplete(project=_project_autocomplete)
+    async def timer_goals(self, ctx: commands.Context, *, project: str = ""):
         """List available goals, optionally filtered by project."""
         if not await self._check_configured(ctx):
             return
         if not await self._check_owner_access(ctx):
             return
 
-        parsed = parse_start_args(args)
-        project_name = parsed["project"] or (args.strip() if args.strip() and not parsed["goal"] else None)
+        project_name = _normalize_goal_filter(project)
         try:
             message = await asyncio.to_thread(_list_goals_message, project_name)
         except Exception as exc:

@@ -13,6 +13,22 @@ def test_parse_start_args_supports_project_and_goal_any_order():
     }
 
 
+def test_normalize_start_inputs_supports_structured_options():
+    from cogs import timer as timer_module
+
+    normalized = timer_module._normalize_start_inputs("Deep work", "Bot", "Ship it")
+
+    assert normalized == ("Deep work", "Bot", "Ship it")
+
+
+def test_normalize_start_inputs_keeps_prefix_tag_format():
+    from cogs import timer as timer_module
+
+    normalized = timer_module._normalize_start_inputs("Deep work project:Bot goal:Ship it", "", "")
+
+    assert normalized == ("Deep work", "Bot", "Ship it")
+
+
 def test_timer_start_writes_timer_state_directly(monkeypatch):
     from cogs import timer as timer_module
 
@@ -112,6 +128,6 @@ async def test_timer_start_rejects_non_owner(monkeypatch, mock_bot):
     cog = TimerCog(mock_bot)
     ctx = _Ctx()
 
-    await cog.timer_start.callback(cog, ctx, args="Deep work")
+    await cog.timer_start.callback(cog, ctx, description="Deep work", project="", goal="")
 
     assert ctx.sent == [("You don't have access to timer commands.", {})]
