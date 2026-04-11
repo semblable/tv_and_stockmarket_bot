@@ -2,11 +2,11 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 
 import requests
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 import config
@@ -100,30 +100,6 @@ def _read_timer_status() -> str:
     return msg
 
 
-def _parse_start_args(args_str: str) -> dict:
-    """Parse 'description project:Foo goal:Bar' into components."""
-    proj_match = re.search(r"\bproject:(.+?)(?=\bgoal:|$)", args_str, re.IGNORECASE)
-    goal_match = re.search(r"\bgoal:(.+?)(?=\bproject:|$)", args_str, re.IGNORECASE)
-
-    cut_start = len(args_str)
-    project = None
-    goal = None
-
-    if proj_match:
-        project = proj_match.group(1).strip()
-        cut_start = min(cut_start, proj_match.start())
-    if goal_match:
-        goal = goal_match.group(1).strip()
-        cut_start = min(cut_start, goal_match.start())
-
-    description = args_str[:cut_start].strip()
-    return {
-        "description": description or None,
-        "project": project,
-        "goal": goal,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Cog
 # ---------------------------------------------------------------------------
@@ -164,7 +140,8 @@ class TimerCog(commands.Cog, name="Timer"):
     # --- Auth management ---
 
     @timer.command(name="auth")
-    async def timer_auth(self, ctx: commands.Context, *, password: str = ""):
+    @app_commands.describe(password="The timer auth password")
+    async def timer_auth(self, ctx: commands.Context, password: str):
         """Authorize yourself to use timer commands by providing the shared password."""
         configured = config.TIMER_AUTH_PASSWORD
         if not configured:
@@ -197,8 +174,19 @@ class TimerCog(commands.Cog, name="Timer"):
     # --- Timer commands ---
 
     @timer.command(name="start")
-    async def timer_start(self, ctx: commands.Context, *, args: str = ""):
-        """Start a timer. Optionally specify description, project:, and/or goal:."""
+    @app_commands.describe(
+        description="What to work on (optional)",
+        project="Project name — fuzzy-matched (optional)",
+        goal="Goal name — fuzzy-matched (optional)",
+    )
+    async def timer_start(
+        self,
+        ctx: commands.Context,
+        description: str = "",
+        project: str = "",
+        goal: str = "",
+    ):
+        """Start a timer. Optionally specify a description, project, and/or goal."""
         if not self._is_authorized(ctx.author.id):
             await ctx.send(
                 "You don't have timer access. Use `!timer auth <password>` first.",
@@ -206,14 +194,13 @@ class TimerCog(commands.Cog, name="Timer"):
             )
             return
 
-        parsed = _parse_start_args(args)
         cmd: dict = {"type": "start"}
-        if parsed["description"]:
-            cmd["description"] = parsed["description"]
-        if parsed["project"]:
-            cmd["project"] = parsed["project"]
-        if parsed["goal"]:
-            cmd["goal"] = parsed["goal"]
+        if description:
+            cmd["description"] = description
+        if project:
+            cmd["project"] = project
+        if goal:
+            cmd["goal"] = goal
 
         await ctx.send("Starting timer...")
         try:
@@ -280,8 +267,9 @@ class TimerCog(commands.Cog, name="Timer"):
         await ctx.send(result["message"])
 
     @timer.command(name="goals")
-    async def timer_goals(self, ctx: commands.Context, *, args: str = ""):
-        """List available goals, optionally filtered by project:<name>."""
+    @app_commands.describe(project="Filter goals by project name (optional)")
+    async def timer_goals(self, ctx: commands.Context, project: str = ""):
+        """List available goals, optionally filtered by project."""
         if not self._is_authorized(ctx.author.id):
             await ctx.send(
                 "You don't have timer access. Use `!timer auth <password>` first.",
@@ -290,10 +278,8 @@ class TimerCog(commands.Cog, name="Timer"):
             return
 
         cmd: dict = {"type": "goals"}
-        if args.strip():
-            parsed = _parse_start_args(args)
-            if parsed["project"]:
-                cmd["project"] = parsed["project"]
+        if project:
+            cmd["project"] = project
 
         try:
             result = await asyncio.to_thread(_send_timer_command, cmd)
