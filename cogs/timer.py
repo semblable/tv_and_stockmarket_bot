@@ -47,6 +47,10 @@ def _save_authorized_ids(ids: set[int]) -> None:
 # Firebase helpers
 # ---------------------------------------------------------------------------
 
+def _firebase_configured() -> bool:
+    return bool(config.FIREBASE_DATABASE_URL and config.FIREBASE_DATABASE_SECRET)
+
+
 def _fb_url(path: str) -> str:
     base = config.FIREBASE_DATABASE_URL.rstrip("/")
     return f"{base}/{path}.json?auth={config.FIREBASE_DATABASE_SECRET}"
@@ -111,6 +115,17 @@ class TimerCog(commands.Cog, name="Timer"):
         self.bot = bot
         self._authorized_ids: set[int] = _load_authorized_ids()
 
+    async def _check_configured(self, ctx: commands.Context) -> bool:
+        """Return True if Firebase env vars are set; otherwise send an error and return False."""
+        if not _firebase_configured():
+            await ctx.send(
+                "Timer is not configured yet. "
+                "Set `FIREBASE_DATABASE_URL` and `FIREBASE_DATABASE_SECRET` in the environment.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
     def _is_authorized(self, user_id: int) -> bool:
         return user_id in self._authorized_ids
 
@@ -143,6 +158,8 @@ class TimerCog(commands.Cog, name="Timer"):
     @app_commands.describe(password="The timer auth password")
     async def timer_auth(self, ctx: commands.Context, password: str):
         """Authorize yourself to use timer commands by providing the shared password."""
+        if not await self._check_configured(ctx):
+            return
         configured = config.TIMER_AUTH_PASSWORD
         if not configured:
             await ctx.send(
@@ -187,6 +204,8 @@ class TimerCog(commands.Cog, name="Timer"):
         goal: str = "",
     ):
         """Start a timer. Optionally specify a description, project, and/or goal."""
+        if not await self._check_configured(ctx):
+            return
         if not self._is_authorized(ctx.author.id):
             await ctx.send(
                 "You don't have timer access. Use `!timer auth <password>` first.",
@@ -214,6 +233,8 @@ class TimerCog(commands.Cog, name="Timer"):
     @timer.command(name="stop")
     async def timer_stop(self, ctx: commands.Context):
         """Stop the currently running timer."""
+        if not await self._check_configured(ctx):
+            return
         if not self._is_authorized(ctx.author.id):
             await ctx.send(
                 "You don't have timer access. Use `!timer auth <password>` first.",
@@ -233,6 +254,8 @@ class TimerCog(commands.Cog, name="Timer"):
     @timer.command(name="status")
     async def timer_status(self, ctx: commands.Context):
         """Check timer status directly from Firebase (fast, works even if local app is offline)."""
+        if not await self._check_configured(ctx):
+            return
         if not self._is_authorized(ctx.author.id):
             await ctx.send(
                 "You don't have timer access. Use `!timer auth <password>` first.",
@@ -251,6 +274,8 @@ class TimerCog(commands.Cog, name="Timer"):
     @timer.command(name="projects")
     async def timer_projects(self, ctx: commands.Context):
         """List available projects."""
+        if not await self._check_configured(ctx):
+            return
         if not self._is_authorized(ctx.author.id):
             await ctx.send(
                 "You don't have timer access. Use `!timer auth <password>` first.",
@@ -270,6 +295,8 @@ class TimerCog(commands.Cog, name="Timer"):
     @app_commands.describe(project="Filter goals by project name (optional)")
     async def timer_goals(self, ctx: commands.Context, project: str = ""):
         """List available goals, optionally filtered by project."""
+        if not await self._check_configured(ctx):
+            return
         if not self._is_authorized(ctx.author.id):
             await ctx.send(
                 "You don't have timer access. Use `!timer auth <password>` first.",
