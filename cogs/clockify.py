@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from discord import app_commands
@@ -14,6 +15,11 @@ PREF_CLOCKIFY_API_KEY = "clockify_api_key"
 PREF_CLOCKIFY_WORKSPACE_ID = "clockify_workspace_id"
 PREF_CLOCKIFY_USER_ID = "clockify_user_id"
 PREF_CLOCKIFY_ENABLED = "clockify_enabled"
+
+# Projects rarely change, so cache them per-user. This lets autocomplete filter
+# locally on every keystroke instead of calling Clockify each time, which would
+# quickly exhaust the Free plan's 30 requests/hour/workspace budget.
+PROJECT_CACHE_TTL_S = 300
 
 
 def _format_duration(duration_sec: int) -> str:
@@ -33,6 +39,8 @@ class ClockifyCog(commands.Cog, name="Clockify"):
     def __init__(self, bot: commands.Bot, db_manager):
         self.bot = bot
         self.db_manager = db_manager
+        # user_id -> (expires_at_monotonic, [project dicts]); see PROJECT_CACHE_TTL_S.
+        self._project_cache: dict = {}
 
     async def cog_load(self):
         # Make the /clockify group (and its subcommands) usable in DMs. For hybrid
@@ -80,19 +88,13 @@ class ClockifyCog(commands.Cog, name="Clockify"):
             await ctx.send(content)
 
     async def _get_pref(self, user_id: int, key: str, default=None):
-        return await self.bot.loop.run_in_executor(
-            None, self.db_manager.get_user_preference, user_id, key, default
-        )
+        return await asyncio.to_thread(self.db_manager.get_user_preference, user_id, key, default)
 
     async def _set_pref(self, user_id: int, key: str, value) -> None:
-        await self.bot.loop.run_in_executor(
-            None, self.db_manager.set_user_preference, user_id, key, value
-        )
+        await asyncio.to_thread(self.db_manager.set_user_preference, user_id, key, value)
 
     async def _del_pref(self, user_id: int, key: str) -> None:
-        await self.bot.loop.run_in_executor(
-            None, self.db_manager.delete_user_preference, user_id, key
-        )
+        await asyncio.to_thread(self.db_manager.delete_user_preference, user_id, key)
 
     async def _check_db(self, ctx: commands.Context) -> bool:
         if not self.db_manager:
@@ -122,9 +124,52 @@ class ClockifyCog(commands.Cog, name="Clockify"):
             return None
         return api_key, workspace_id, clockify_uid
 
-    async def _resolve_project_id(self, api_key: str, workspace_id: str, name: str):
-        """Resolve a project name to its id. Returns (project_id, error_message)."""
+    async def _get_projects_cached(self, user_id: int, api_key: str, workspace_id: str):
+        """
+        Return the user's Clockify projects, cached for PROJECT_CACHE_TTL_S seconds.
+        Returns a list on success or an error dict (errors are not cached).
+        """
+        now = time.monotonic()
+        cached = self._project_cache.get(user_id)
+        if cached and cached[0] > now:
+            return cached[1]
         projects = await asyncio.to_thread(clockify_client.get_projects, api_key, workspace_id)
+        if clockify_client.is_error(projects):
+            return projects
+        if not isinstance(projects, list):
+            projects = []
+        self._project_cache[user_id] = (now + PROJECT_CACHE_TTL_S, projects)
+        return projects
+
+    async def _project_autocomplete(self, interaction, current: str):
+        """Suggest the user's Clockify project names, filtered locally from the cache."""
+        try:
+            if not self.db_manager:
+                return []
+            user_id = interaction.user.id
+            api_key = await self._get_pref(user_id, PREF_CLOCKIFY_API_KEY)
+            workspace_id = await self._get_pref(user_id, PREF_CLOCKIFY_WORKSPACE_ID)
+            if not (api_key and workspace_id):
+                return []
+            projects = await self._get_projects_cached(user_id, api_key, workspace_id)
+            if clockify_client.is_error(projects):
+                return []
+            current_lower = (current or "").lower()
+            names = [str(p.get("name", "")).strip() for p in projects if p.get("name")]
+            if current_lower:
+                starts = [n for n in names if n.lower().startswith(current_lower)]
+                contains = [n for n in names if current_lower in n.lower() and n not in starts]
+                ordered = starts + contains
+            else:
+                ordered = names
+            return [app_commands.Choice(name=n[:100], value=n[:100]) for n in ordered[:25]]
+        except Exception:
+            logger.warning("Clockify project autocomplete failed", exc_info=True)
+            return []
+
+    async def _resolve_project_id(self, user_id: int, api_key: str, workspace_id: str, name: str):
+        """Resolve a project name to its id. Returns (project_id, error_message)."""
+        projects = await self._get_projects_cached(user_id, api_key, workspace_id)
         if clockify_client.is_error(projects):
             return None, f"❌ {projects['message']}"
         if not isinstance(projects, list):
@@ -252,13 +297,15 @@ class ClockifyCog(commands.Cog, name="Clockify"):
             PREF_CLOCKIFY_ENABLED,
         ):
             await self._del_pref(uid, key)
+        self._project_cache.pop(uid, None)
         await self._send_ctx(ctx, "🗑️ Clockify account unlinked and key removed.", ephemeral=True)
 
     @clockify.command(name="start", description="Start a Clockify time entry.")
     @app_commands.describe(
         description="What you're working on",
-        project="Optional project name",
+        project="Optional project name (type to autocomplete)",
     )
+    @app_commands.autocomplete(project=_project_autocomplete)
     async def clockify_start(self, ctx: commands.Context, *, description: str = "", project: str = ""):
         if not await self._check_db(ctx):
             return
@@ -285,7 +332,7 @@ class ClockifyCog(commands.Cog, name="Clockify"):
         project = (project or "").strip()
         project_id = None
         if project:
-            project_id, err = await self._resolve_project_id(api_key, workspace_id, project)
+            project_id, err = await self._resolve_project_id(ctx.author.id, api_key, workspace_id, project)
             if err:
                 await self._send_ctx(ctx, err, ephemeral=False)
                 return
