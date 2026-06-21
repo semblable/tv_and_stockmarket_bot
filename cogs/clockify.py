@@ -18,8 +18,10 @@ PREF_CLOCKIFY_ENABLED = "clockify_enabled"
 
 # Projects rarely change, so cache them per-user. This lets autocomplete filter
 # locally on every keystroke instead of calling Clockify each time, which would
-# quickly exhaust the Free plan's 30 requests/hour/workspace budget.
-PROJECT_CACHE_TTL_S = 300
+# quickly exhaust the Free plan's 30 requests/hour/workspace budget. A brand-new
+# project still resolves immediately on submit via the forced refresh in
+# _resolve_project_id; this TTL only governs how stale autocomplete suggestions get.
+PROJECT_CACHE_TTL_S = 1800  # 30 minutes
 
 
 def _format_duration(duration_sec: int) -> str:
@@ -124,14 +126,15 @@ class ClockifyCog(commands.Cog, name="Clockify"):
             return None
         return api_key, workspace_id, clockify_uid
 
-    async def _get_projects_cached(self, user_id: int, api_key: str, workspace_id: str):
+    async def _get_projects_cached(self, user_id: int, api_key: str, workspace_id: str, force: bool = False):
         """
         Return the user's Clockify projects, cached for PROJECT_CACHE_TTL_S seconds.
-        Returns a list on success or an error dict (errors are not cached).
+        Pass force=True to bypass the cache and refetch. Returns a list on success
+        or an error dict (errors are not cached).
         """
         now = time.monotonic()
         cached = self._project_cache.get(user_id)
-        if cached and cached[0] > now:
+        if not force and cached and cached[0] > now:
             return cached[1]
         projects = await asyncio.to_thread(clockify_client.get_projects, api_key, workspace_id)
         if clockify_client.is_error(projects):
@@ -167,18 +170,33 @@ class ClockifyCog(commands.Cog, name="Clockify"):
             logger.warning("Clockify project autocomplete failed", exc_info=True)
             return []
 
+    @staticmethod
+    def _find_project(projects: list, name: str):
+        """Best match for a project name: exact (case-insensitive) first, else shortest substring match."""
+        lower = name.lower()
+        exact = [p for p in projects if str(p.get("name", "")).lower() == lower]
+        if exact:
+            return exact[0]
+        partial = [p for p in projects if lower in str(p.get("name", "")).lower()]
+        return min(partial, key=lambda p: len(str(p.get("name", "")))) if partial else None
+
     async def _resolve_project_id(self, user_id: int, api_key: str, workspace_id: str, name: str):
         """Resolve a project name to its id. Returns (project_id, error_message)."""
         projects = await self._get_projects_cached(user_id, api_key, workspace_id)
         if clockify_client.is_error(projects):
             return None, f"❌ {projects['message']}"
-        if not isinstance(projects, list):
-            return None, "❌ Couldn't load your Clockify projects."
-        lower = name.lower()
-        exact = [p for p in projects if str(p.get("name", "")).lower() == lower]
-        partial = [p for p in projects if lower in str(p.get("name", "")).lower()]
-        match = exact[0] if exact else (min(partial, key=lambda p: len(str(p.get("name", "")))) if partial else None)
-        if not match:
+        match = self._find_project(projects, name) if isinstance(projects, list) else None
+
+        # The cache may predate a just-created project; refresh once before giving up.
+        if match is None:
+            projects = await self._get_projects_cached(user_id, api_key, workspace_id, force=True)
+            if clockify_client.is_error(projects):
+                return None, f"❌ {projects['message']}"
+            if not isinstance(projects, list):
+                return None, "❌ Couldn't load your Clockify projects."
+            match = self._find_project(projects, name)
+
+        if match is None:
             names = ", ".join(str(p.get("name", "")) for p in projects[:10] if p.get("name")) or "(none)"
             return None, f'❌ Project "{name}" not found. Available: {names}'
         return match.get("id"), None
