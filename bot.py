@@ -139,6 +139,7 @@ INITIAL_EXTENSIONS = [
     "cogs.reminders",  # One-off + repeating reminders (timezone-aware)
     "cogs.mood",  # Optional mood tracking + daily reminder (opt-in)
     "cogs.timer",  # Owner-only timer commands via direct Firebase access
+    "cogs.clockify",  # Per-user Clockify time-tracking integration
     # "cogs.help" # Not loaded as a cog, but assigned directly
 ]
 

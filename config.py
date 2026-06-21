@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     DISCORD_SYNC_SECRET: str = ""
     TIMER_AUTH_PASSWORD: str = ""
 
+    # Clockify integration (per-user API keys; only override the base URL for non-global regions)
+    CLOCKIFY_API_BASE_URL: str = "https://api.clockify.me/api/v1"
+
     # Config for pydantic settings
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE,
@@ -61,6 +64,7 @@ try:
     TIMER_OWNER_ID = settings.TIMER_OWNER_ID
     DISCORD_SYNC_SECRET = settings.DISCORD_SYNC_SECRET
     TIMER_AUTH_PASSWORD = settings.TIMER_AUTH_PASSWORD
+    CLOCKIFY_API_BASE_URL = settings.CLOCKIFY_API_BASE_URL
     
     logger.info("Configuration loaded successfully via Pydantic.")
 
