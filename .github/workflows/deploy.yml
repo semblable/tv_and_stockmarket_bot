@@ -78,7 +78,6 @@ jobs:
           echo "TMDB_API_KEY=dummy" >> .env
           echo "ALPHA_VANTAGE_API_KEY=dummy" >> .env
           echo "OPENWEATHERMAP_API_KEY=dummy" >> .env
-          echo "GEMINI_API_KEY=dummy" >> .env
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7

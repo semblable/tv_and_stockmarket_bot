@@ -1,0 +1,13 @@
+# Normalize line endings: store as LF in the repo, check out native on Windows.
+* text=auto eol=lf
+
+# Treat binary assets as binary (no EOL conversion, no diff).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary

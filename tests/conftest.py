@@ -10,7 +10,6 @@ os.environ["DISCORD_BOT_TOKEN"] = "dummy_token"
 os.environ["TMDB_API_KEY"] = "dummy_tmdb_key"
 os.environ["ALPHA_VANTAGE_API_KEY"] = "dummy_av_key"
 os.environ["OPENWEATHERMAP_API_KEY"] = "dummy_owm_key"
-os.environ["GEMINI_API_KEY"] = "dummy_gemini_key"
 os.environ["SQLITE_DB_PATH"] = "bot_data.db" # Optional
 os.environ["TIMER_OWNER_ID"] = "123"
 

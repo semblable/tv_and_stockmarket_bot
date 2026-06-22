@@ -260,6 +260,11 @@ temp/
 *.backup
 *.orig
 
+# Local-only artifacts (security scans, generated docs, personal helpers)
+bandit_report.json
+Dokumentacja_projektu_Discord_Bot.pdf
+build_interview_pdf.py
+
 # Database files (if not in data/)
 *.db
 *.sqlite
