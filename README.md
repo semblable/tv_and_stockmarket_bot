@@ -1,6 +1,6 @@
 # TV, Stocks & Assistant Bot
 
-A comprehensive Discord bot that combines entertainment tracking (TV shows, movies), financial monitoring (stocks + portfolio), utility features (weather), productivity (reminders/todos/habits), plus an AI assistant powered by Google Gemini.
+A comprehensive Discord bot that combines entertainment tracking (TV shows, movies), financial monitoring (stocks + portfolio), utility features (weather), and productivity (reminders/todos/habits).
 
 ## Features
 
@@ -29,9 +29,6 @@ A comprehensive Discord bot that combines entertainment tracking (TV shows, movi
 - **Reading progress**: track pages / kindle / audiobook progress
 - **Game info**: Steam-first lookups with Wikipedia/PCGamingWiki fallback
 
-### AI Assistant
-- **Gemini integration**: chat naturally with the bot for summaries, questions, and assistance
-
 ---
 
 ## Setup & Configuration
@@ -42,19 +39,17 @@ A comprehensive Discord bot that combines entertainment tracking (TV shows, movi
 - TMDB API Key
 - AlphaVantage API Key
 - OpenWeatherMap API Key
-- Google Gemini API Key
 
 ### Environment Variables
 Create a `.env` file inside `tv_and_stockmarket_bot/` (same folder as `bot.py`).
 
-Tip: copy `env.example` to `.env` and fill it in.
+Tip: copy `.env.example` to `.env` and fill it in.
 
 ```env
 DISCORD_BOT_TOKEN=your_discord_token
 TMDB_API_KEY=your_tmdb_key
 ALPHA_VANTAGE_API_KEY=your_av_key
 OPENWEATHERMAP_API_KEY=your_owm_key
-GEMINI_API_KEY=your_gemini_key
 ```
 
 ---

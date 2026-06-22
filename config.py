@@ -18,7 +18,6 @@ class Settings(BaseSettings):
     TMDB_API_KEY: str
     ALPHA_VANTAGE_API_KEY: str
     OPENWEATHERMAP_API_KEY: str
-    GEMINI_API_KEY: str
     SQLITE_DB_PATH: str = "data/app.db"
     WEBHOOK_BASE_URL: str = "http://localhost:5000"
     WEBHOOK_SHARED_SECRET: str = ""
@@ -52,7 +51,6 @@ try:
     TMDB_API_KEY = settings.TMDB_API_KEY
     ALPHA_VANTAGE_API_KEY = settings.ALPHA_VANTAGE_API_KEY
     OPENWEATHERMAP_API_KEY = settings.OPENWEATHERMAP_API_KEY
-    GEMINI_API_KEY = settings.GEMINI_API_KEY
     SQLITE_DB_PATH = settings.SQLITE_DB_PATH
     WEBHOOK_BASE_URL = settings.WEBHOOK_BASE_URL
     WEBHOOK_SHARED_SECRET = settings.WEBHOOK_SHARED_SECRET
