@@ -5,15 +5,12 @@ import asyncio # Added for rate limiting
 import functools # Added for partial
 import logging # For background task logging
 import typing # For type hinting
-import re
-import datetime
 from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
 from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series # Added
 from api_clients import yahoo_finance_client # Added Yahoo Finance support
 from api_clients import google_news_rss_client
-from utils.chart_utils import generate_stock_chart_url, get_stock_chart_image # Added
-from data_manager import DataManager # Import DataManager class
+from utils.chart_utils import get_stock_chart_image # Added
 # Individual function imports from data_manager are no longer needed if using an instance
 
 # Configure logging for this cog
@@ -50,9 +47,6 @@ class Stocks(commands.Cog):
     async def on_ready(self):
         print("Stocks Cog is ready.")
         logger.info("Stocks Cog is ready and stock alert monitoring task is running.")
-
-    def _time_hhmm_pattern(self):
-        return re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
     async def _fetch_stock_news_any_provider(self, symbol: str, limit: int = 5) -> typing.Optional[typing.List[dict]]:
         """

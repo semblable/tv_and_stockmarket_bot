@@ -1,6 +1,5 @@
 from datetime import date
 
-import pytest
 
 from utils.mood_report import MoodDaySummary, _overall_stats, to_csv_bytes, to_html_report_bytes
 

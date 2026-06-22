@@ -2,7 +2,6 @@
 import os
 import sys
 import pytest
-import pytest_asyncio
 from unittest.mock import MagicMock, patch
 
 # Set dummy environment variables to pass config validation

@@ -4,10 +4,7 @@ import discord
 from discord.ext import commands, tasks
 from api_clients import tmdb_client
 from api_clients.tmdb_client import TMDBError, TMDBConnectionError, TMDBAPIError
-from data_manager import DataManager
-from datetime import datetime, date, timedelta, time
-import asyncio
-import re
+from datetime import datetime, date, time
 import logging
 import typing
 from utils.paginator import BasePaginatorView, SelectionView

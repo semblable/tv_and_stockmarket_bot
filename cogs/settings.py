@@ -3,12 +3,10 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import re # For DND time validation
-from datetime import datetime, time # For DND time checking (though not used in this file directly yet)
 import logging # Import logging
-from typing import Optional, List
+from typing import Optional
 import secrets
 
-from data_manager import DataManager # Import DataManager class#
 import config
 
 logger = logging.getLogger(__name__)

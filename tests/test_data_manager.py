@@ -1,7 +1,5 @@
 # tests/test_data_manager.py
-import pytest
 from data_manager import DataManager
-from api_clients import steam_client
 
 # Tests for Tracked Stocks
 def test_add_tracked_stock(db_manager):

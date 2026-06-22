@@ -14,7 +14,6 @@ import traceback # Added for detailed error logging
 from flask import Flask, request, jsonify
 from threading import Thread
 from data_manager import DataManager # For API endpoints
-import random # For placeholder chart data
 from typing import Optional
 import time
 import hmac

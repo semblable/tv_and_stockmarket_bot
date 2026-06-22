@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import datetime, timedelta, timezone, time as dtime, date
+from datetime import datetime, timedelta, timezone, time as dtime
 from functools import partial
 from typing import Optional, Tuple, Dict, Any
 

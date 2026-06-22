@@ -2,7 +2,6 @@ import logging
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import ValidationError
 import os
-import sys
 
 # Initialize logger. 
 # Note: If this module is imported before logging is configured in the entry point,

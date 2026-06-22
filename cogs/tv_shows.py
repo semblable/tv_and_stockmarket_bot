@@ -4,10 +4,7 @@ import discord
 from discord.ext import commands, tasks
 from api_clients import tmdb_client, tvmaze_client
 from api_clients.tmdb_client import TMDBError, TMDBConnectionError, TMDBAPIError
-from api_clients.tvmaze_client import TVMazeError, TVMazeConnectionError, TVMazeAPIError
-from data_manager import DataManager
-from datetime import datetime, date, timedelta, time, timezone
-import requests
+from datetime import datetime, date, timedelta, timezone
 import asyncio
 import logging
 import json

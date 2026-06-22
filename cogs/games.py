@@ -1,6 +1,6 @@
 import logging
 from functools import partial
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import discord
 from discord.ext import commands

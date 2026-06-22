@@ -2,11 +2,11 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import logging
-from typing import Optional, List
+from typing import Optional
 import datetime
 import aiohttp
 
-from api_clients.openweathermap_client import get_weather_data, ICON_TO_EMOJI
+from api_clients.openweathermap_client import get_weather_data
 from config import OPENWEATHERMAP_API_KEY, TMDB_API_KEY # To check if they're configured
 from api_clients.tmdb_client import get_upcoming_movies, get_tv_on_the_air, get_poster_url
 

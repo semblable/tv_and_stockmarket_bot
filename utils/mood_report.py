@@ -3,7 +3,7 @@ import csv
 import io
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 
 @dataclass(frozen=True)
