@@ -1,5 +1,4 @@
 # tests/test_api_clients.py
-import pytest
 from unittest.mock import patch, MagicMock
 from api_clients import alpha_vantage_client
 from api_clients import tmdb_client

@@ -14,7 +14,6 @@ import traceback # Added for detailed error logging
 from flask import Flask, request, jsonify
 from threading import Thread
 from data_manager import DataManager # For API endpoints
-import random # For placeholder chart data
 from typing import Optional
 import time
 import hmac
@@ -147,7 +146,7 @@ async def load_extensions():
         try:
             await bot.load_extension(extension)
             log.info(f"Successfully loaded extension: {extension}")
-        except Exception as e:
+        except Exception:
             log.error(f"Failed to load extension {extension}:", exc_info=True) # Log with traceback
 
 # --- Global Application Command Error Handler ---
@@ -433,7 +432,7 @@ async def on_ready():
         except Exception as e:
             log.error(f"❌ Unexpected error syncing globally: {e}")
             
-    except Exception as e:
+    except Exception:
         log.error("❌ Critical error during command sync:", exc_info=True)
     
     if not commands_synced:
@@ -520,7 +519,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         log.info("Bot shutting down due to KeyboardInterrupt.")
-    except Exception as e:
+    except Exception:
         log.error("An unexpected error occurred in __main__:", exc_info=True)
     finally:
         log.info("Bot has shut down.")

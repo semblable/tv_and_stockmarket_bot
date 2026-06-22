@@ -145,7 +145,7 @@ if __name__ == '__main__':
                 print(f"  Wind: {weather.get('current', {}).get('wind_speed')} m/s")
                 print("\n  Forecast (next ~9 hours):")
                 for f_item in weather.get("forecast", []):
-                    from datetime import datetime, timezone
+                    from datetime import datetime, timezone, timedelta
                     dt_object = datetime.fromtimestamp(f_item['dt'], tz=timezone.utc)
                     # Adjust to local time if timezone info is available from current weather
                     if weather.get('current', {}).get('timezone'):

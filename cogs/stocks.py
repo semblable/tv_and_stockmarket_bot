@@ -5,15 +5,12 @@ import asyncio # Added for rate limiting
 import functools # Added for partial
 import logging # For background task logging
 import typing # For type hinting
-import re
-import datetime
 from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
 from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series # Added
 from api_clients import yahoo_finance_client # Added Yahoo Finance support
 from api_clients import google_news_rss_client
-from utils.chart_utils import generate_stock_chart_url, get_stock_chart_image # Added
-from data_manager import DataManager # Import DataManager class
+from utils.chart_utils import get_stock_chart_image # Added
 # Individual function imports from data_manager are no longer needed if using an instance
 
 # Configure logging for this cog
@@ -50,9 +47,6 @@ class Stocks(commands.Cog):
     async def on_ready(self):
         print("Stocks Cog is ready.")
         logger.info("Stocks Cog is ready and stock alert monitoring task is running.")
-
-    def _time_hhmm_pattern(self):
-        return re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
     async def _fetch_stock_news_any_provider(self, symbol: str, limit: int = 5) -> typing.Optional[typing.List[dict]]:
         """
@@ -308,8 +302,7 @@ class Stocks(commands.Cog):
 
                 price = get_formatted_value('05. price', is_currency=True)
                 change_val_str = price_data.get('09. change', '0') # Default to '0' for float conversion
-                change_percent_val_str = price_data.get('10. change percent', '0%') # Default to '0%' for float conversion
-                
+
                 change_display = get_formatted_value('09. change')
                 change_percent_display = get_formatted_value('10. change percent')
 
@@ -488,7 +481,6 @@ class Stocks(commands.Cog):
                 if price_data:
                     if "error" in price_data:
                         error_type = price_data["error"]
-                        error_message = price_data.get("message", "Unknown error")
                         if error_type == "api_limit": stock_display += f" ⚠️ Price: API limit."
                         else: stock_display += f" ❌ Price: N/A"
                     elif "01. symbol" in price_data and "05. price" in price_data:
@@ -720,7 +712,6 @@ class Stocks(commands.Cog):
         await ctx.defer(ephemeral=False) # Acknowledge interaction, as fetching and charting can take time
 
         config = SUPPORTED_TIMESPAN[timespan_upper]
-        api_func = config["func"]
         api_params = config["params"].copy() # Use a copy to avoid modifying the original dict
         display_label = config["label"]
 
@@ -1010,15 +1001,7 @@ class Stocks(commands.Cog):
             exchange_rate = 1.0
             if not api_error_for_stock and stock_currency != pref_currency:
                 # Need conversion
-                pair = f"{stock_currency}{pref_currency}=X" # e.g. PLNUSD=X
-                # Special case for USD
-                if stock_currency == 'USD': pair = f"{pref_currency}=X" # This is wrong usually. 
                 # Yahoo convention: BaseQuote=X. EURUSD=X means 1 EUR = x USD.
-                
-                # Check Yahoo conventions or use a more robust way?
-                # Standard: EURUSD=X, GBPUSD=X, PLNUSD=X (Wait, PLNUSD might not exist, usually USDPLN=X)
-                # Let's rely on get_stock_price(pair)
-                
                 pair_symbol = f"{stock_currency}{pref_currency}=X"
                 fx_data = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_stock_price, pair_symbol)
                 
@@ -1301,10 +1284,9 @@ class Stocks(commands.Cog):
         # If timespan is intraday (1D, 5D), let's fallback to 'daily' logic or warn.
         # Let's force Daily for portfolio chart for simplicity and reliability.
         
-        api_params = config["params"].copy()
         yahoo_period = "1mo" # Default
-        if timespan_upper == "1D": yahoo_period = "1d"; interval = "15m" # approximations
-        elif timespan_upper == "5D": yahoo_period = "5d"; interval = "60m"
+        if timespan_upper == "1D": yahoo_period = "1d"
+        elif timespan_upper == "5D": yahoo_period = "5d"
         elif timespan_upper == "1M": yahoo_period = "1mo"
         elif timespan_upper == "3M": yahoo_period = "3mo"
         elif timespan_upper == "6M": yahoo_period = "6mo"

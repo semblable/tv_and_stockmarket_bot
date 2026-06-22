@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 from api_clients import tvmaze_client, yahoo_finance_client, openweathermap_client
 
 # --- TVMaze Tests ---

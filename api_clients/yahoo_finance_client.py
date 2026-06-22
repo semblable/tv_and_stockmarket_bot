@@ -2,11 +2,9 @@
 
 import yfinance as yf
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, List, Tuple, Dict, Any
 import requests  # Added for direct Yahoo API calls
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
