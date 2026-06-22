@@ -634,8 +634,6 @@ class MoodCog(commands.Cog, name="Mood"):
 
         # --- Slash interaction flow: select menu + modal ---
         if getattr(ctx, "interaction", None):
-            interaction: discord.Interaction = ctx.interaction  # type: ignore
-
             options = []
             for r in rows:
                 try:

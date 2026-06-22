@@ -396,7 +396,7 @@ class TVShows(commands.Cog):
                 await self.send_response(ctx, f"Successfully subscribed to {actual_show_name}!", ephemeral=True)
             else:
                 await self.send_response(ctx, f"Could not subscribe to {actual_show_name} due to a database error. Please try again later.", ephemeral=True)
-        except Exception as e:
+        except Exception:
             logger.exception(f"Error adding TV subscription for user {ctx.author.id} to show {show_id} ('{actual_show_name}')")
             await self.send_response(ctx, f"Sorry, there was an error subscribing to '{actual_show_name}'. Please try again later.", ephemeral=True)
 
@@ -498,7 +498,7 @@ class TVShows(commands.Cog):
                     existing_tmdb_ids.add(show_id) # Add to avoid dupes within the same batch if user listed twice
                 else:
                     results["failed"].append(f"{actual_show_name} (Database Error)")
-            except Exception as e:
+            except Exception:
                 logger.exception(f"Error batch subscribing to {actual_show_name}")
                 results["failed"].append(f"{actual_show_name} (Unknown Error)")
             
