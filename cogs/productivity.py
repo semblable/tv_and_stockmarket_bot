@@ -16,6 +16,15 @@ try:
 except Exception:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 
+# Identical helpers shared with mood/reminders live in utils.timezone_utils.
+# The tz resolvers below (_cet_tzinfo/_tzinfo_from_name/_parse_hhmm_*) are kept
+# local on purpose — they have productivity-specific semantics.
+from utils.timezone_utils import (
+    utc_now as _utc_now,
+    sqlite_utc_timestamp as _sqlite_utc_timestamp,
+    parse_sqlite_utc_timestamp as _parse_sqlite_utc_timestamp,
+)
+
 
 def _habit_checkins_executor_fn(db_manager, guild_id: int, user_id: int, habit_id: int, since_utc: str, limit: int = 5000):
     """
@@ -36,16 +45,6 @@ def _habit_checkins_executor_fn(db_manager, guild_id: int, user_id: int, habit_i
 
 def _scope_guild_id_from_ctx(ctx: commands.Context) -> int:
     return ctx.guild.id if ctx.guild else 0
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _sqlite_utc_timestamp(dt: datetime) -> str:
-    # SQLite CURRENT_TIMESTAMP uses "YYYY-MM-DD HH:MM:SS" in UTC.
-    dt = dt.astimezone(timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _format_due_display(dt_utc: datetime, tz_name: Optional[str]) -> tuple[str, str]:
@@ -75,17 +74,6 @@ def _format_due_display(dt_utc: datetime, tz_name: Optional[str]) -> tuple[str, 
         tz_label = "CET/CEST"
 
     return (local_dt.strftime("%Y-%m-%d %H:%M:%S"), tz_label)
-
-
-def _parse_sqlite_utc_timestamp(ts: Optional[str]) -> Optional[datetime]:
-    if not isinstance(ts, str) or not ts.strip():
-        return None
-    s = ts.strip()
-    try:
-        dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
-        return dt.replace(tzinfo=timezone.utc)
-    except Exception:
-        return None
 
 
 def _parse_hhmm_utc(s: str) -> Optional[dtime]:

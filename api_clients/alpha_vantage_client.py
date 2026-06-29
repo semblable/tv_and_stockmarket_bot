@@ -1,11 +1,16 @@
 # api_clients/alpha_vantage_client.py
 
+import logging
 import requests
 import config # To access ALPHA_VANTAGE_API_KEY
+from utils.api_utils import resilient_get, ttl_cache
+
+logger = logging.getLogger(__name__)
 
 ALPHA_VANTAGE_API_KEY = config.ALPHA_VANTAGE_API_KEY
 BASE_URL = "https://www.alphavantage.co/query"
 
+@ttl_cache(seconds=60)
 def get_stock_price(symbol: str):
     """
     Fetches the current stock price and other quote data for a given symbol using Alpha Vantage.
@@ -21,9 +26,7 @@ def get_stock_price(symbol: str):
         None if an error occurs (e.g., invalid symbol, network issue).
     """
     if not ALPHA_VANTAGE_API_KEY:
-        # Consider logging this instead of printing, or raise an exception
-        # if the API key is essential for the application's core functionality.
-        print("CRITICAL: ALPHA_VANTAGE_API_KEY not configured.")
+        logger.error("ALPHA_VANTAGE_API_KEY not configured.")
         return {"error": "config_error", "message": "ALPHA_VANTAGE_API_KEY not configured."}
 
     params = {
@@ -33,7 +36,7 @@ def get_stock_price(symbol: str):
     }
 
     try:
-        response = requests.get(BASE_URL, params=params, timeout=10) # Added timeout
+        response = resilient_get(BASE_URL, params=params, timeout=10) # Added timeout
         response.raise_for_status()  # Raises an HTTPError for bad responses (4XX or 5XX)
         data = response.json()
 
@@ -43,32 +46,32 @@ def get_stock_price(symbol: str):
         elif "Error Message" in data:
             # This indicates an API-level error, like an invalid symbol
             error_message = data['Error Message']
-            print(f"Alpha Vantage API Error for '{symbol}': {error_message}")
+            logger.warning(f"Alpha Vantage API Error for '{symbol}': {error_message}")
             return {"error": "api_error", "message": error_message}
         elif "Note" in data:
             # This often indicates an API call frequency limit
-            print(f"Alpha Vantage API Note for '{symbol}': {data['Note']}")
+            logger.warning(f"Alpha Vantage API Note for '{symbol}': {data['Note']}")
             return {"error": "api_limit", "message": data['Note']}
         elif not data: # Handles empty response
-            print(f"Empty response from Alpha Vantage for '{symbol}'.")
+            logger.warning(f"Empty response from Alpha Vantage for '{symbol}'.")
             return None
         else:
             # Unexpected response structure
-            print(f"Unexpected response structure from Alpha Vantage for '{symbol}': {data}")
+            logger.warning(f"Unexpected response structure from Alpha Vantage for '{symbol}': {data}")
             return None
 
     except requests.exceptions.Timeout:
-        print(f"Timeout error fetching stock price for '{symbol}' from Alpha Vantage.")
+        logger.error(f"Timeout error fetching stock price for '{symbol}' from Alpha Vantage.")
         return None
     except requests.exceptions.HTTPError as http_err:
-        print(f"HTTP error fetching stock price for '{symbol}' from Alpha Vantage: {http_err} - Response: {response.text}")
+        logger.error(f"HTTP error fetching stock price for '{symbol}' from Alpha Vantage: {http_err} - Response: {response.text}")
         return None
     except requests.exceptions.RequestException as req_err:
         # Catching other general request exceptions (network, connection, etc.)
-        print(f"Request error fetching stock price for '{symbol}' from Alpha Vantage: {req_err}")
+        logger.error(f"Request error fetching stock price for '{symbol}' from Alpha Vantage: {req_err}")
         return None
     except ValueError:  # Includes JSONDecodeError
-        print(f"Error decoding JSON response from Alpha Vantage for '{symbol}'. Response: {response.text if 'response' in locals() else 'N/A'}")
+        logger.error(f"Error decoding JSON response from Alpha Vantage for '{symbol}'. Response: {response.text if 'response' in locals() else 'N/A'}")
         return None
 
 
@@ -87,7 +90,7 @@ def get_stock_news(symbol: str, limit: int = 5):
         None if an error occurs (e.g., invalid symbol, network issue, no news found).
     """
     if not ALPHA_VANTAGE_API_KEY:
-        print("CRITICAL: ALPHA_VANTAGE_API_KEY not configured.")
+        logger.error("ALPHA_VANTAGE_API_KEY not configured.")
         return {"error": "config_error", "message": "ALPHA_VANTAGE_API_KEY not configured."}
 
     params = {
@@ -98,7 +101,7 @@ def get_stock_news(symbol: str, limit: int = 5):
     }
 
     try:
-        response = requests.get(BASE_URL, params=params, timeout=15) # Increased timeout for potentially larger response
+        response = resilient_get(BASE_URL, params=params, timeout=15) # Increased timeout for potentially larger response
         response.raise_for_status()
         data = response.json()
 
@@ -126,33 +129,34 @@ def get_stock_news(symbol: str, limit: int = 5):
             return articles if articles else None # Return None if no articles processed
         elif "Error Message" in data:
             error_message = data['Error Message']
-            print(f"Alpha Vantage API Error for news on '{symbol}': {error_message}")
+            logger.warning(f"Alpha Vantage API Error for news on '{symbol}': {error_message}")
             return {"error": "api_error", "message": error_message}
         elif "Information" in data or "Note" in data: # "Information" can also indicate API limits/issues
             message = data.get("Information", data.get("Note", "API usage limit or issue."))
-            print(f"Alpha Vantage API Info/Note for news on '{symbol}': {message}")
+            logger.warning(f"Alpha Vantage API Info/Note for news on '{symbol}': {message}")
             return {"error": "api_limit", "message": message}
         elif not data or ("feed" in data and not data["feed"]): # Handles empty response or empty feed
-            print(f"No news found or empty response from Alpha Vantage for '{symbol}'.")
+            logger.info(f"No news found or empty response from Alpha Vantage for '{symbol}'.")
             return None # No news is not an error, but no data to return
         else:
-            print(f"Unexpected response structure for news from Alpha Vantage for '{symbol}': {data}")
+            logger.warning(f"Unexpected response structure for news from Alpha Vantage for '{symbol}': {data}")
             return None
 
     except requests.exceptions.Timeout:
-        print(f"Timeout error fetching stock news for '{symbol}' from Alpha Vantage.")
+        logger.error(f"Timeout error fetching stock news for '{symbol}' from Alpha Vantage.")
         return None
     except requests.exceptions.HTTPError as http_err:
-        print(f"HTTP error fetching stock news for '{symbol}' from Alpha Vantage: {http_err} - Response: {response.text}")
+        logger.error(f"HTTP error fetching stock news for '{symbol}' from Alpha Vantage: {http_err} - Response: {response.text}")
         return None
     except requests.exceptions.RequestException as req_err:
-        print(f"Request error fetching stock news for '{symbol}' from Alpha Vantage: {req_err}")
+        logger.error(f"Request error fetching stock news for '{symbol}' from Alpha Vantage: {req_err}")
         return None
     except ValueError:  # Includes JSONDecodeError
-        print(f"Error decoding JSON response for news from Alpha Vantage for '{symbol}'. Response: {response.text if 'response' in locals() else 'N/A'}")
+        logger.error(f"Error decoding JSON response for news from Alpha Vantage for '{symbol}'. Response: {response.text if 'response' in locals() else 'N/A'}")
         return None
 
 
+@ttl_cache(seconds=600)
 def get_daily_time_series(symbol: str, outputsize: str = 'compact'):
     """
     Fetches daily time series data (date, open, high, low, close, volume) for a stock.
@@ -167,7 +171,7 @@ def get_daily_time_series(symbol: str, outputsize: str = 'compact'):
         Returns None on other errors or if no data.
     """
     if not ALPHA_VANTAGE_API_KEY:
-        print("CRITICAL: ALPHA_VANTAGE_API_KEY not configured.")
+        logger.error("ALPHA_VANTAGE_API_KEY not configured.")
         return {"error": "config_error", "message": "ALPHA_VANTAGE_API_KEY not configured."}
 
     params = {
@@ -179,7 +183,7 @@ def get_daily_time_series(symbol: str, outputsize: str = 'compact'):
     }
 
     try:
-        response = requests.get(BASE_URL, params=params, timeout=15)
+        response = resilient_get(BASE_URL, params=params, timeout=15)
         response.raise_for_status()
         data = response.json()
 
@@ -194,41 +198,42 @@ def get_daily_time_series(symbol: str, outputsize: str = 'compact'):
                     close_price = float(daily_data["4. close"])
                     chart_data.append((date_str, close_price))
                 except (KeyError, ValueError) as e:
-                    print(f"Warning: Skipping data point for {symbol} on {date_str} due to missing/invalid close price: {e}")
+                    logger.warning(f"Skipping data point for {symbol} on {date_str} due to missing/invalid close price: {e}")
                     continue # Skip this data point
 
             if not chart_data: # If all points were skipped or original data was empty in structure
-                print(f"No valid daily time series data points found for '{symbol}' after parsing.")
+                logger.warning(f"No valid daily time series data points found for '{symbol}' after parsing.")
                 return None
 
             chart_data.sort(key=lambda x: x[0]) # Sort by date ascending
             return chart_data
         elif "Error Message" in data:
             error_message = data['Error Message']
-            print(f"Alpha Vantage API Error for daily series of '{symbol}': {error_message}")
+            logger.warning(f"Alpha Vantage API Error for daily series of '{symbol}': {error_message}")
             return {"error": "api_error", "message": error_message}
         elif "Note" in data or "Information" in data:
             message = data.get("Note", data.get("Information", "API usage limit or issue."))
-            print(f"Alpha Vantage API Note/Info for daily series of '{symbol}': {message}")
+            logger.warning(f"Alpha Vantage API Note/Info for daily series of '{symbol}': {message}")
             return {"error": "api_limit", "message": message}
         else:
-            print(f"Unexpected response structure for daily series from Alpha Vantage for '{symbol}': {data}")
+            logger.warning(f"Unexpected response structure for daily series from Alpha Vantage for '{symbol}': {data}")
             return None
 
     except requests.exceptions.Timeout:
-        print(f"Timeout error fetching daily time series for '{symbol}' from Alpha Vantage.")
+        logger.error(f"Timeout error fetching daily time series for '{symbol}' from Alpha Vantage.")
         return None
     except requests.exceptions.HTTPError as http_err:
-        print(f"HTTP error fetching daily time series for '{symbol}' from Alpha Vantage: {http_err} - Response: {response.text}")
+        logger.error(f"HTTP error fetching daily time series for '{symbol}' from Alpha Vantage: {http_err} - Response: {response.text}")
         return None
     except requests.exceptions.RequestException as req_err:
-        print(f"Request error fetching daily time series for '{symbol}' from Alpha Vantage: {req_err}")
+        logger.error(f"Request error fetching daily time series for '{symbol}' from Alpha Vantage: {req_err}")
         return None
     except ValueError:  # Includes JSONDecodeError
-        print(f"Error decoding JSON response for daily time series from Alpha Vantage for '{symbol}'. Response: {response.text if 'response' in locals() else 'N/A'}")
+        logger.error(f"Error decoding JSON response for daily time series from Alpha Vantage for '{symbol}'. Response: {response.text if 'response' in locals() else 'N/A'}")
         return None
 
 
+@ttl_cache(seconds=300)
 def get_intraday_time_series(symbol: str, interval: str = '60min', outputsize: str = 'compact'):
     """
     Fetches intraday time series data for a stock.
@@ -246,13 +251,13 @@ def get_intraday_time_series(symbol: str, interval: str = '60min', outputsize: s
         Returns None on other errors or if no data.
     """
     if not ALPHA_VANTAGE_API_KEY:
-        print("CRITICAL: ALPHA_VANTAGE_API_KEY not configured.")
+        logger.error("ALPHA_VANTAGE_API_KEY not configured.")
         return {"error": "config_error", "message": "ALPHA_VANTAGE_API_KEY not configured."}
 
     # Validate interval
     supported_intervals = ['1min', '5min', '15min', '30min', '60min']
     if interval not in supported_intervals:
-        print(f"Unsupported interval '{interval}' for intraday time series. Supported: {supported_intervals}")
+        logger.warning(f"Unsupported interval '{interval}' for intraday time series. Supported: {supported_intervals}")
         # Or raise ValueError("Invalid interval")
         return {"error": "param_error", "message": f"Invalid interval: {interval}. Supported: {supported_intervals}"}
 
@@ -269,7 +274,7 @@ def get_intraday_time_series(symbol: str, interval: str = '60min', outputsize: s
     # Free tier typically provides 1-5 days of intraday data for 'compact' and 'full'.
 
     try:
-        response = requests.get(BASE_URL, params=params, timeout=20) # Potentially larger data
+        response = resilient_get(BASE_URL, params=params, timeout=20) # Potentially larger data
         response.raise_for_status()
         data = response.json()
 
@@ -282,40 +287,41 @@ def get_intraday_time_series(symbol: str, interval: str = '60min', outputsize: s
                     close_price = float(intraday_data["4. close"])
                     chart_data.append((datetime_str, close_price))
                 except (KeyError, ValueError) as e:
-                    print(f"Warning: Skipping data point for {symbol} at {datetime_str} due to missing/invalid close price: {e}")
+                    logger.warning(f"Skipping data point for {symbol} at {datetime_str} due to missing/invalid close price: {e}")
                     continue
 
             if not chart_data:
-                print(f"No valid intraday time series data points found for '{symbol}' (interval: {interval}) after parsing.")
+                logger.warning(f"No valid intraday time series data points found for '{symbol}' (interval: {interval}) after parsing.")
                 return None
 
             chart_data.sort(key=lambda x: x[0]) # Sort by datetime ascending
             return chart_data
         elif "Error Message" in data:
             error_message = data['Error Message']
-            print(f"Alpha Vantage API Error for intraday series of '{symbol}' (interval: {interval}): {error_message}")
+            logger.warning(f"Alpha Vantage API Error for intraday series of '{symbol}' (interval: {interval}): {error_message}")
             return {"error": "api_error", "message": error_message}
         elif "Note" in data or "Information" in data:
             message = data.get("Note", data.get("Information", "API usage limit or issue."))
-            print(f"Alpha Vantage API Note/Info for intraday series of '{symbol}' (interval: {interval}): {message}")
+            logger.warning(f"Alpha Vantage API Note/Info for intraday series of '{symbol}' (interval: {interval}): {message}")
             return {"error": "api_limit", "message": message}
         else:
-            print(f"Unexpected response structure for intraday series from Alpha Vantage for '{symbol}' (interval: {interval}): {data}")
+            logger.warning(f"Unexpected response structure for intraday series from Alpha Vantage for '{symbol}' (interval: {interval}): {data}")
             return None
 
     except requests.exceptions.Timeout:
-        print(f"Timeout error fetching intraday time series for '{symbol}' (interval: {interval}) from Alpha Vantage.")
+        logger.error(f"Timeout error fetching intraday time series for '{symbol}' (interval: {interval}) from Alpha Vantage.")
         return None
     except requests.exceptions.HTTPError as http_err:
-        print(f"HTTP error fetching intraday time series for '{symbol}' (interval: {interval}) from Alpha Vantage: {http_err} - Response: {response.text}")
+        logger.error(f"HTTP error fetching intraday time series for '{symbol}' (interval: {interval}) from Alpha Vantage: {http_err} - Response: {response.text}")
         return None
     except requests.exceptions.RequestException as req_err:
-        print(f"Request error fetching intraday time series for '{symbol}' (interval: {interval}) from Alpha Vantage: {req_err}")
+        logger.error(f"Request error fetching intraday time series for '{symbol}' (interval: {interval}) from Alpha Vantage: {req_err}")
         return None
     except ValueError:  # Includes JSONDecodeError
-        print(f"Error decoding JSON response for intraday time series from Alpha Vantage for '{symbol}' (interval: {interval}). Response: {response.text if 'response' in locals() else 'N/A'}")
+        logger.error(f"Error decoding JSON response for intraday time series from Alpha Vantage for '{symbol}' (interval: {interval}). Response: {response.text if 'response' in locals() else 'N/A'}")
         return None
 
+@ttl_cache(seconds=600)
 def get_currency_exchange_rate(from_currency: str, to_currency: str):
     """
     Fetches the real-time exchange rate for a currency pair.
@@ -329,7 +335,7 @@ def get_currency_exchange_rate(from_currency: str, to_currency: str):
         Returns None on error.
     """
     if not ALPHA_VANTAGE_API_KEY:
-        print("CRITICAL: ALPHA_VANTAGE_API_KEY not configured.")
+        logger.error("ALPHA_VANTAGE_API_KEY not configured.")
         return None
 
     params = {
@@ -340,7 +346,7 @@ def get_currency_exchange_rate(from_currency: str, to_currency: str):
     }
 
     try:
-        response = requests.get(BASE_URL, params=params, timeout=10)
+        response = resilient_get(BASE_URL, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
 
@@ -349,16 +355,17 @@ def get_currency_exchange_rate(from_currency: str, to_currency: str):
             if rate_str:
                 return float(rate_str)
         elif "Error Message" in data:
-            print(f"Alpha Vantage API Error for exchange rate {from_currency}/{to_currency}: {data['Error Message']}")
+            logger.warning(f"Alpha Vantage API Error for exchange rate {from_currency}/{to_currency}: {data['Error Message']}")
         elif "Note" in data:
-            print(f"Alpha Vantage API Note for exchange rate {from_currency}/{to_currency}: {data['Note']}")
-        
+            logger.warning(f"Alpha Vantage API Note for exchange rate {from_currency}/{to_currency}: {data['Note']}")
+
         return None
 
     except Exception as e:
-        print(f"Error fetching exchange rate for {from_currency}/{to_currency}: {e}")
+        logger.error(f"Error fetching exchange rate for {from_currency}/{to_currency}: {e}")
         return None
 
+@ttl_cache(seconds=600)
 def search_symbol(keywords: str):
     """
     Searches for stock symbols matching the keywords.
@@ -371,7 +378,7 @@ def search_symbol(keywords: str):
         Returns None on error or no results.
     """
     if not ALPHA_VANTAGE_API_KEY:
-        print("CRITICAL: ALPHA_VANTAGE_API_KEY not configured.")
+        logger.error("ALPHA_VANTAGE_API_KEY not configured.")
         return []
 
     params = {
@@ -381,7 +388,7 @@ def search_symbol(keywords: str):
     }
 
     try:
-        response = requests.get(BASE_URL, params=params, timeout=10)
+        response = resilient_get(BASE_URL, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
 
@@ -389,13 +396,13 @@ def search_symbol(keywords: str):
             return data["bestMatches"]
         elif "Note" in data or "Information" in data:
             # Limit reached
-            print(f"Alpha Vantage API Note/Info for symbol search '{keywords}': {data.get('Note', data.get('Information'))}")
+            logger.warning(f"Alpha Vantage API Note/Info for symbol search '{keywords}': {data.get('Note', data.get('Information'))}")
             return []
         else:
             return []
 
     except Exception as e:
-        print(f"Error searching for symbol '{keywords}': {e}")
+        logger.error(f"Error searching for symbol '{keywords}': {e}")
         return []
 
 
@@ -477,7 +484,7 @@ if __name__ == '__main__':
             print(f"API error for news on {no_news_symbol}: {news_data_none.get('message')} (This might be expected for truly invalid symbols)")
         else:
             print(f"Unexpected response for '{no_news_symbol}' (expected None or API error dict): {news_data_none}")
-            
+
         # --- search_symbol Tests ---
         print("\n\n--- Testing search_symbol ---")
         search_kw = "Microsoft"

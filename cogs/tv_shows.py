@@ -1057,11 +1057,11 @@ class TVShows(commands.Cog):
     @tasks.loop(minutes=30)
     async def check_new_episodes(self):
         """Background task to check for new episodes of subscribed shows."""
-        print(f"[{datetime.now()}] Running check_new_episodes task...")
+        logger.info("Running check_new_episodes task...")
         all_subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_all_tv_subscriptions)
-        
+
         if not all_subscriptions:
-            print("No active TV subscriptions to check.")
+            logger.info("No active TV subscriptions to check.")
             return
 
         now_utc = datetime.now(timezone.utc)
@@ -1073,19 +1073,19 @@ class TVShows(commands.Cog):
                 user_id = int(user_id_str)
                 user = await self.bot.fetch_user(user_id)
                 if not user:
-                    print(f"Could not fetch user {user_id}. Skipping their subscriptions.")
+                    logger.warning(f"Could not fetch user {user_id}. Skipping their subscriptions.")
                     continue
             except ValueError:
-                print(f"Invalid user_id format '{user_id_str}' in subscriptions. Skipping.")
+                logger.warning(f"Invalid user_id format '{user_id_str}' in subscriptions. Skipping.")
                 continue
             except discord.NotFound:
-                print(f"User {user_id} not found. Removing their subscriptions or marking as inactive might be needed.")
+                logger.warning(f"User {user_id} not found. Removing their subscriptions or marking as inactive might be needed.")
                 continue
             except discord.HTTPException as e:
-                print(f"HTTP error fetching user {user_id}: {e}. Skipping their subscriptions for this cycle.")
+                logger.warning(f"HTTP error fetching user {user_id}: {e}. Skipping their subscriptions for this cycle.")
                 continue
             except Exception as e:
-                print(f"Unexpected error fetching user {user_id}: {e}. Skipping.")
+                logger.error(f"Unexpected error fetching user {user_id}: {e}. Skipping.")
                 continue
 
             for sub in user_subs:
@@ -1384,11 +1384,11 @@ class TVShows(commands.Cog):
                         logger.info(f"Logged {len(episodes_to_notify)} sent notifications for User {user_id}, Show {show_id}.")
 
                     except discord.Forbidden:
-                        print(f"Could not send DM to user {user_id} (DM disabled or bot blocked).")
+                        logger.warning(f"Could not send DM to user {user_id} (DM disabled or bot blocked).")
                     except discord.HTTPException as e:
-                        print(f"HTTP error sending episode DM to user {user_id}: {e}")
+                        logger.error(f"HTTP error sending episode DM to user {user_id}: {e}")
                     except Exception as e:
-                        print(f"Error sending episode notification to user {user_id}: {e}")
+                        logger.error(f"Error sending episode notification to user {user_id}: {e}")
 
                 if episodes_to_notify:
                     # Update last notified episode detail (mostly for display in pagination)
@@ -1411,7 +1411,7 @@ class TVShows(commands.Cog):
     @check_new_episodes.before_loop
     async def before_check_new_episodes(self):
         await self.bot.wait_until_ready()
-        print("TVShows check_new_episodes task is waiting for bot to be ready...")
+        logger.info("TVShows check_new_episodes task is ready; loop starting.")
 
 async def setup(bot):
     await bot.add_cog(TVShows(bot, db_manager=bot.db_manager))

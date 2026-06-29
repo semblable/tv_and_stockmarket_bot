@@ -2,7 +2,7 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone, time as dtime
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional
 
 import discord
 from discord.ext import commands, tasks
@@ -15,56 +15,19 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+# Shared timezone/parse helpers (single source of truth in utils.timezone_utils).
+# Imported under the original underscore names so existing call sites are unchanged.
+from utils.timezone_utils import (
+    utc_now as _utc_now,
+    sqlite_utc_timestamp as _sqlite_utc_timestamp,
+    parse_sqlite_utc_timestamp as _parse_sqlite_utc_timestamp,
+    tzinfo_from_name as _tzinfo_from_name,
+    parse_hhmm as _parse_hhmm,
+)
+
 MIN_REMINDER_SPACING = timedelta(minutes=30)
 MAX_REPEAT_SENDS = 5
 MAX_BATCH_PER_SEND = 5
-
-
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _sqlite_utc_timestamp(dt: datetime) -> str:
-    dt = dt.astimezone(timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _tzinfo_from_name(tz_name: Optional[str]):
-    name = (tz_name or "").strip()
-    if not name:
-        # Default to CET/CEST
-        if ZoneInfo is not None:
-            try:
-                return ZoneInfo("Europe/Warsaw")
-            except Exception:
-                return timezone(timedelta(hours=1), name="CET")
-        return timezone(timedelta(hours=1), name="CET")
-    if name.upper() in ("UTC", "ETC/UTC", "Z"):
-        return timezone.utc
-    if name.upper() in ("CET", "CEST"):
-        if ZoneInfo is not None:
-            try:
-                return ZoneInfo("Europe/Warsaw")
-            except Exception:
-                return timezone(timedelta(hours=1), name="CET")
-        return timezone(timedelta(hours=1), name="CET")
-    if ZoneInfo is not None:
-        try:
-            return ZoneInfo(name)
-        except Exception:
-            return timezone.utc
-    # Without zoneinfo data, best-effort fallback is UTC.
-    return timezone.utc
-
-
-def _parse_sqlite_utc_timestamp(ts: Optional[str]) -> Optional[datetime]:
-    if not isinstance(ts, str) or not ts.strip():
-        return None
-    try:
-        dt = datetime.strptime(ts.strip(), "%Y-%m-%d %H:%M:%S")
-        return dt.replace(tzinfo=timezone.utc)
-    except Exception:
-        return None
 
 
 def _format_local(dt_utc: datetime, tz_name: Optional[str]) -> tuple[str, str]:
@@ -73,17 +36,6 @@ def _format_local(dt_utc: datetime, tz_name: Optional[str]) -> tuple[str, str]:
     if label in ("Europe/Warsaw", "CET", "CEST"):
         label = "CET/CEST"
     return (dt_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M"), label)
-
-
-def _parse_hhmm(s: str) -> Optional[Tuple[int, int]]:
-    m = re.fullmatch(r"(\d{1,2}):(\d{2})", (s or "").strip())
-    if not m:
-        return None
-    hh = int(m.group(1))
-    mm = int(m.group(2))
-    if not (0 <= hh <= 23 and 0 <= mm <= 59):
-        return None
-    return hh, mm
 
 
 def _parse_duration_seconds(spec: str) -> Optional[int]:

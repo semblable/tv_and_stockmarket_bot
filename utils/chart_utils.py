@@ -1,10 +1,13 @@
 # utils/chart_utils.py
 
 import json
+import logging
 import urllib.parse
 import requests
 import io
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 QUICKCHART_BASE_URL = "https://quickchart.io/chart"
 QUICKCHART_SHORT_URL = "https://quickchart.io/chart/create"
@@ -126,7 +129,7 @@ def get_stock_chart_image(symbol: str, timespan_label: str, data_points: list, c
     """
     chart_config = _create_chart_config(symbol, timespan_label, data_points)
     if not chart_config:
-        print(f"Error generating chart config for {symbol}: No data points.")
+        logger.warning(f"Error generating chart config for {symbol}: No data points.")
         return None
 
     try:
@@ -144,11 +147,11 @@ def get_stock_chart_image(symbol: str, timespan_label: str, data_points: list, c
         else:
             # Try to avoid printing binary data if it is one
             error_snippet = response.text[:200] if len(response.text) < 1000 else "Response too long/binary"
-            print(f"QuickChart error: {response.status_code}. Partial Response: {error_snippet}")
+            logger.error(f"QuickChart error: {response.status_code}. Partial Response: {error_snippet}")
             return None
 
     except Exception as e:
-        print(f"Error fetching chart image: {e}")
+        logger.error(f"Error fetching chart image: {e}")
         return None
 
 def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list, chart_width: int = 800, chart_height: int = 500):
@@ -177,7 +180,7 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
                 if data.get('success') and data.get('url'):
                     return data.get('url')
         except Exception as e:
-            print(f"QuickChart short URL failed: {e}")
+            logger.warning(f"QuickChart short URL failed: {e}")
 
         # Fallback: Construct Direct URL (simplified)
         # Remove fill and complex options for fallback
@@ -194,11 +197,11 @@ def generate_stock_chart_url(symbol: str, timespan_label: str, data_points: list
         if len(url) < 2048:
             return url
         else:
-            print(f"Chart URL too long ({len(url)} chars).")
+            logger.warning(f"Chart URL too long ({len(url)} chars).")
             return None
 
     except Exception as e:
-        print(f"Error in generate_stock_chart_url: {e}")
+        logger.error(f"Error in generate_stock_chart_url: {e}")
         return None
 
 

@@ -5,6 +5,7 @@ import asyncio # Added for rate limiting
 import functools # Added for partial
 import logging # For background task logging
 import typing # For type hinting
+from datetime import datetime, timezone # For earnings/dividend date math
 from discord.ext import commands, tasks
 from api_clients import alpha_vantage_client
 from api_clients.alpha_vantage_client import get_daily_time_series, get_intraday_time_series # Added
@@ -15,11 +16,14 @@ from utils.chart_utils import get_stock_chart_image # Added
 
 # Configure logging for this cog
 logger = logging.getLogger(__name__)
-# Example: Set a basic configuration if no root logger is configured
-if not logging.getLogger().hasHandlers():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 STOCK_CHECK_INTERVAL_MINUTES = 60 # Check one stock approximately every hour
+
+# Earnings/dividend alert configuration
+PREF_EARNINGS_ALERTS = "earnings_alerts"        # bool: opt-in toggle
+PREF_EARNINGS_LEAD_DAYS = "earnings_lead_days"  # int: days ahead to alert
+DEFAULT_EARNINGS_LEAD_DAYS = 3
+EARNINGS_CHECK_INTERVAL_HOURS = 24
 
 SUPPORTED_TIMESPAN = {
     "1D": {"func": get_intraday_time_series, "params": {'interval': '15min', 'outputsize': 'compact'}, "label": "1 Day", "is_intraday": True},
@@ -39,13 +43,14 @@ class Stocks(commands.Cog):
         self.unique_stocks_queue = []
         self.current_queue_index = 0
         self.check_stock_alerts.start() # Start the background task
+        self.check_corporate_events.start() # Earnings/dividend alert task
 
     def cog_unload(self):
         self.check_stock_alerts.cancel() # Ensure the task is cancelled on cog unload
+        self.check_corporate_events.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self):
-        print("Stocks Cog is ready.")
         logger.info("Stocks Cog is ready and stock alert monitoring task is running.")
 
     async def _fetch_stock_news_any_provider(self, symbol: str, limit: int = 5) -> typing.Optional[typing.List[dict]]:
@@ -253,12 +258,12 @@ class Stocks(commands.Cog):
                 if error_type == "api_limit":
                     await ctx.followup.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
                 elif error_type == "config_error":
-                    print(f"Stock price configuration error for {upper_symbol}: {error_message}") # Log server-side
+                    logger.error(f"Stock price configuration error for {upper_symbol}: {error_message}") # Log server-side
                     await ctx.followup.send(f"Could not retrieve price for {upper_symbol} due to a server configuration issue. Please notify the bot administrator.")
                 elif error_type == "api_error":
                     await ctx.followup.send(f"Could not retrieve price for {upper_symbol}: {error_message}")
                 else: # Unknown error type in dictionary
-                    print(f"Stock price: Unknown error type '{error_type}' for {upper_symbol}: {error_message}")
+                    logger.error(f"Stock price: Unknown error type '{error_type}' for {upper_symbol}: {error_message}")
                     await ctx.followup.send(f"Error fetching data for {upper_symbol}. An unexpected error occurred with the data provider.")
             elif "01. symbol" in price_data and "05. price" in price_data: # Success from either AV or YF
                 logger.info(f"[STOCK_PRICE_DEBUG] Successfully processed data for {upper_symbol} from {data_source}.")
@@ -347,7 +352,6 @@ class Stocks(commands.Cog):
                 await ctx.send(embed=embed)
             else: # price_data is a dictionary, but not a known error type and not a success structure
                 logger.error(f"[STOCK_PRICE_DEBUG] Unexpected data structure for {upper_symbol} from {data_source}: {price_data}")
-                print(f"Stock price: Unexpected data structure for {symbol.upper()}: {price_data}")
                 await ctx.send(f"Error fetching data for {symbol.upper()}. Unexpected data format received from the provider.")
         else: # price_data is None (e.g., network issue, client-side timeout before API response) - This implies BOTH AV and YF returned None
             logger.error(f"[STOCK_PRICE_DEBUG] Both Alpha Vantage and Yahoo Finance returned None for {upper_symbol}.")
@@ -1488,6 +1492,208 @@ class Stocks(commands.Cog):
             logger.error(f"Failed to sync commands: {e}")
             await ctx.send(f"❌ Failed to sync commands: {e}")
 
+    # ----------------------------------------------------------------------
+    # Earnings & dividends
+    # ----------------------------------------------------------------------
+    @commands.hybrid_command(name="earnings", description="Show the next earnings date for a stock symbol.")
+    @discord.app_commands.describe(symbol="The stock symbol (e.g., AAPL, MSFT)")
+    async def earnings(self, ctx: commands.Context, *, symbol: str):
+        """Display the upcoming earnings date (and EPS estimate when available)."""
+        await ctx.defer()
+        upper_symbol = symbol.upper().strip()
+        info = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_earnings_info, upper_symbol)
+        if not info or not info.get("next_earnings_date"):
+            await ctx.send(f"❌ Could not find an upcoming earnings date for **{upper_symbol}**.")
+            return
+
+        title = info.get("longName") or upper_symbol
+        embed = discord.Embed(title=f"📅 Earnings — {title}", color=discord.Color.blue())
+        embed.add_field(name="Symbol", value=info["symbol"], inline=True)
+        embed.add_field(name="Next Earnings Date", value=info["next_earnings_date"], inline=True)
+        eps = info.get("eps_estimate")
+        if eps is not None:
+            embed.add_field(name="EPS Estimate", value=f"{eps:.2f}", inline=True)
+        embed.set_footer(text="Data provided by Yahoo Finance")
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="dividends", description="Show dividend information for a stock symbol.")
+    @discord.app_commands.describe(symbol="The stock symbol (e.g., KO, JNJ)")
+    async def dividends(self, ctx: commands.Context, *, symbol: str):
+        """Display dividend yield, last payout, and the next ex-dividend date."""
+        await ctx.defer()
+        upper_symbol = symbol.upper().strip()
+        info = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_dividend_info, upper_symbol)
+        if not info:
+            await ctx.send(f"❌ Could not retrieve dividend information for **{upper_symbol}**.")
+            return
+
+        title = info.get("longName") or upper_symbol
+        if not info.get("pays_dividend"):
+            embed = discord.Embed(
+                title=f"💸 Dividends — {title}",
+                description=f"**{info['symbol']}** does not currently pay a dividend.",
+                color=discord.Color.greyple(),
+            )
+            await ctx.send(embed=embed)
+            return
+
+        currency = info.get("currency", "") or ""
+        embed = discord.Embed(title=f"💸 Dividends — {title}", color=discord.Color.green())
+        embed.add_field(name="Symbol", value=info["symbol"], inline=True)
+        if info.get("dividend_yield_pct") is not None:
+            embed.add_field(name="Yield", value=f"{info['dividend_yield_pct']:.2f}%", inline=True)
+        if info.get("dividend_rate") is not None:
+            embed.add_field(name="Annual Rate", value=f"{info['dividend_rate']:.2f} {currency}".strip(), inline=True)
+        if info.get("ex_dividend_date"):
+            embed.add_field(name="Ex-Dividend Date", value=info["ex_dividend_date"], inline=True)
+        if info.get("last_dividend_value") is not None:
+            embed.add_field(name="Last Payout", value=f"{info['last_dividend_value']:.2f} {currency}".strip(), inline=True)
+        if info.get("payout_ratio_pct") is not None:
+            embed.add_field(name="Payout Ratio", value=f"{info['payout_ratio_pct']:.1f}%", inline=True)
+        embed.set_footer(text="Data provided by Yahoo Finance")
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="earnings_calendar", description="Upcoming earnings dates for your tracked stocks.")
+    async def earnings_calendar(self, ctx: commands.Context):
+        """List upcoming earnings dates across the caller's tracked stocks."""
+        await ctx.defer()
+        user_id = ctx.author.id
+        tracked = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
+        if not tracked:
+            await ctx.send("You aren't tracking any stocks yet. Use `/track_stock` first.")
+            return
+
+        rows = []
+        for stock in tracked:
+            symbol = stock.get("symbol")
+            if not symbol:
+                continue
+            info = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_earnings_info, symbol)
+            if info and info.get("next_earnings_date"):
+                rows.append((info["next_earnings_date"], symbol))
+            await asyncio.sleep(0.2)  # be gentle on the data provider
+
+        if not rows:
+            await ctx.send("No upcoming earnings dates found for your tracked stocks.")
+            return
+
+        rows.sort(key=lambda r: r[0])
+        lines = [f"**{sym}** — {dt}" for dt, sym in rows]
+        embed = discord.Embed(
+            title="📅 Upcoming Earnings — Your Tracked Stocks",
+            description="\n".join(lines),
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text="Data provided by Yahoo Finance")
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="earnings_alerts", description="Enable/disable DM alerts before your tracked stocks' earnings.")
+    @discord.app_commands.describe(state="on or off", lead_days="Days before earnings to alert (1-30, default 3)")
+    async def earnings_alerts(self, ctx: commands.Context, state: str, lead_days: typing.Optional[int] = None):
+        """Toggle opt-in earnings DM alerts and optionally set the lead time."""
+        await ctx.defer()
+        user_id = ctx.author.id
+        state_l = (state or "").strip().lower()
+
+        if state_l in ("on", "enable", "enabled", "true", "yes"):
+            await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, PREF_EARNINGS_ALERTS, True)
+            if lead_days is not None:
+                clamped = max(1, min(30, int(lead_days)))
+                await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, PREF_EARNINGS_LEAD_DAYS, clamped)
+            current_lead = await self.bot.loop.run_in_executor(
+                None, self.db_manager.get_user_preference, user_id, PREF_EARNINGS_LEAD_DAYS, DEFAULT_EARNINGS_LEAD_DAYS
+            )
+            await ctx.send(
+                f"✅ Earnings alerts **enabled**. I'll DM you up to **{current_lead}** day(s) "
+                f"before earnings for your tracked stocks."
+            )
+        elif state_l in ("off", "disable", "disabled", "false", "no"):
+            await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, PREF_EARNINGS_ALERTS, False)
+            await ctx.send("🔕 Earnings alerts **disabled**.")
+        else:
+            await ctx.send("Please specify `on` or `off`. Example: `/earnings_alerts on lead_days:5`")
+
+    @tasks.loop(hours=EARNINGS_CHECK_INTERVAL_HOURS)
+    async def check_corporate_events(self):
+        """Daily: DM opted-in users when a tracked stock's earnings are near."""
+        if not self.db_manager:
+            logger.error("StocksCog: DataManager not available; skipping earnings check.")
+            return
+
+        try:
+            opted_in = await self.bot.loop.run_in_executor(
+                None, self.db_manager.list_users_with_preference, PREF_EARNINGS_ALERTS
+            )
+        except Exception as e:
+            logger.error(f"Earnings checker: failed to list opted-in users: {e}")
+            return
+
+        today = datetime.now(timezone.utc).date()
+        for row in opted_in or []:
+            if not row.get("value"):
+                continue
+            try:
+                user_id = int(row["user_id"])
+            except (ValueError, TypeError, KeyError):
+                continue
+
+            lead_days = await self.bot.loop.run_in_executor(
+                None, self.db_manager.get_user_preference, user_id, PREF_EARNINGS_LEAD_DAYS, DEFAULT_EARNINGS_LEAD_DAYS
+            )
+            try:
+                lead_days = int(lead_days)
+            except (ValueError, TypeError):
+                lead_days = DEFAULT_EARNINGS_LEAD_DAYS
+
+            tracked = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
+            for stock in tracked or []:
+                symbol = stock.get("symbol")
+                if not symbol:
+                    continue
+                info = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_earnings_info, symbol)
+                await asyncio.sleep(0.2)
+                if not info or not info.get("next_earnings_date"):
+                    continue
+                try:
+                    event_date = datetime.strptime(info["next_earnings_date"], "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+
+                days_until = (event_date - today).days
+                if not (0 <= days_until <= lead_days):
+                    continue
+
+                already_sent = await self.bot.loop.run_in_executor(
+                    None, self.db_manager.has_sent_corporate_event, user_id, symbol, "earnings", info["next_earnings_date"]
+                )
+                if already_sent:
+                    continue
+
+                try:
+                    user_obj = await self.bot.fetch_user(user_id)
+                    if not user_obj:
+                        continue
+                    when = "today" if days_until == 0 else f"in {days_until} day(s)"
+                    message = f"📅 **Earnings reminder:** **{symbol}** reports earnings {when} (**{info['next_earnings_date']}**)."
+                    if info.get("eps_estimate") is not None:
+                        message += f" EPS estimate: {info['eps_estimate']:.2f}."
+                    await user_obj.send(message)
+                    await self.bot.loop.run_in_executor(
+                        None, self.db_manager.mark_corporate_event_sent, user_id, symbol, "earnings", info["next_earnings_date"]
+                    )
+                    logger.info(f"Sent earnings alert to {user_id} for {symbol} ({info['next_earnings_date']}).")
+                except discord.Forbidden:
+                    logger.warning(f"Could not DM earnings alert to user {user_id} (DMs disabled).")
+                except Exception as e:
+                    logger.error(f"Error sending earnings alert to {user_id} for {symbol}: {e}")
+
+        logger.info("Corporate events (earnings) check complete.")
+
+    @check_corporate_events.before_loop
+    async def before_check_corporate_events(self):
+        await self.bot.wait_until_ready()
+        logger.info("Earnings alert monitoring task is ready; loop starting.")
+
 async def setup(bot):
     await bot.add_cog(Stocks(bot))
-    print("Stocks Cog has been loaded and stock alert task initialized.")
+    logger.info("Stocks Cog has been loaded and stock alert task initialized.")

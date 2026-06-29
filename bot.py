@@ -356,7 +356,7 @@ def run_flask():
     # Use '0.0.0.0' to be accessible externally.
     # Render typically sets the PORT environment variable.
     port = int(os.environ.get("PORT", 5000)) # Default to 5000 if PORT not set
-    print(f"Starting Flask server on port {port}...")
+    log.info(f"Starting Flask server on port {port}...")
     flask_app.run(host='0.0.0.0', port=port)
 
 # --- Bot Events ---
