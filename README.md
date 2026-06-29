@@ -14,6 +14,7 @@ A comprehensive Discord bot that combines entertainment tracking (TV shows, movi
 - **Tracking**: track positions (qty + purchase price) and show performance
 - **Alerts**: price targets above/below and other monitoring
 - **Charts**: price history charts and portfolio charts
+- **Earnings & dividends**: `/earnings` and `/dividends` for a symbol, `/earnings_calendar` for your tracked stocks, and opt-in DM reminders before earnings via `/earnings_alerts on [lead_days]`
 
 ### Weather
 - **Slash command**: `/weather` for current conditions + forecast

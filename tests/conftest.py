@@ -19,6 +19,16 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from data_manager import DataManager
+from utils import api_utils
+
+
+@pytest.fixture(autouse=True)
+def _clear_api_caches():
+    """Reset all ttl_cache instances before each test for isolation."""
+    api_utils.clear_all_caches()
+    yield
+    api_utils.clear_all_caches()
+
 
 @pytest.fixture
 def db_manager():

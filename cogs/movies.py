@@ -657,9 +657,9 @@ class MoviesCog(commands.Cog, name="Movies"):
 
     @check_movie_releases.before_loop
     async def before_check_movie_releases(self):
-        print("Task: check_movie_releases waiting for bot to be ready...")
+        logger.info("Task: check_movie_releases waiting for bot to be ready...")
         await self.bot.wait_until_ready()
-        print("Task: check_movie_releases bot is ready. Loop starting.")
+        logger.info("Task: check_movie_releases bot is ready. Loop starting.")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(MoviesCog(bot, db_manager=bot.db_manager))

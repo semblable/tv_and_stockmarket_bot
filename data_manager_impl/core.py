@@ -296,6 +296,19 @@ class DataManagerCore:
         """
         create_table_if_not_exists("sent_episode_notifications", create_sent_episode_notifications_sql)
 
+        # Sent Corporate Events (earnings / ex-dividend alert de-duplication)
+        create_sent_corporate_events_sql = """
+        CREATE TABLE IF NOT EXISTS sent_corporate_events (
+            user_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_date TEXT NOT NULL,
+            notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, symbol, event_type, event_date)
+        )
+        """
+        create_table_if_not_exists("sent_corporate_events", create_sent_corporate_events_sql)
+
         # Weather Schedules
         create_weather_schedules_sql = """
         CREATE TABLE IF NOT EXISTS weather_schedules (

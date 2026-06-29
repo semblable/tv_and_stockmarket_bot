@@ -226,4 +226,33 @@ class StocksMixin:
             
         return active_alerts_to_monitor
 
+    # --- Corporate Event Notifications (earnings / ex-dividend de-dup) ---
+    def has_sent_corporate_event(self, user_id: int, symbol: str, event_type: str, event_date: str) -> bool:
+        query = """
+        SELECT 1 FROM sent_corporate_events
+        WHERE user_id = :user_id AND symbol = :symbol
+          AND event_type = :event_type AND event_date = :event_date
+        """
+        params = {
+            "user_id": str(user_id),
+            "symbol": symbol.upper(),
+            "event_type": event_type,
+            "event_date": event_date,
+        }
+        return self._execute_query(query, params, fetch_one=True) is not None
+
+    def mark_corporate_event_sent(self, user_id: int, symbol: str, event_type: str, event_date: str) -> bool:
+        query = """
+        INSERT INTO sent_corporate_events (user_id, symbol, event_type, event_date)
+        VALUES (:user_id, :symbol, :event_type, :event_date)
+        ON CONFLICT(user_id, symbol, event_type, event_date) DO NOTHING
+        """
+        params = {
+            "user_id": str(user_id),
+            "symbol": symbol.upper(),
+            "event_type": event_type,
+            "event_date": event_date,
+        }
+        return self._execute_query(query, params, commit=True)
+
     # --- User Preferences ---

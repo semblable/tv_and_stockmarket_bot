@@ -2,9 +2,9 @@
 
 import yfinance as yf
 import logging
-from datetime import datetime
+from datetime import datetime, date, timezone
 from typing import Optional, List, Tuple, Dict, Any
-import requests  # Added for direct Yahoo API calls
+from utils.api_utils import resilient_get, ttl_cache
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,7 @@ def normalize_symbol(symbol: str) -> str:
     # Return as-is for US stocks and others
     return symbol
 
+@ttl_cache(seconds=60)
 def get_stock_price(symbol: str) -> Optional[Dict[str, Any]]:
     """
     Get current stock price using yfinance library.
@@ -158,6 +159,188 @@ def get_stock_news(symbol: str, limit: int = 5) -> Optional[List[Dict[str, Any]]
         logger.error(f"Error fetching news for {symbol}: {e}")
         return None
 
+
+def _safe_float(value: Any) -> Optional[float]:
+    """Best-effort float conversion; returns None for missing/invalid values."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _coerce_date(value: Any) -> Optional[date]:
+    """
+    Normalize the many shapes yfinance returns dates in (datetime, date,
+    pandas Timestamp, unix timestamp, ISO string) into a ``datetime.date``.
+    """
+    if value is None:
+        return None
+    # pandas Timestamp and datetime are both datetime subclasses.
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc).date()
+        except (ValueError, OSError, OverflowError):
+            return None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(s[:len("YYYY-MM-DDTHH:MM:SS")], fmt).date()
+            except ValueError:
+                continue
+        return None
+    # Fallback: objects exposing a callable .date() (defensive).
+    date_attr = getattr(value, "date", None)
+    if callable(date_attr):
+        try:
+            d = date_attr()
+            return d if isinstance(d, date) else None
+        except Exception:
+            return None
+    return None
+
+
+def _format_date(value: Any) -> Optional[str]:
+    d = _coerce_date(value)
+    return d.strftime("%Y-%m-%d") if d else None
+
+
+@ttl_cache(seconds=3600)
+def get_earnings_info(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Return the next earnings date (and EPS estimate when available) for a symbol.
+
+    Returns a dict with ``next_earnings_date`` (``YYYY-MM-DD``) on success, or
+    None if no upcoming earnings date can be determined.
+    """
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+        ticker = yf.Ticker(normalized_symbol)
+
+        next_date: Any = None
+        eps_estimate: Any = None
+
+        # Preferred source: the calendar (a dict in current yfinance).
+        try:
+            cal = ticker.calendar
+        except Exception as e:
+            logger.warning(f"Could not fetch calendar for {normalized_symbol}: {e}")
+            cal = None
+
+        if isinstance(cal, dict):
+            ed = cal.get("Earnings Date")
+            if isinstance(ed, (list, tuple)) and ed:
+                next_date = ed[0]
+            elif ed:
+                next_date = ed
+            eps_estimate = cal.get("Earnings Average")
+
+        # Fallback: scan get_earnings_dates() for the nearest future date.
+        if _coerce_date(next_date) is None:
+            try:
+                df = ticker.get_earnings_dates(limit=16)
+            except Exception:
+                df = None
+            if df is not None and getattr(df, "empty", True) is False:
+                today = datetime.now(timezone.utc).date()
+                best_date = None
+                best_idx = None
+                best_row = None
+                for idx, row in df.iterrows():
+                    d = _coerce_date(idx)
+                    if d and d >= today and (best_date is None or d < best_date):
+                        best_date, best_idx, best_row = d, idx, row
+                if best_idx is not None:
+                    next_date = best_idx
+                    if best_row is not None:
+                        try:
+                            eps_estimate = best_row.get("EPS Estimate")
+                        except Exception:
+                            eps_estimate = None
+
+        date_str = _format_date(next_date)
+        if not date_str:
+            logger.info(f"No upcoming earnings date found for {normalized_symbol}.")
+            return None
+
+        info: Dict[str, Any] = {}
+        try:
+            info = ticker.info or {}
+        except Exception:
+            info = {}
+        if not isinstance(info, dict):
+            info = {}
+
+        return {
+            "symbol": normalized_symbol,
+            "next_earnings_date": date_str,
+            "eps_estimate": _safe_float(eps_estimate),
+            "currency": info.get("currency", "USD"),
+            "longName": info.get("longName", ""),
+        }
+    except Exception as e:
+        logger.error(f"Error fetching earnings info for {symbol}: {e}")
+        return None
+
+
+@ttl_cache(seconds=3600)
+def get_dividend_info(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Return dividend details (yield, last payout, ex-dividend date) for a symbol.
+
+    Returns None only when no ticker info is available. A valid non-dividend
+    stock returns a dict with ``pays_dividend`` set to False.
+    """
+    try:
+        normalized_symbol = normalize_symbol(symbol)
+        ticker = yf.Ticker(normalized_symbol)
+
+        try:
+            info = ticker.info or {}
+        except Exception as e:
+            logger.warning(f"Could not fetch info for {normalized_symbol}: {e}")
+            info = {}
+        if not isinstance(info, dict) or not info:
+            return None
+
+        dividend_rate = _safe_float(info.get("dividendRate"))
+        dividend_yield = _safe_float(info.get("dividendYield"))
+        payout_ratio = _safe_float(info.get("payoutRatio"))
+
+        # yfinance reports dividendYield as a fraction (0.025) in most versions
+        # but occasionally as a percent; normalize values < 1 to a percentage.
+        # payoutRatio is always a fraction (and can legitimately exceed 1.0 for
+        # companies paying out more than they earn), so always scale it by 100.
+        def _yield_as_percent(v: Optional[float]) -> Optional[float]:
+            if v is None:
+                return None
+            return v * 100 if v < 1 else v
+
+        return {
+            "symbol": normalized_symbol,
+            "currency": info.get("currency", "USD"),
+            "longName": info.get("longName", ""),
+            "pays_dividend": bool(dividend_rate or dividend_yield),
+            "dividend_rate": dividend_rate,
+            "dividend_yield_pct": _yield_as_percent(dividend_yield),
+            "ex_dividend_date": _format_date(info.get("exDividendDate")),
+            "last_dividend_value": _safe_float(info.get("lastDividendValue")),
+            "payout_ratio_pct": (payout_ratio * 100) if payout_ratio is not None else None,
+        }
+    except Exception as e:
+        logger.error(f"Error fetching dividend info for {symbol}: {e}")
+        return None
+
+
+@ttl_cache(seconds=600)
 def get_daily_time_series(symbol: str, outputsize: str = "compact", period: str = None) -> Optional[List[Tuple[str, float]]]:
     """
     Get daily time series data for charts.
@@ -205,6 +388,7 @@ def get_daily_time_series(symbol: str, outputsize: str = "compact", period: str 
         logger.error(f"Error fetching Yahoo Finance time series for {symbol}: {e}")
         return None
 
+@ttl_cache(seconds=300)
 def get_intraday_time_series(symbol: str, interval: str = "60min", outputsize: str = "compact") -> Optional[List[Tuple[str, float]]]:
     """
     Get intraday time series data.
@@ -267,6 +451,7 @@ def get_intraday_time_series(symbol: str, interval: str = "60min", outputsize: s
         logger.error(f"Error fetching Yahoo Finance intraday data for {symbol}: {e}")
         return None
 
+@ttl_cache(seconds=600)
 def search_symbol(query: str) -> List[Dict[str, str]]:
     """
     Search for stock symbols using Yahoo Finance Auto-Complete API.
@@ -286,7 +471,7 @@ def search_symbol(query: str) -> List[Dict[str, str]]:
     }
 
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=5)
+        resp = resilient_get(url, params=params, headers=headers, timeout=5)
         resp.raise_for_status()
         data = resp.json()
         
