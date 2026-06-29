@@ -155,8 +155,23 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
     """
     Global error handler for slash commands.
     """
-    # Log the full error traceback
     command_name = interaction.command.name if interaction.command else "unknown_command"
+
+    # A failed check (e.g. a per-user feature opt-out) is expected, not a crash:
+    # surface its message and don't log a traceback.
+    if isinstance(error, app_commands.CheckFailure):
+        check_message = str(error) or "You don't have access to that command."
+        effective_ephemeral = interaction.guild is not None
+        try:
+            if interaction.is_response_done():
+                await interaction.followup.send(check_message, ephemeral=effective_ephemeral)
+            else:
+                await interaction.response.send_message(check_message, ephemeral=effective_ephemeral)
+        except discord.HTTPException as e:
+            log.warning(f"Failed to send check-failure message for '/{command_name}': {e}")
+        return
+
+    # Log the full error traceback
     log.error(f"Unhandled error in slash command '/{command_name}': {error}", exc_info=False) # exc_info=False because print_exc will show it
     traceback.print_exc()
 
@@ -181,6 +196,32 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
             log.error(f"Failed to send initial error message for '/{command_name}': {e}")
         except Exception as e:
             log.error(f"An unexpected error occurred while trying to send initial response for '/{command_name}': {e}", exc_info=True)
+
+
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    """
+    Global error handler for prefix and hybrid commands. Hybrid command errors
+    (including failed cog checks) are dispatched here for both prefix and slash
+    invocations, so feature opt-outs surface their message here.
+    """
+    # Unwrap invoke errors to inspect the underlying cause.
+    original = getattr(error, "original", error)
+
+    if isinstance(error, commands.CheckFailure):
+        try:
+            await ctx.send(str(error) or "You don't have access to that command.", ephemeral=True)
+        except discord.HTTPException as e:
+            log.warning(f"Failed to send check-failure message for '{ctx.command}': {e}")
+        return
+
+    # Unknown prefix commands are common and noisy; ignore them.
+    if isinstance(error, commands.CommandNotFound):
+        return
+
+    command_name = ctx.command.qualified_name if ctx.command else "unknown_command"
+    log.error(f"Unhandled error in command '{command_name}': {original}", exc_info=True)
+
 
 # --- Flask Web Server for Render Uptime ---
 flask_app = Flask(__name__)
