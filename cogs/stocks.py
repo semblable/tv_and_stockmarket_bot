@@ -25,6 +25,13 @@ PREF_EARNINGS_LEAD_DAYS = "earnings_lead_days"  # int: days ahead to alert
 DEFAULT_EARNINGS_LEAD_DAYS = 3
 EARNINGS_CHECK_INTERVAL_HOURS = 24
 
+# Per-user opt-out for the whole stock feature. Stocks are enabled by default;
+# a user can turn the commands off with /stocks_disable.
+PREF_STOCKS_ENABLED = "stocks_enabled"
+# Commands that must keep working even when a user has stocks disabled, so they
+# can re-enable, and so admin command-syncing is never blocked.
+_STOCKS_GATE_EXEMPT = {"stocks_enable", "stocks_disable", "sync_commands"}
+
 SUPPORTED_TIMESPAN = {
     "1D": {"func": get_intraday_time_series, "params": {'interval': '15min', 'outputsize': 'compact'}, "label": "1 Day", "is_intraday": True},
     "5D": {"func": get_intraday_time_series, "params": {'interval': '60min', 'outputsize': 'compact'}, "label": "5 Days", "is_intraday": True},
@@ -49,9 +56,50 @@ class Stocks(commands.Cog):
         self.check_stock_alerts.cancel() # Ensure the task is cancelled on cog unload
         self.check_corporate_events.cancel()
 
+    async def cog_check(self, ctx: commands.Context) -> bool:
+        """
+        Per-user gate for every command in this cog. Users who ran
+        /stocks_disable are blocked (with a friendly CheckFailure) from all
+        stock commands except the ones in _STOCKS_GATE_EXEMPT.
+        """
+        command_name = ctx.command.name if ctx.command else ""
+        if command_name in _STOCKS_GATE_EXEMPT:
+            return True
+        if not self.db_manager:
+            return True  # Fail open if persistence is unavailable.
+        enabled = await self.bot.loop.run_in_executor(
+            None, self.db_manager.get_user_preference, ctx.author.id, PREF_STOCKS_ENABLED, True
+        )
+        if enabled:
+            return True
+        raise commands.CheckFailure(
+            "🔕 Stock commands are disabled for you. Use `/stocks_enable` to turn them back on."
+        )
+
     @commands.Cog.listener()
     async def on_ready(self):
         logger.info("Stocks Cog is ready and stock alert monitoring task is running.")
+
+    @commands.hybrid_command(name="stocks_enable", description="Enable stock market commands for yourself.")
+    async def stocks_enable(self, ctx: commands.Context):
+        """Re-enable the stock commands for the calling user."""
+        await ctx.defer()
+        await self.bot.loop.run_in_executor(
+            None, self.db_manager.set_user_preference, ctx.author.id, PREF_STOCKS_ENABLED, True
+        )
+        await ctx.send("✅ Stock market commands are now **enabled** for you.")
+
+    @commands.hybrid_command(name="stocks_disable", description="Disable stock market commands for yourself.")
+    async def stocks_disable(self, ctx: commands.Context):
+        """Disable the stock commands for the calling user (does not affect other users)."""
+        await ctx.defer()
+        await self.bot.loop.run_in_executor(
+            None, self.db_manager.set_user_preference, ctx.author.id, PREF_STOCKS_ENABLED, False
+        )
+        await ctx.send(
+            "🔕 Stock market commands are now **disabled** for you. "
+            "Use `/stocks_enable` to turn them back on."
+        )
 
     async def _fetch_stock_news_any_provider(self, symbol: str, limit: int = 5) -> typing.Optional[typing.List[dict]]:
         """
