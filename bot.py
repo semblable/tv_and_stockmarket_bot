@@ -163,7 +163,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
         check_message = str(error) or "You don't have access to that command."
         effective_ephemeral = interaction.guild is not None
         try:
-            if interaction.is_response_done():
+            if interaction.response.is_done():
                 await interaction.followup.send(check_message, ephemeral=effective_ephemeral)
             else:
                 await interaction.response.send_message(check_message, ephemeral=effective_ephemeral)
@@ -180,7 +180,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
     # Ephemeral messages are not supported in DMs in some clients/APIs.
     effective_ephemeral = interaction.guild is not None
 
-    if interaction.is_response_done():
+    if interaction.response.is_done():
         try:
             # If the interaction has been responded to or deferred, try sending a followup message.
             await interaction.followup.send(error_message, ephemeral=effective_ephemeral)

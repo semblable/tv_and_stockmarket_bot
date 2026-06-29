@@ -84,6 +84,9 @@ class Stocks(commands.Cog):
     async def stocks_enable(self, ctx: commands.Context):
         """Re-enable the stock commands for the calling user."""
         await ctx.defer()
+        if not self.db_manager:
+            await ctx.send("⚠️ Preferences are unavailable right now; please try again later.")
+            return
         await self.bot.loop.run_in_executor(
             None, self.db_manager.set_user_preference, ctx.author.id, PREF_STOCKS_ENABLED, True
         )
@@ -93,6 +96,9 @@ class Stocks(commands.Cog):
     async def stocks_disable(self, ctx: commands.Context):
         """Disable the stock commands for the calling user (does not affect other users)."""
         await ctx.defer()
+        if not self.db_manager:
+            await ctx.send("⚠️ Preferences are unavailable right now; please try again later.")
+            return
         await self.bot.loop.run_in_executor(
             None, self.db_manager.set_user_preference, ctx.author.id, PREF_STOCKS_ENABLED, False
         )
@@ -1685,55 +1691,61 @@ class Stocks(commands.Cog):
             except (ValueError, TypeError, KeyError):
                 continue
 
-            lead_days = await self.bot.loop.run_in_executor(
-                None, self.db_manager.get_user_preference, user_id, PREF_EARNINGS_LEAD_DAYS, DEFAULT_EARNINGS_LEAD_DAYS
-            )
+            # Isolate each user: a DB or provider hiccup for one user must not
+            # abort the whole loop (which would stop the daily task entirely).
             try:
-                lead_days = int(lead_days)
-            except (ValueError, TypeError):
-                lead_days = DEFAULT_EARNINGS_LEAD_DAYS
-
-            tracked = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
-            for stock in tracked or []:
-                symbol = stock.get("symbol")
-                if not symbol:
-                    continue
-                info = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_earnings_info, symbol)
-                await asyncio.sleep(0.2)
-                if not info or not info.get("next_earnings_date"):
-                    continue
-                try:
-                    event_date = datetime.strptime(info["next_earnings_date"], "%Y-%m-%d").date()
-                except ValueError:
-                    continue
-
-                days_until = (event_date - today).days
-                if not (0 <= days_until <= lead_days):
-                    continue
-
-                already_sent = await self.bot.loop.run_in_executor(
-                    None, self.db_manager.has_sent_corporate_event, user_id, symbol, "earnings", info["next_earnings_date"]
+                lead_days = await self.bot.loop.run_in_executor(
+                    None, self.db_manager.get_user_preference, user_id, PREF_EARNINGS_LEAD_DAYS, DEFAULT_EARNINGS_LEAD_DAYS
                 )
-                if already_sent:
-                    continue
-
                 try:
-                    user_obj = await self.bot.fetch_user(user_id)
-                    if not user_obj:
+                    lead_days = int(lead_days)
+                except (ValueError, TypeError):
+                    lead_days = DEFAULT_EARNINGS_LEAD_DAYS
+
+                tracked = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tracked_stocks, user_id)
+                for stock in tracked or []:
+                    symbol = stock.get("symbol")
+                    if not symbol:
                         continue
-                    when = "today" if days_until == 0 else f"in {days_until} day(s)"
-                    message = f"📅 **Earnings reminder:** **{symbol}** reports earnings {when} (**{info['next_earnings_date']}**)."
-                    if info.get("eps_estimate") is not None:
-                        message += f" EPS estimate: {info['eps_estimate']:.2f}."
-                    await user_obj.send(message)
-                    await self.bot.loop.run_in_executor(
-                        None, self.db_manager.mark_corporate_event_sent, user_id, symbol, "earnings", info["next_earnings_date"]
+                    info = await self.bot.loop.run_in_executor(None, yahoo_finance_client.get_earnings_info, symbol)
+                    await asyncio.sleep(0.2)
+                    if not info or not info.get("next_earnings_date"):
+                        continue
+                    try:
+                        event_date = datetime.strptime(info["next_earnings_date"], "%Y-%m-%d").date()
+                    except ValueError:
+                        continue
+
+                    days_until = (event_date - today).days
+                    if not (0 <= days_until <= lead_days):
+                        continue
+
+                    already_sent = await self.bot.loop.run_in_executor(
+                        None, self.db_manager.has_sent_corporate_event, user_id, symbol, "earnings", info["next_earnings_date"]
                     )
-                    logger.info(f"Sent earnings alert to {user_id} for {symbol} ({info['next_earnings_date']}).")
-                except discord.Forbidden:
-                    logger.warning(f"Could not DM earnings alert to user {user_id} (DMs disabled).")
-                except Exception as e:
-                    logger.error(f"Error sending earnings alert to {user_id} for {symbol}: {e}")
+                    if already_sent:
+                        continue
+
+                    try:
+                        user_obj = await self.bot.fetch_user(user_id)
+                        if not user_obj:
+                            continue
+                        when = "today" if days_until == 0 else f"in {days_until} day(s)"
+                        message = f"📅 **Earnings reminder:** **{symbol}** reports earnings {when} (**{info['next_earnings_date']}**)."
+                        if info.get("eps_estimate") is not None:
+                            message += f" EPS estimate: {info['eps_estimate']:.2f}."
+                        await user_obj.send(message)
+                        await self.bot.loop.run_in_executor(
+                            None, self.db_manager.mark_corporate_event_sent, user_id, symbol, "earnings", info["next_earnings_date"]
+                        )
+                        logger.info(f"Sent earnings alert to {user_id} for {symbol} ({info['next_earnings_date']}).")
+                    except discord.Forbidden:
+                        logger.warning(f"Could not DM earnings alert to user {user_id} (DMs disabled).")
+                    except Exception as e:
+                        logger.error(f"Error sending earnings alert to {user_id} for {symbol}: {e}")
+            except Exception as e:
+                logger.error(f"Earnings checker: error processing user {user_id}: {e}")
+                continue
 
         logger.info("Corporate events (earnings) check complete.")
 
@@ -1741,6 +1753,14 @@ class Stocks(commands.Cog):
     async def before_check_corporate_events(self):
         await self.bot.wait_until_ready()
         logger.info("Earnings alert monitoring task is ready; loop starting.")
+
+    @check_corporate_events.error
+    async def check_corporate_events_error(self, error: Exception):
+        # tasks.loop stops permanently if an exception escapes the body; log it
+        # and restart so the daily earnings check survives transient failures.
+        logger.error(f"Corporate events task crashed: {error}", exc_info=True)
+        if not self.check_corporate_events.is_running():
+            self.check_corporate_events.restart()
 
 async def setup(bot):
     await bot.add_cog(Stocks(bot))
