@@ -91,8 +91,30 @@ def create_settings_embed(ctx, user_preferences, weather_schedules):
         inline=False,
     )
 
-    embed.set_footer(text=f"Use '{ctx.prefix}settings <command> <value>' to change a setting.")
-    return embed
+POPULAR_TIMEZONES = [
+    "Europe/Warsaw",
+    "UTC",
+    "Europe/London",
+    "Europe/Berlin",
+    "Europe/Paris",
+    "America/New_York",
+    "America/Chicago",
+    "America/Denver",
+    "America/Los_Angeles",
+    "America/Toronto",
+    "Asia/Tokyo",
+    "Asia/Singapore",
+    "Asia/Dubai",
+    "Australia/Sydney",
+]
+
+async def timezone_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    current_lower = (current or "").lower()
+    return [
+        app_commands.Choice(name=tz, value=tz)
+        for tz in POPULAR_TIMEZONES
+        if current_lower in tz.lower()
+    ][:25]
 
 class SettingsCog(commands.Cog, name="Settings"):
     def __init__(self, bot, db_manager):
@@ -283,9 +305,9 @@ class SettingsCog(commands.Cog, name="Settings"):
             return
         
         # Optionally, show all settings again
-        # await self.view_settings(ctx)
-
     @settings_group.command(name="timezone", aliases=["tz"])
+    @app_commands.describe(tz_name="Your IANA timezone name (e.g. Europe/Warsaw, UTC, America/New_York)")
+    @app_commands.autocomplete(tz_name=timezone_autocomplete)
     async def set_timezone(self, ctx: commands.Context, tz_name: str):
         """
         Set your timezone (used by /remind_at).

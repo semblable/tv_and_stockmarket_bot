@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from utils import chart_utils, paginator
 from utils.article_utils import extract_readable_text_from_html
 
@@ -116,5 +116,54 @@ def test_article_html_extraction_basic():
     assert "first paragraph" in text
     assert "Second paragraph" in text
     assert "menu" not in text
+
+
+@pytest.mark.asyncio
+async def test_selection_view_with_results():
+    results = [{"id": 10, "name": "Show A"}, {"id": 20, "name": "Show B"}]
+    user_id = 456
+    view = paginator.SelectionView(user_id, results)
+    
+    assert view.user_id == 456
+    assert len(view.children) == 2
+    assert view.value is None
+    assert view.selected_result is None
+
+    # Simulate interaction check
+    mock_interaction_correct = MagicMock()
+    mock_interaction_correct.user.id = 456
+    assert await view.interaction_check(mock_interaction_correct) is True
+
+    mock_interaction_wrong = MagicMock()
+    mock_interaction_wrong.user.id = 999
+    mock_interaction_wrong.response.send_message = AsyncMock()
+    assert await view.interaction_check(mock_interaction_wrong) is False
+
+    # Simulate button click
+    callback = view.children[0].callback
+    mock_click = MagicMock()
+    mock_click.user.id = 456
+    mock_click.response.defer = AsyncMock()
+    await callback(mock_click)
+
+    assert view.value == 0
+    assert view.selected_result == {"id": 10, "name": "Show A"}
+
+
+@pytest.mark.asyncio
+async def test_selection_view_with_ctx():
+    mock_ctx = MagicMock()
+    mock_ctx.author.id = 789
+    results = ["Opt 1", "Opt 2", "Opt 3"]
+    view = paginator.SelectionView(mock_ctx, results)
+
+    assert view.user_id == 789
+    assert len(view.children) == 3
+
+    # Test timeout disables buttons
+    await view.on_timeout()
+    for child in view.children:
+        assert child.disabled is True
+
 
 

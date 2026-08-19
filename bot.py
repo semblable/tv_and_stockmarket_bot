@@ -116,12 +116,20 @@ if config.DISCORD_BOT_TOKEN is None:
     exit() # Exit if the token is not found
 log.info("DISCORD_BOT_TOKEN found in config.")
 
-# Define intents
+# Define intents and safe allowed_mentions
 intents = discord.Intents.default()
 intents.message_content = True # Enable message content intent for potential future use
 
+# Discord 2026 best practice: prevent mass mentions by default
+default_allowed_mentions = discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=True)
+
 # Create a Bot instance
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=MyCustomHelpCommand()) # Using "!" as prefix for traditional commands and custom help
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    help_command=MyCustomHelpCommand(),
+    allowed_mentions=default_allowed_mentions,
+)
 
 ## --- Cog Loading ---
 INITIAL_EXTENSIONS = [
@@ -408,6 +416,14 @@ async def on_ready():
     """
     log.info(f"Bot is ready and logged in as {bot.user}")
     log.info(f"Bot is in {len(bot.guilds)} guild(s)")
+    
+    # Set bot presence / activity
+    try:
+        activity = discord.CustomActivity(name="🎬 TV, Stocks & Productivity | /help")
+        await bot.change_presence(activity=activity, status=discord.Status.online)
+        log.info("Custom presence set successfully.")
+    except Exception as e:
+        log.warning(f"Could not set custom presence: {e}")
     
     # Log bot's current permissions to check for applications.commands scope
     try:
