@@ -7,7 +7,7 @@ from api_clients.tmdb_client import TMDBError, TMDBConnectionError, TMDBAPIError
 from datetime import datetime, date, time
 import logging
 import typing
-from utils.paginator import BasePaginatorView, SelectionView
+from utils.paginator import BasePaginatorView, SelectionView, NUMBER_EMOJIS
 
 logger = logging.getLogger(__name__)
 

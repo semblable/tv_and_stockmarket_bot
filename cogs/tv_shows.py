@@ -9,7 +9,7 @@ import asyncio
 import logging
 import json
 import typing
-from utils.paginator import BasePaginatorView, SelectionView
+from utils.paginator import BasePaginatorView, SelectionView, NUMBER_EMOJIS
 
 logger = logging.getLogger(__name__)
 

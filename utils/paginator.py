@@ -107,6 +107,9 @@ class BasePaginatorView(discord.ui.View):
             if isinstance(item, discord.ui.Button):
                 item.disabled = True
 
+NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+
+
 class SelectionView(discord.ui.View):
     def __init__(self, ctx_or_user_id, results_or_count, timeout: int = 60):
         super().__init__(timeout=timeout)
@@ -128,12 +131,11 @@ class SelectionView(discord.ui.View):
         self.selected_result = None
         self.message = None
 
-        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
         for i in range(min(num_options, 5)):
             button = discord.ui.Button(
                 style=discord.ButtonStyle.secondary,
                 label=str(i + 1),
-                emoji=emojis[i],
+                emoji=NUMBER_EMOJIS[i],
                 custom_id=f"select_{i}",
             )
             button.callback = self.create_callback(i)

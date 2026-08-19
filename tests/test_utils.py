@@ -166,4 +166,15 @@ async def test_selection_view_with_ctx():
         assert child.disabled is True
 
 
+def test_number_emojis_constant():
+    assert len(paginator.NUMBER_EMOJIS) == 5
+    assert paginator.NUMBER_EMOJIS[0] == "1️⃣"
+    assert paginator.NUMBER_EMOJIS[4] == "5️⃣"
 
+
+def test_number_emojis_imported_in_cogs():
+    from cogs.movies import NUMBER_EMOJIS as movies_emojis
+    from cogs.tv_shows import NUMBER_EMOJIS as tv_emojis
+
+    assert movies_emojis == paginator.NUMBER_EMOJIS
+    assert tv_emojis == paginator.NUMBER_EMOJIS
