@@ -1,6 +1,6 @@
 import logging
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 import os
 
 # Initialize logger. 
@@ -12,9 +12,59 @@ logger = logging.getLogger(__name__)
 _ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
 
 
+def _resolve_tmdb_secret(tmdb_key: str = "", tmdb_key_file: str = "") -> str:
+    """
+    Resolves the TMDB API key from secret sources in order of precedence:
+    1. Explicit file path pointed to by TMDB_API_KEY_FILE.
+    2. Conventional secret file locations (secrets/tmdb_api_key.txt, tmdb_api_key.txt, .env.tmdb, /run/secrets/tmdb_api_key).
+    3. Explicit TMDB_API_KEY from environment or .env file.
+    """
+    # 1. Custom file path specified in TMDB_API_KEY_FILE
+    if tmdb_key_file and os.path.isfile(tmdb_key_file):
+        try:
+            with open(tmdb_key_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content.startswith("TMDB_API_KEY="):
+                    content = content.split("=", 1)[1].strip().strip('"\'')
+                if content:
+                    return content
+        except Exception as e:
+            logger.warning(f"Failed to read TMDB secret from {tmdb_key_file}: {e}")
+
+    # 2. Conventional secret file locations
+    base_dir = os.path.dirname(__file__)
+    candidate_paths = [
+        os.path.join(base_dir, "secrets", "tmdb_api_key.txt"),
+        os.path.join(base_dir, "secrets", "TMDB_API_KEY"),
+        os.path.join(base_dir, "secrets", "tmdb_secret.txt"),
+        os.path.join(base_dir, "tmdb_api_key.txt"),
+        os.path.join(base_dir, ".env.tmdb"),
+        "/run/secrets/tmdb_api_key",
+        "/run/secrets/TMDB_API_KEY",
+    ]
+    for path in candidate_paths:
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if content.startswith("TMDB_API_KEY="):
+                        content = content.split("=", 1)[1].strip().strip('"\'')
+                    if content:
+                        return content
+            except Exception as e:
+                logger.warning(f"Failed to read TMDB secret from {path}: {e}")
+
+    # 3. Fallback to TMDB_API_KEY from environment / .env
+    if tmdb_key:
+        return tmdb_key
+
+    return ""
+
+
 class Settings(BaseSettings):
     DISCORD_BOT_TOKEN: str
-    TMDB_API_KEY: str
+    TMDB_API_KEY: str = ""
+    TMDB_API_KEY_FILE: str = ""
     ALPHA_VANTAGE_API_KEY: str
     OPENWEATHERMAP_API_KEY: str
     SQLITE_DB_PATH: str = "data/app.db"
@@ -41,6 +91,14 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
+    @model_validator(mode="after")
+    def resolve_secrets(self) -> "Settings":
+        resolved_tmdb = _resolve_tmdb_secret(self.TMDB_API_KEY, self.TMDB_API_KEY_FILE)
+        if not resolved_tmdb:
+            raise ValueError("TMDB_API_KEY is required. Provide it in .env, TMDB_API_KEY_FILE, or secrets/tmdb_api_key.txt.")
+        self.TMDB_API_KEY = resolved_tmdb
+        return self
+
 try:
     # Attempt to load settings
     settings = Settings()
@@ -48,6 +106,7 @@ try:
     # Export variables for backward compatibility
     DISCORD_BOT_TOKEN = settings.DISCORD_BOT_TOKEN
     TMDB_API_KEY = settings.TMDB_API_KEY
+    TMDB_API_KEY_FILE = settings.TMDB_API_KEY_FILE
     ALPHA_VANTAGE_API_KEY = settings.ALPHA_VANTAGE_API_KEY
     OPENWEATHERMAP_API_KEY = settings.OPENWEATHERMAP_API_KEY
     SQLITE_DB_PATH = settings.SQLITE_DB_PATH

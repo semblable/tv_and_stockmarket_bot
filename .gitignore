@@ -1,8 +1,13 @@
-# Environment variables
+# Environment variables & secrets
 .env
 *.env.*
 !/.env.example
 temp.env
+secrets/
+*.secret
+*.secret.*
+tmdb_api_key.txt
+.env.tmdb
 
 # Python cache
 __pycache__/

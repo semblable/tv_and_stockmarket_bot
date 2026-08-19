@@ -54,6 +54,13 @@ ALPHA_VANTAGE_API_KEY=your_av_key
 OPENWEATHERMAP_API_KEY=your_owm_key
 ```
 
+#### Standalone TMDB Secret (Optional)
+If you prefer not to keep or change the TMDB secret inside `.env`, you can provide it separately using any of:
+- A secret file at `secrets/tmdb_api_key.txt` or `tmdb_api_key.txt` (or `.env.tmdb`) containing just your TMDB key.
+- The `TMDB_API_KEY_FILE` environment variable pointing to your secret file path (e.g. `/run/secrets/tmdb_api_key` in Docker).
+
+When present, standalone secret files automatically take precedence.
+
 ---
 
 ## 🚀 Local Development

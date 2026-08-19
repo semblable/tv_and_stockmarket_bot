@@ -116,6 +116,7 @@ jobs:
       - name: Create .env file from secret
         env:
           ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
           FIREBASE_DATABASE_SECRET: ${{ secrets.FIREBASE_DATABASE_SECRET }}
           TIMER_OWNER_ID: ${{ secrets.TIMER_OWNER_ID }}
@@ -128,6 +129,7 @@ jobs:
           # (ENV_FILE often already contained FIREBASE_* from older edits — duplicate keys in
           # Docker --env-file are last-wins and are easy to misread in grep/debug).
           awk '
+            /^TMDB_API_KEY=/ { next }
             /^FIREBASE_DATABASE_URL=/ { next }
             /^FIREBASE_DATABASE_SECRET=/ { next }
             /^TIMER_OWNER_ID=/ { next }
@@ -136,6 +138,7 @@ jobs:
             { print }
           ' .env > .env.tmp && mv .env.tmp .env
           # Append from GitHub secrets (only non-empty — empty secret = do not inject that key)
+          [ -n "$TMDB_API_KEY" ] && echo "TMDB_API_KEY=$TMDB_API_KEY" >> .env
           [ -n "$FIREBASE_DATABASE_URL" ] && echo "FIREBASE_DATABASE_URL=$FIREBASE_DATABASE_URL" >> .env
           [ -n "$FIREBASE_DATABASE_SECRET" ] && echo "FIREBASE_DATABASE_SECRET=$FIREBASE_DATABASE_SECRET" >> .env
           [ -n "$TIMER_OWNER_ID" ] && echo "TIMER_OWNER_ID=$TIMER_OWNER_ID" >> .env
