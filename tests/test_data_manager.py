@@ -958,3 +958,30 @@ def test_repeating_reminder_bump(db_manager):
     # Due again at/after
     due3 = db_manager.list_due_reminders("2025-01-01 00:01:00", 50)
     assert any(int(r.get("id") or 0) == rid for r in due3)
+
+
+def test_sqlite_pragmas(db_manager):
+    res = db_manager._execute_query("PRAGMA foreign_keys;", fetch_one=True)
+    assert res is not None
+    assert res.get("foreign_keys") == 1
+
+
+def test_backup_db(db_manager, tmp_path):
+    # Insert test data
+    db_manager.add_tracked_stock(999, "NVDA", quantity=5, purchase_price=120.0)
+    backup_file = str(tmp_path / "backup_test.db")
+    ok = db_manager.backup_db(backup_file)
+    assert ok is True
+
+    # Verify backup contains the test data
+    import sqlite3
+    conn = sqlite3.connect(backup_file)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT symbol, quantity FROM tracked_stocks WHERE user_id = '999';")
+    row = cursor.fetchone()
+    assert row is not None
+    assert row["symbol"] == "NVDA"
+    assert row["quantity"] == 5.0
+    conn.close()
+

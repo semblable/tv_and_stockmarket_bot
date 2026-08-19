@@ -65,26 +65,24 @@ When present, standalone secret files automatically take precedence.
 
 ## 🚀 Local Development
 
-### Option 1: Using Docker (Recommended)
+### Option 1: Using Docker Compose (Recommended)
 From the `tv_and_stockmarket_bot/` directory:
 
-1. **Build the image:**
-   ```bash
-   docker build -f bot.Dockerfile -t discord-bot:latest .
-   ```
+```bash
+docker compose up -d --build
+```
 
-2. **Run with persistence (PowerShell):**
-   ```powershell
-   .\docker-run-persistent.ps1
-   ```
-   
-   *Or manually:*
-   ```bash
-   docker run -d --name bot-container \
-     -v $(pwd)/data:/app/data \
-     --env-file .env \
-     discord-bot:latest
-   ```
+*Or manually with docker run / PowerShell:*
+```powershell
+.\docker-run-persistent.ps1
+```
+```bash
+docker build -f bot.Dockerfile -t discord-bot:latest .
+docker run -d --name bot-container \
+  -v $(pwd)/data:/app/data \
+  --env-file .env \
+  discord-bot:latest
+```
 
 ### Option 2: Direct Python
 From the `tv_and_stockmarket_bot/` directory:

@@ -11,8 +11,6 @@ from utils.paginator import BasePaginatorView, SelectionView
 
 logger = logging.getLogger(__name__)
 
-NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-
 def format_runtime(minutes):
     if minutes is None:
         return "N/A"
@@ -21,39 +19,6 @@ def format_runtime(minutes):
     if hours > 0:
         return f"{hours}h {mins}m"
     return f"{mins}m"
-
-class SelectionView(discord.ui.View):
-    def __init__(self, ctx, results, timeout=60):
-        super().__init__(timeout=timeout)
-        self.ctx = ctx
-        self.results = results
-        self.selected_result = None
-        
-        for i, _ in enumerate(results):
-            if i >= 5: break
-            self.add_item(SelectionButton(i, NUMBER_EMOJIS[i]))
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("This isn't for you!", ephemeral=True)
-            return False
-        return True
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        pass
-
-class SelectionButton(discord.ui.Button):
-    def __init__(self, index, emoji):
-        super().__init__(style=discord.ButtonStyle.secondary, label=str(index+1), emoji=emoji, custom_id=f"select_{index}")
-        self.index = index
-
-    async def callback(self, interaction: discord.Interaction):
-        view: SelectionView = self.view
-        view.selected_result = view.results[self.index]
-        await interaction.response.defer() 
-        view.stop()
 
 class MyMoviesPaginatorView(BasePaginatorView):
     def __init__(self, *, timeout=300, user_id: int, items: list, items_per_page: int = 10):

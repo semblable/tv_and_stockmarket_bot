@@ -28,6 +28,15 @@ class DataManagerCore:
             self.conn.row_factory = sqlite3.Row
             self._lock = threading.RLock()
 
+            # Enable WAL mode, busy timeout, and foreign keys for concurrency & durability
+            try:
+                self.conn.execute("PRAGMA journal_mode=WAL;")
+                self.conn.execute("PRAGMA busy_timeout=5000;")
+                self.conn.execute("PRAGMA synchronous=NORMAL;")
+                self.conn.execute("PRAGMA foreign_keys=ON;")
+            except sqlite3.Error as pe:
+                logger.warning(f"Could not configure SQLite pragmas: {pe}")
+
             logger.info(f"Successfully connected to SQLite database at {db_path}.")
             self._initialize_db()
         except sqlite3.Error as e:
@@ -710,5 +719,27 @@ class DataManagerCore:
                 logger.info("SQLite database connection closed.")
             except sqlite3.Error as e:
                 logger.error(f"Error closing SQLite database connection: {e}")
+
+    def backup_db(self, backup_path: Optional[str] = None) -> bool:
+        """
+        Creates an online, non-blocking hot backup of the SQLite database.
+        If backup_path is not specified, saves to <db_path>.bak.
+        """
+        if not backup_path:
+            backup_path = f"{self.db_path}.bak"
+        try:
+            backup_dir = os.path.dirname(backup_path)
+            if backup_dir:
+                os.makedirs(backup_dir, exist_ok=True)
+            with self._lock:
+                target_conn = sqlite3.connect(backup_path)
+                with target_conn:
+                    self.conn.backup(target_conn)
+                target_conn.close()
+            logger.info(f"Database successfully backed up to {backup_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to create database backup at {backup_path}: {e}")
+            return False
 
     # --- Book Author Subscriptions ---

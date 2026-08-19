@@ -7,8 +7,8 @@ from config import OPENWEATHERMAP_API_KEY # We'll add this to config.py next
 
 logger = logging.getLogger(__name__)
 
-BASE_URL_CURRENT = "http://api.openweathermap.org/data/2.5/weather"
-BASE_URL_FORECAST = "http://api.openweathermap.org/data/2.5/forecast" # 5 day / 3 hour forecast
+BASE_URL_CURRENT = "https://api.openweathermap.org/data/2.5/weather"
+BASE_URL_FORECAST = "https://api.openweathermap.org/data/2.5/forecast" # 5 day / 3 hour forecast
 
 # A simple mapping, more can be added.
 # See: https://openweathermap.org/weather-conditions

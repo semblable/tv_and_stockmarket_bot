@@ -108,31 +108,61 @@ class BasePaginatorView(discord.ui.View):
                 item.disabled = True
 
 class SelectionView(discord.ui.View):
-    def __init__(self, user_id: int, num_options: int, timeout: int = 60):
+    def __init__(self, ctx_or_user_id, results_or_count, timeout: int = 60):
         super().__init__(timeout=timeout)
-        self.user_id = user_id
+        if hasattr(ctx_or_user_id, "author"):
+            self.user_id = ctx_or_user_id.author.id
+            self.ctx = ctx_or_user_id
+        else:
+            self.user_id = int(ctx_or_user_id)
+            self.ctx = None
+
+        if isinstance(results_or_count, (list, tuple)):
+            self.results = list(results_or_count)
+            num_options = len(results_or_count)
+        else:
+            self.results = None
+            num_options = int(results_or_count)
+
         self.value = None
-        
+        self.selected_result = None
+        self.message = None
+
         emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-        
         for i in range(min(num_options, 5)):
             button = discord.ui.Button(
-                style=discord.ButtonStyle.blurple, 
+                style=discord.ButtonStyle.secondary,
+                label=str(i + 1),
                 emoji=emojis[i],
-                custom_id=f"select_{i}"
+                custom_id=f"select_{i}",
             )
             button.callback = self.create_callback(i)
             self.add_item(button)
-            
-    def create_callback(self, idx):
+
+    def create_callback(self, idx: int):
         async def callback(interaction: discord.Interaction):
             if interaction.user.id != self.user_id:
                 await interaction.response.send_message("This isn't for you!", ephemeral=True)
                 return
             self.value = idx
+            if self.results and idx < len(self.results):
+                self.selected_result = self.results[idx]
             await interaction.response.defer()
             self.stop()
         return callback
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't for you!", ephemeral=True)
+            return False
+        return True
+
     async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
         self.stop()

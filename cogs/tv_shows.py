@@ -9,48 +9,11 @@ import asyncio
 import logging
 import json
 import typing
-from utils.paginator import BasePaginatorView # Import BasePaginatorView
+from utils.paginator import BasePaginatorView, SelectionView
 
 logger = logging.getLogger(__name__)
 
-NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-
 ITEMS_PER_PAGE_DEFAULT = 5
-
-class SelectionView(discord.ui.View):
-    def __init__(self, ctx, results, timeout=60):
-        super().__init__(timeout=timeout)
-        self.ctx = ctx
-        self.results = results
-        self.selected_result = None
-        
-        for i, _ in enumerate(results):
-            if i >= 5: break
-            self.add_item(SelectionButton(i, NUMBER_EMOJIS[i]))
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("This isn't for you!", ephemeral=True)
-            return False
-        return True
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-        # We can't easily edit the message if we don't have the message object saved or if it's ephemeral
-        # But since the view stops listening, it's fine.
-        pass
-
-class SelectionButton(discord.ui.Button):
-    def __init__(self, index, emoji):
-        super().__init__(style=discord.ButtonStyle.secondary, label=str(index+1), emoji=emoji, custom_id=f"select_{index}")
-        self.index = index
-
-    async def callback(self, interaction: discord.Interaction):
-        view: SelectionView = self.view
-        view.selected_result = view.results[self.index]
-        await interaction.response.defer() 
-        view.stop()
 
 class MyTVShowsPaginatorView(BasePaginatorView):
     def __init__(self, *, timeout=300, user_id: int, all_subs: list, bot_instance, items_per_page: int = ITEMS_PER_PAGE_DEFAULT):
@@ -80,16 +43,34 @@ class MyTVShowsPaginatorView(BasePaginatorView):
         footer_parts.append("Data from TMDB.")
         embed.set_footer(text=" ".join(footer_parts))
 
+        # Fetch show details concurrently via asyncio.gather
+        show_ids = [sub['show_tmdb_id'] for sub in page_subs]
+        fetch_tasks = [
+            self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, sid)
+            for sid in show_ids
+        ]
+        show_details_list = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
         shows_with_errors = 0
-        for sub in page_subs:
+        for sub, details_or_exc in zip(page_subs, show_details_list):
             show_id = sub['show_tmdb_id']
             show_name = sub['show_name']
             
             next_episode_str = "🗓️ Next: Loading..."
             last_notified_str = "🔔 Notified: Never"
 
-            try:
-                show_details_tmdb = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id)
+            if isinstance(details_or_exc, TMDBConnectionError):
+                next_episode_str = "🗓️ Next: ⚠️ Connection Error"
+                shows_with_errors += 1
+            elif isinstance(details_or_exc, TMDBAPIError):
+                next_episode_str = "🗓️ Next: ⚠️ API Error"
+                shows_with_errors += 1
+            elif isinstance(details_or_exc, Exception):
+                logger.error(f"PaginatorView: TMDB API error for show {show_id} ('{show_name}'): {details_or_exc}")
+                next_episode_str = "🗓️ Next: ⚠️ Error loading data"
+                shows_with_errors += 1
+            else:
+                show_details_tmdb = details_or_exc
                 if show_details_tmdb and show_details_tmdb.get('next_episode_to_air'):
                     next_ep = show_details_tmdb['next_episode_to_air']
                     ep_name = next_ep.get('name', 'TBA')
@@ -100,20 +81,11 @@ class MyTVShowsPaginatorView(BasePaginatorView):
                         try:
                             date_obj = datetime.strptime(ep_air_date_str, '%Y-%m-%d').date()
                             ep_air_date_str = date_obj.strftime('%b %d, %Y')
-                        except ValueError: pass
+                        except ValueError:
+                            pass
                     next_episode_str = f"🗓️ Next: S{ep_season:02d}E{ep_num:02d} - {ep_name} ({ep_air_date_str})"
                 else:
                     next_episode_str = "🗓️ Next: No upcoming episode data"
-            except TMDBConnectionError:
-                next_episode_str = "🗓️ Next: ⚠️ Connection Error"
-                shows_with_errors += 1
-            except TMDBAPIError:
-                next_episode_str = "🗓️ Next: ⚠️ API Error"
-                shows_with_errors += 1
-            except Exception as e:
-                logger.error(f"PaginatorView: TMDB API error for show {show_id} ('{show_name}'): {e}")
-                next_episode_str = "🗓️ Next: ⚠️ Error loading data"
-                shows_with_errors += 1
 
             last_notified_info = sub.get('last_notified_episode_details')
             if isinstance(last_notified_info, str):

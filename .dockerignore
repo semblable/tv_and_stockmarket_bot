@@ -1,4 +1,4 @@
-# Environment variables and secrets
+# Environment & secrets
 .env
 .env.*
 !.env.example
@@ -6,7 +6,7 @@ secrets/
 *.key
 *.pem
 
-# SQLite database & data persistence
+# Data and database files
 data/
 *.db
 *.db-journal
@@ -14,7 +14,7 @@ data/
 *.db-shm
 xiaomi_uploads/
 
-# Python cache & build files
+# Python cache & build artifacts
 __pycache__/
 *.pyc
 *.pyo
@@ -25,16 +25,15 @@ htmlcov/
 build/
 dist/
 *.egg-info/
-.venv/
-env/
-venv/
 
-# Logs and test outputs
-*.log
+# Tests & development docs
+tests/
 bandit_report.json
+Dokumentacja_projektu_Discord_Bot.pdf
+*.log
 
-# IDE / OS metadata
-.idea/
+# Git & IDE
+.git/
+.gitignore
 .vscode/
-.DS_Store
-Thumbs.db
+.idea/
