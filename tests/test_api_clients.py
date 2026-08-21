@@ -91,5 +91,3 @@ def test_steam_pick_best_store_match_selects_best_candidate():
     best = steam_client.pick_best_store_match("kingdom come deliverence 2", results)
     assert best is not None
     assert best["appid"] == 2
-
-

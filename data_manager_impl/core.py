@@ -304,6 +304,19 @@ class DataManagerCore:
         )
         """
         create_table_if_not_exists("sent_episode_notifications", create_sent_episode_notifications_sql)
+        # sent_episode_notifications schema migration for older DBs
+        try:
+            cols = self._execute_query("PRAGMA table_info(sent_episode_notifications);", fetch_all=True)
+            if cols and isinstance(cols, list):
+                col_names = {c.get("name") for c in cols if isinstance(c, dict)}
+                if "season_number" not in col_names:
+                    self._execute_query("ALTER TABLE sent_episode_notifications ADD COLUMN season_number INTEGER;", commit=True)
+                    logger.info("Column 'season_number' added successfully to sent_episode_notifications.")
+                if "episode_number" not in col_names:
+                    self._execute_query("ALTER TABLE sent_episode_notifications ADD COLUMN episode_number INTEGER;", commit=True)
+                    logger.info("Column 'episode_number' added successfully to sent_episode_notifications.")
+        except Exception as e:
+            logger.warning(f"Could not apply sent_episode_notifications schema migration: {e}")
 
         # Sent Corporate Events (earnings / ex-dividend alert de-duplication)
         create_sent_corporate_events_sql = """

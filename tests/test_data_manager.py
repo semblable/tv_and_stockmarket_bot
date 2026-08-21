@@ -82,6 +82,61 @@ def test_tv_subscriptions(db_manager):
     assert len(db_manager.get_user_tv_subscriptions(user_id)) == 0
 
 
+def test_sent_episode_notifications(db_manager):
+    user_id = 999
+    show_id = 123
+    db_manager.add_tv_show_subscription(user_id, show_id, "Test Show", "/path.jpg")
+
+    # Initially not notified
+    assert db_manager.has_user_been_notified_for_episode(user_id, show_id, "tvmaze:3599626") is False
+    assert db_manager.has_user_been_notified_for_episode_by_number(user_id, show_id, 3, 8) is False
+
+    # Add notification
+    ok = db_manager.add_sent_episode_notification(user_id, show_id, "tvmaze:3599626", 3, 8)
+    assert ok is True
+
+    # Now notified by key and by season/episode number
+    assert db_manager.has_user_been_notified_for_episode(user_id, show_id, "tvmaze:3599626") is True
+    assert db_manager.has_user_been_notified_for_episode_by_number(user_id, show_id, 3, 8) is True
+    assert db_manager.has_user_been_notified_for_episode_by_number(user_id, show_id, 3, 9) is False
+
+
+def test_sent_episode_notifications_migration_from_old_schema(tmp_path):
+    import sqlite3
+    from unittest.mock import patch
+    from data_manager import DataManager
+
+    db_file = tmp_path / "old_schema.db"
+    conn = sqlite3.connect(db_file)
+    # Create the old sent_episode_notifications schema without season_number/episode_number
+    conn.execute("""
+    CREATE TABLE sent_episode_notifications (
+        user_id TEXT NOT NULL,
+        show_tmdb_id INTEGER NOT NULL,
+        episode_tmdb_id INTEGER NOT NULL,
+        notified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, show_tmdb_id, episode_tmdb_id)
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+    # Initializing DataManager on this DB should trigger the migration
+    with patch('data_manager.SQLITE_DB_PATH', str(db_file)):
+        dm = DataManager()
+        cols = dm._execute_query("PRAGMA table_info(sent_episode_notifications);", fetch_all=True)
+        col_names = {c["name"] for c in cols}
+        assert "season_number" in col_names
+        assert "episode_number" in col_names
+
+        # Insert and query with new columns must now succeed
+        ok = dm.add_sent_episode_notification(111, 222, "tvmaze:999", 1, 2)
+        assert ok is True
+        assert dm.has_user_been_notified_for_episode(111, 222, "tvmaze:999") is True
+        assert dm.has_user_been_notified_for_episode_by_number(111, 222, 1, 2) is True
+        dm.close()
+
+
 def test_games_duplicate_guard_by_steam_appid(db_manager):
     user_id = 7777
     first = db_manager.create_game_item(

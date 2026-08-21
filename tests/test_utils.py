@@ -117,7 +117,6 @@ def test_article_html_extraction_basic():
     assert "Second paragraph" in text
     assert "menu" not in text
 
-
 @pytest.mark.asyncio
 async def test_selection_view_with_results():
     results = [{"id": 10, "name": "Show A"}, {"id": 20, "name": "Show B"}]
