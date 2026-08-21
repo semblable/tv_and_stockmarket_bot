@@ -1,0 +1,41 @@
+name: Backup Database from Server
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.OCI_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.OCI_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Create database hot backup on server
+        run: |
+          ssh "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}" "bash -lc 'set -euo pipefail
+          docker exec bot-container python -c \"
+          from data_manager import DataManager
+          dm = DataManager()
+          dm.backup_db(\\\"/app/data/app_backup.db\\\")
+          dm.close()
+          \"
+          '"
+
+      - name: Download backup from server
+        run: |
+          mkdir -p ./downloaded_backup
+          scp "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}:~/data/app_backup.db" ./downloaded_backup/app.db
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-backup
+          path: ./downloaded_backup/app.db
+          retention-days: 7
