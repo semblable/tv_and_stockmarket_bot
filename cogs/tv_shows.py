@@ -1060,6 +1060,7 @@ class TVShows(commands.Cog):
                 logger.error(f"Unexpected error fetching user {user_id}: {e}. Skipping.")
                 continue
 
+            seen_show_keys_in_cycle = set()
             for sub in user_subs:
                 if 'show_tmdb_id' not in sub or 'show_name' not in sub:
                     user_id_for_log = sub.get('user_id', 'Unknown User')
@@ -1071,6 +1072,12 @@ class TVShows(commands.Cog):
                 show_name_stored = sub['show_name']
                 tvmaze_id = sub.get('show_tvmaze_id')
                 poster_path = sub.get('poster_path')
+
+                # Avoid duplicate checks for the same show within the same user cycle
+                dedup_key = tvmaze_id or show_id or show_name_stored.strip().lower()
+                if dedup_key in seen_show_keys_in_cycle:
+                    continue
+                seen_show_keys_in_cycle.add(dedup_key)
 
                 # 1. Attempt to resolve TVMaze ID if missing
                 if not tvmaze_id:
