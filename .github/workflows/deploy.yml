@@ -156,6 +156,7 @@ jobs:
           docker stop -t 30 bot-container || true
           docker rm bot-container || true
           mkdir -p \"\$HOME/data\"
+          chmod -R 777 \"\$HOME/data\" || true
           docker run -d \
             --name bot-container \
             --restart unless-stopped \

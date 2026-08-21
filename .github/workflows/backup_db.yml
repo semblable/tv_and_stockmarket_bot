@@ -20,11 +20,15 @@ jobs:
       - name: Create database hot backup on server
         run: |
           ssh "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}" "bash -lc 'set -euo pipefail
+          chmod -R 777 \$HOME/data || true
           docker exec bot-container python -c \"
-          from data_manager import DataManager
-          dm = DataManager()
-          dm.backup_db(\\\"/app/data/app_backup.db\\\")
-          dm.close()
+          import sqlite3
+          src = sqlite3.connect(\\\"/app/data/app.db\\\")
+          dst = sqlite3.connect(\\\"/app/data/app_backup.db\\\")
+          src.backup(dst)
+          dst.close()
+          src.close()
+          print(\\\"Backup successful!\\\")
           \"
           '"
 
@@ -32,6 +36,8 @@ jobs:
         run: |
           mkdir -p ./downloaded_backup
           scp "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}:~/data/app_backup.db" ./downloaded_backup/app.db
+          # Cleanup backup file on server
+          ssh "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}" "rm -f ~/data/app_backup.db"
 
       - name: Upload backup artifact
         uses: actions/upload-artifact@v4
