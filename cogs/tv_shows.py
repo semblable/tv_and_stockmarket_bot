@@ -5,11 +5,13 @@ from discord.ext import commands, tasks
 from api_clients import tmdb_client, tvmaze_client
 from api_clients.tmdb_client import TMDBError, TMDBConnectionError, TMDBAPIError
 from datetime import datetime, date, timedelta, timezone
+import calendar
 import asyncio
 import logging
 import json
 import typing
 from utils.paginator import BasePaginatorView, SelectionView, NUMBER_EMOJIS
+from utils.timezone_utils import tzinfo_from_name
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +126,9 @@ class TVShows(commands.Cog):
     def __init__(self, bot, db_manager):
         self.bot = bot
         self.db_manager = db_manager
-        logger.info("TVShows Cog: Initializing and starting check_new_episodes task.")
+        logger.info("TVShows Cog: Initializing and starting tasks.")
         self.check_new_episodes.start()
+        self.check_monthly_tv_digest.start()
 
     @staticmethod
     def _parse_tvmaze_airstamp_to_utc(airstamp: typing.Optional[str]) -> typing.Optional[datetime]:
@@ -203,8 +206,9 @@ class TVShows(commands.Cog):
             return await ctx.send(**kwargs)
 
     def cog_unload(self):
-        logger.info("TVShows Cog: Unloading and cancelling check_new_episodes task.")
+        logger.info("TVShows Cog: Unloading and cancelling background tasks.")
         self.check_new_episodes.cancel()
+        self.check_monthly_tv_digest.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -956,6 +960,187 @@ class TVShows(commands.Cog):
             logger.error(f"Unexpected error sending schedule for user {user_id}: {e}")
             await self.send_response(ctx, "An unexpected error occurred while displaying your schedule.", ephemeral=True)
 
+    async def _fetch_monthly_schedule(self, user_id: int, year: int, month: int) -> typing.List[dict]:
+        """
+        Fetches all upcoming/scheduled episodes for the user's subscriptions in the given calendar month.
+        Returns a sorted list of episode dicts.
+        """
+        try:
+            subscriptions = await self.bot.loop.run_in_executor(None, self.db_manager.get_user_tv_subscriptions, user_id)
+        except Exception as e:
+            logger.error(f"Error fetching subscriptions for user {user_id} in monthly schedule: {e}")
+            return []
+
+        if not subscriptions:
+            return []
+
+        _, num_days = calendar.monthrange(year, month)
+        month_start = date(year, month, 1)
+        month_end = date(year, month, num_days)
+
+        episodes = []
+
+        for sub in subscriptions:
+            show_id = sub['show_tmdb_id']
+            show_name = sub['show_name']
+            tvmaze_id = sub.get('show_tvmaze_id')
+
+            show_episodes_found = False
+
+            # 1. TVMaze
+            if tvmaze_id:
+                try:
+                    all_eps = await self.bot.loop.run_in_executor(None, tvmaze_client.get_show_episodes, tvmaze_id)
+                    if all_eps and isinstance(all_eps, list):
+                        for ep in all_eps:
+                            airdate_str = ep.get('airdate')
+                            if not airdate_str:
+                                continue
+                            try:
+                                ep_date = datetime.strptime(airdate_str, "%Y-%m-%d").date()
+                                if month_start <= ep_date <= month_end:
+                                    episodes.append({
+                                        'show_name': show_name,
+                                        'show_id': show_id,
+                                        'season_number': ep.get('season', 0),
+                                        'episode_number': ep.get('number', 0),
+                                        'episode_name': ep.get('name', 'TBA'),
+                                        'air_date': airdate_str,
+                                        'air_date_obj': ep_date,
+                                        'air_datetime_utc': ep.get('airstamp'),
+                                        'rating': ep.get('rating', {}).get('average'),
+                                        'source': 'TVMaze'
+                                    })
+                                    show_episodes_found = True
+                            except ValueError:
+                                pass
+                except Exception as e:
+                    logger.debug(f"TVMaze monthly fetch error for show {show_id}: {e}")
+
+            # 2. TMDB fallback
+            if not show_episodes_found:
+                try:
+                    details = await self.bot.loop.run_in_executor(None, tmdb_client.get_show_details, show_id)
+                    if details:
+                        for key in ('next_episode_to_air', 'last_episode_to_air'):
+                            ep = details.get(key)
+                            if ep and ep.get('air_date'):
+                                try:
+                                    ep_date = datetime.strptime(ep['air_date'], "%Y-%m-%d").date()
+                                    if month_start <= ep_date <= month_end:
+                                        episodes.append({
+                                            'show_name': details.get('name', show_name),
+                                            'show_id': show_id,
+                                            'season_number': ep.get('season_number', 0),
+                                            'episode_number': ep.get('episode_number', 0),
+                                            'episode_name': ep.get('name', 'TBA'),
+                                            'air_date': ep['air_date'],
+                                            'air_date_obj': ep_date,
+                                            'air_datetime_utc': None,
+                                            'rating': ep.get('vote_average'),
+                                            'source': 'TMDB'
+                                        })
+                                except ValueError:
+                                    pass
+                except Exception as e:
+                    logger.debug(f"TMDB monthly fetch error for show {show_id}: {e}")
+
+        # Deduplicate episodes by (show_name, season_number, episode_number, air_date)
+        unique_episodes = {}
+        for ep in episodes:
+            key = (ep['show_name'], ep['season_number'], ep['episode_number'], ep['air_date'])
+            if key not in unique_episodes:
+                unique_episodes[key] = ep
+
+        sorted_episodes = sorted(unique_episodes.values(), key=lambda x: (x['air_date_obj'], x.get('air_datetime_utc') or ''))
+        return sorted_episodes
+
+    @staticmethod
+    def _build_monthly_schedule_embed(year: int, month: int, episodes: typing.List[dict], user_display_name: str = "") -> discord.Embed:
+        month_name = calendar.month_name[month]
+        title = f"🗓️ TV Show Calendar: {month_name} {year}"
+        embed = discord.Embed(
+            title=title,
+            color=discord.Color.gold(),
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        if not episodes:
+            embed.description = f"No new episodes scheduled for your tracked TV shows in **{month_name} {year}**."
+            embed.set_footer(text="Data provided by TVMaze & TMDB")
+            return embed
+
+        embed.description = f"Found **{len(episodes)}** episode(s) airing in **{month_name} {year}** across your subscriptions:"
+
+        # Group by air_date_obj
+        episodes_by_date = {}
+        for ep in episodes:
+            d = ep['air_date_obj']
+            if d not in episodes_by_date:
+                episodes_by_date[d] = []
+            episodes_by_date[d].append(ep)
+
+        for ep_date, ep_list in episodes_by_date.items():
+            date_header = f"📅 {ep_date.strftime('%A, %b %d')}"
+            lines = []
+            for ep in ep_list:
+                s_num = ep['season_number']
+                e_num = ep['episode_number']
+                ep_code = f"S{s_num:02d}E{e_num:02d}" if (s_num and e_num) else ""
+                ep_name = f" \"{ep['episode_name']}\"" if ep['episode_name'] and ep['episode_name'] != 'TBA' else ""
+                lines.append(f"• **{ep['show_name']}** {ep_code}{ep_name}")
+
+            field_val = "\n".join(lines)
+            if len(field_val) > 1024:
+                field_val = field_val[:1020] + "..."
+            embed.add_field(name=date_header, value=field_val, inline=False)
+
+        embed.set_footer(text=f"Monthly Digest • {len(episodes)} total episodes • Data by TVMaze & TMDB")
+        return embed
+
+    @commands.hybrid_command(name="tv_monthly", description="Displays all TV episodes airing in a given month for your subscribed shows.")
+    @discord.app_commands.describe(
+        month="Month to display: 'current', 'next', or YYYY-MM (e.g. 2026-09). Defaults to current month."
+    )
+    async def tv_monthly(self, ctx: commands.Context, month: typing.Optional[str] = "current"):
+        """
+        Displays a monthly release calendar for your subscribed TV shows.
+        """
+        await ctx.defer(ephemeral=True)
+        user_id = ctx.author.id
+
+        now = datetime.now(timezone.utc)
+        target_year = now.year
+        target_month = now.month
+
+        if month:
+            m_clean = month.strip().lower()
+            if m_clean in ("next", "nastepny", "kolejny"):
+                target_month += 1
+                if target_month > 12:
+                    target_month = 1
+                    target_year += 1
+            elif m_clean not in ("current", "ten", "biezacy", "now", "this"):
+                # Try parsing YYYY-MM or MM
+                try:
+                    if "-" in m_clean:
+                        parts = m_clean.split("-")
+                        target_year = int(parts[0])
+                        target_month = int(parts[1])
+                    else:
+                        target_month = int(m_clean)
+                except Exception:
+                    await self.send_response(ctx, "Invalid month format. Please use `current`, `next`, or `YYYY-MM` (e.g. `2026-09`).", ephemeral=True)
+                    return
+
+        if not (1 <= target_month <= 12 and 1900 <= target_year <= 2100):
+            await self.send_response(ctx, "Invalid month or year specified.", ephemeral=True)
+            return
+
+        episodes = await self._fetch_monthly_schedule(user_id, target_year, target_month)
+        embed = self._build_monthly_schedule_embed(target_year, target_month, episodes, ctx.author.display_name)
+        await self.send_response(ctx, embed=embed, ephemeral=True)
+
     @commands.hybrid_command(name="tv_trending", description="Shows trending TV shows from TMDB.")
     @discord.app_commands.describe(time_window="Time window for trending: 'day' or 'week'. Defaults to 'week'.")
     async def tv_trending(self, ctx: commands.Context, time_window: str = 'week'):
@@ -1413,6 +1598,87 @@ class TVShows(commands.Cog):
     async def before_check_new_episodes(self):
         await self.bot.wait_until_ready()
         logger.info("TVShows check_new_episodes task is ready; loop starting.")
+
+    @tasks.loop(hours=1)
+    async def check_monthly_tv_digest(self):
+        """
+        Checks once per hour whether it is 09:00 AM on the 1st of the month in the user's
+        local timezone, and automatically delivers a monthly TV release calendar DM.
+        """
+        try:
+            all_subs = await self.bot.loop.run_in_executor(None, self.db_manager.get_all_tv_subscriptions)
+            if not all_subs:
+                return
+
+            user_ids = set()
+            for sub in all_subs:
+                uid = sub.get("user_id")
+                if uid:
+                    user_ids.add(int(uid))
+
+            now_utc = datetime.now(timezone.utc)
+
+            for user_id in user_ids:
+                try:
+                    # Check user preference: tv_monthly_digest (default True)
+                    is_enabled = await self.bot.loop.run_in_executor(
+                        None, self.db_manager.get_user_preference, user_id, "tv_monthly_digest", True
+                    )
+                    if is_enabled is False or str(is_enabled).lower() in ("false", "off", "0", "no"):
+                        continue
+
+                    # Get user timezone
+                    tz_name = await self.bot.loop.run_in_executor(
+                        None, self.db_manager.get_user_preference, user_id, "timezone", "Europe/Warsaw"
+                    )
+                    user_tz = tzinfo_from_name(tz_name)
+                    user_local_now = now_utc.astimezone(user_tz)
+
+                    # Trigger only on the 1st of the month at or after 09:00 local time
+                    if user_local_now.day != 1 or user_local_now.hour < 9:
+                        continue
+
+                    current_period_key = f"{user_local_now.year}-{user_local_now.month:02d}"
+
+                    # Check if already sent for this month
+                    last_sent = await self.bot.loop.run_in_executor(
+                        None, self.db_manager.get_user_preference, user_id, "last_sent_tv_monthly_digest", None
+                    )
+                    if last_sent == current_period_key:
+                        continue
+
+                    # Fetch upcoming episodes for current month
+                    episodes = await self._fetch_monthly_schedule(user_id, user_local_now.year, user_local_now.month)
+
+                    user = self.bot.get_user(user_id)
+                    if not user:
+                        try:
+                            user = await self.bot.fetch_user(user_id)
+                        except Exception:
+                            user = None
+
+                    if user:
+                        embed = self._build_monthly_schedule_embed(user_local_now.year, user_local_now.month, episodes, user.display_name)
+                        try:
+                            await user.send(embed=embed)
+                            logger.info(f"Sent monthly TV digest for {current_period_key} to user {user_id}.")
+                            await self.bot.loop.run_in_executor(
+                                None, self.db_manager.set_user_preference, user_id, "last_sent_tv_monthly_digest", current_period_key
+                            )
+                        except discord.Forbidden:
+                            logger.warning(f"Cannot send monthly TV digest to user {user_id} (DMs disabled).")
+                        except Exception as e:
+                            logger.error(f"Error sending monthly TV digest DM to user {user_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Error processing monthly TV digest for user {user_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"Unexpected error in check_monthly_tv_digest loop: {e}")
+
+    @check_monthly_tv_digest.before_loop
+    async def before_check_monthly_tv_digest(self):
+        await self.bot.wait_until_ready()
+        logger.info("TVShows check_monthly_tv_digest task is ready; loop starting.")
 
 async def setup(bot):
     await bot.add_cog(TVShows(bot, db_manager=bot.db_manager))

@@ -44,6 +44,15 @@ def create_settings_embed(ctx, user_preferences, weather_schedules):
         inline=False
     )
 
+    # TV Monthly Digest
+    tv_digest_status = "✅ On" if user_preferences.get('tv_monthly_digest', True) else "❌ Off"
+    embed.add_field(
+        name="📅 Monthly TV Digest",
+        value=f"Automated release calendar sent on the 1st of every month.\nStatus: **{tv_digest_status}**\n"
+              f"`{ctx.prefix}settings tv_digest <on|off>`",
+        inline=False
+    )
+
     # Do Not Disturb (DND)
     dnd_enabled = user_preferences.get('dnd_enabled', False)
     dnd_status = "🌙 Active" if dnd_enabled else "☀️ Inactive"
@@ -260,6 +269,27 @@ class SettingsCog(commands.Cog, name="Settings"):
         await ctx.send(f"📺 TV Show DM Overview preference updated to: **{status_text}**.")
         # Optionally, show all settings again
         # await self.view_settings(ctx)
+
+    @settings_group.command(name="tv_digest", aliases=["tvdigest", "monthly_digest", "tv_monthly_digest"])
+    async def set_tv_digest(self, ctx: commands.Context, new_status: str):
+        """
+        Toggle automated monthly TV release calendar DMs on the 1st of each month.
+        Usage: !settings tv_digest <on|off>
+        """
+        user_id = ctx.author.id
+        new_status_lower = new_status.lower().strip()
+
+        if new_status_lower in ["on", "enable", "enabled", "true", "yes", "1"]:
+            preference_value = True
+        elif new_status_lower in ["off", "disable", "disabled", "false", "no", "0"]:
+            preference_value = False
+        else:
+            await ctx.send(f"Invalid status: `{new_status}`. Please use `on` or `off`.", ephemeral=True)
+            return
+
+        await self.bot.loop.run_in_executor(None, self.db_manager.set_user_preference, user_id, "tv_monthly_digest", preference_value)
+        status_text = "✅ On (1st of month at 09:00)" if preference_value else "❌ Off"
+        await ctx.send(f"📅 Monthly TV Digest preference updated to: **{status_text}**.")
 
     @settings_group.command(name="dnd")
     async def set_dnd(self, ctx: commands.Context, *, dnd_setting: str):
