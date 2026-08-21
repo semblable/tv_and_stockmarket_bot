@@ -1187,23 +1187,33 @@ class TVShows(commands.Cog):
                                             should_check = True
                                     
                                     if should_check:
-                                        # Check if notified (using episode ID + provider namespace, plus season/episode number for robustness)
+                                        ep_season = ep.get('season', 0)
+                                        ep_num = ep.get('number', 0)
                                         ep_key = f"tvmaze:{ep_id}" if ep_id is not None else None
-                                        already_notified = await self.bot.loop.run_in_executor(
-                                            None, self.db_manager.has_user_been_notified_for_episode, user_id, show_id, ep_key
-                                        )
-                                        
-                                        if not already_notified:
-                                            # Robustness check: Check by season/episode number too
-                                            ep_season = ep.get('season', 0)
-                                            ep_num = ep.get('number', 0)
-                                            # Guard against unknown season/episode (0/0) which can suppress future notifications.
-                                            if isinstance(ep_season, int) and isinstance(ep_num, int) and ep_season > 0 and ep_num > 0:
-                                                already_notified_by_num = await self.bot.loop.run_in_executor(
-                                                    None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
-                                                )
-                                                if already_notified_by_num:
-                                                    already_notified = True
+                                        already_notified = False
+
+                                        # Multi-layer check 1: Check in-memory sub['last_notified_episode_details']
+                                        last_notified = sub.get('last_notified_episode_details')
+                                        if isinstance(last_notified, dict):
+                                            ln_season = last_notified.get('season_number')
+                                            ln_num = last_notified.get('episode_number')
+                                            ln_id = last_notified.get('id')
+                                            if (isinstance(ep_season, int) and isinstance(ep_num, int) and ep_season > 0 and ep_num > 0 and ln_season == ep_season and ln_num == ep_num) or (ep_id is not None and ln_id == ep_id):
+                                                already_notified = True
+
+                                        # Multi-layer check 2: Check by episode key
+                                        if not already_notified and ep_key:
+                                            already_notified = await self.bot.loop.run_in_executor(
+                                                None, self.db_manager.has_user_been_notified_for_episode, user_id, show_id, ep_key
+                                            )
+
+                                        # Multi-layer check 3: Check by season / episode number
+                                        if not already_notified and isinstance(ep_season, int) and isinstance(ep_num, int) and ep_season > 0 and ep_num > 0:
+                                            already_notified_by_num = await self.bot.loop.run_in_executor(
+                                                None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
+                                            )
+                                            if already_notified_by_num:
+                                                already_notified = True
 
                                         if not already_notified:
                                             if not any(e['id'] == ep_id for e in episodes_to_notify):
@@ -1244,24 +1254,35 @@ class TVShows(commands.Cog):
                             try:
                                 last_aired_date_obj = datetime.strptime(last_aired_ep['air_date'], '%Y-%m-%d').date()
                                 if (today_utc - timedelta(days=7)) <= last_aired_date_obj <= today_utc:
-                                    already_notified = await self.bot.loop.run_in_executor(
-                                        None, 
-                                        self.db_manager.has_user_been_notified_for_episode, 
-                                        user_id, 
-                                        show_id, 
-                                        f"tmdb:{last_aired_ep.get('id')}"
-                                    )
+                                    ep_season = last_aired_ep.get('season_number', 0)
+                                    ep_num = last_aired_ep.get('episode_number', 0)
+                                    tmdb_ep_id = last_aired_ep.get('id')
+                                    already_notified = False
+
+                                    # Multi-layer check 1: Check in-memory sub['last_notified_episode_details']
+                                    last_notified = sub.get('last_notified_episode_details')
+                                    if isinstance(last_notified, dict):
+                                        ln_season = last_notified.get('season_number')
+                                        ln_num = last_notified.get('episode_number')
+                                        ln_id = last_notified.get('id')
+                                        if (isinstance(ep_season, int) and isinstance(ep_num, int) and ep_season > 0 and ep_num > 0 and ln_season == ep_season and ln_num == ep_num) or (tmdb_ep_id is not None and ln_id == tmdb_ep_id):
+                                            already_notified = True
 
                                     if not already_notified:
-                                        # Robustness check: Check by season/episode number too
-                                        ep_season = last_aired_ep.get('season_number', 0)
-                                        ep_num = last_aired_ep.get('episode_number', 0)
-                                        if isinstance(ep_season, int) and isinstance(ep_num, int) and ep_season > 0 and ep_num > 0:
-                                            already_notified_by_num = await self.bot.loop.run_in_executor(
-                                                None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
-                                            )
-                                            if already_notified_by_num:
-                                                already_notified = True
+                                        already_notified = await self.bot.loop.run_in_executor(
+                                            None, 
+                                            self.db_manager.has_user_been_notified_for_episode, 
+                                            user_id, 
+                                            show_id, 
+                                            f"tmdb:{tmdb_ep_id}"
+                                        )
+
+                                    if not already_notified and isinstance(ep_season, int) and isinstance(ep_num, int) and ep_season > 0 and ep_num > 0:
+                                        already_notified_by_num = await self.bot.loop.run_in_executor(
+                                            None, self.db_manager.has_user_been_notified_for_episode_by_number, user_id, show_id, ep_season, ep_num
+                                        )
+                                        if already_notified_by_num:
+                                            already_notified = True
 
                                     if not already_notified:
                                         if not any(ep.get('id') == last_aired_ep.get('id') for ep in episodes_to_notify):
@@ -1384,6 +1405,7 @@ class TVShows(commands.Cog):
                         return "1900-01-01"
 
                     most_recent_episode = max(episodes_to_notify, key=_last_notified_sort_key)
+                    sub['last_notified_episode_details'] = most_recent_episode
                     await self.bot.loop.run_in_executor(None, self.db_manager.update_last_notified_episode_details, user_id, show_id, most_recent_episode)
                     logger.info(f"Updated last notified episode for user {user_id}, show {show_id}.")
 

@@ -136,16 +136,16 @@ class MediaMixin:
         if normalized_id is None:
             return False
         query = """
-        INSERT OR IGNORE INTO sent_episode_notifications 
+        INSERT OR REPLACE INTO sent_episode_notifications 
             (user_id, show_tmdb_id, episode_tmdb_id, season_number, episode_number)
         VALUES (:user_id, :show_tmdb_id, :episode_tmdb_id, :season_number, :episode_number)
         """
         params = {
             "user_id": user_id_str,
             "show_tmdb_id": show_tmdb_id,
-            "episode_tmdb_id": normalized_id,
-            "season_number": season_number,
-            "episode_number": episode_number
+            "episode_tmdb_id": str(normalized_id),
+            "season_number": season_number if isinstance(season_number, int) else 0,
+            "episode_number": episode_number if isinstance(episode_number, int) else 0
         }
         return self._execute_query(query, params, commit=True)
 
@@ -157,12 +157,16 @@ class MediaMixin:
         # Match by (user_id, episode_tmdb_id) as episode ID is globally unique per provider
         query = """
         SELECT 1 FROM sent_episode_notifications
-        WHERE user_id = :user_id AND episode_tmdb_id = :episode_tmdb_id
+        WHERE user_id = :user_id AND (
+            episode_tmdb_id = :episode_tmdb_id
+            OR episode_tmdb_id = :episode_tmdb_id_str
+        )
         LIMIT 1
         """
         params = {
             "user_id": user_id_str,
-            "episode_tmdb_id": normalized_id
+            "episode_tmdb_id": normalized_id,
+            "episode_tmdb_id_str": str(normalized_id)
         }
         result = self._execute_query(query, params, fetch_one=True)
         if result:
@@ -173,10 +177,13 @@ class MediaMixin:
             result2 = self._execute_query(
                 """
                 SELECT 1 FROM sent_episode_notifications
-                WHERE user_id = :user_id AND episode_tmdb_id = :legacy_id
+                WHERE user_id = :user_id AND (
+                    episode_tmdb_id = :legacy_id
+                    OR episode_tmdb_id = :legacy_id_str
+                )
                 LIMIT 1
                 """,
-                {"user_id": user_id_str, "legacy_id": legacy_int},
+                {"user_id": user_id_str, "legacy_id": legacy_int, "legacy_id_str": str(legacy_int)},
                 fetch_one=True,
             )
             return bool(result2)
@@ -187,24 +194,18 @@ class MediaMixin:
         Checks if a user has been notified for an episode based on season/episode number.
         Useful for robustness across different data providers (TMDB vs TVMaze) where IDs might differ.
         """
+        if not (isinstance(season_number, int) and isinstance(episode_number, int) and season_number > 0 and episode_number > 0):
+            return False
         user_id_str = str(user_id)
         query = """
         SELECT 1 FROM sent_episode_notifications
         WHERE user_id = :user_id 
           AND season_number = :season_number 
           AND episode_number = :episode_number
-          AND (
-              show_tmdb_id = :show_tmdb_id
-              OR show_tmdb_id IN (
-                  SELECT show_tmdb_id FROM tv_subscriptions 
-                  WHERE user_id = :user_id AND (show_tvmaze_id = :show_tmdb_id OR show_tmdb_id = :show_tmdb_id)
-              )
-          )
         LIMIT 1
         """
         params = {
             "user_id": user_id_str,
-            "show_tmdb_id": show_tmdb_id,
             "season_number": season_number,
             "episode_number": episode_number
         }
