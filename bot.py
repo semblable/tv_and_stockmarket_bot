@@ -11,6 +11,8 @@ import os
 from cogs.help import MyCustomHelpCommand # Import the custom help command
 import asyncio
 import traceback # Added for detailed error logging
+import io
+import base64
 from flask import Flask, request, jsonify
 from threading import Thread
 from data_manager import DataManager # For API endpoints
@@ -236,6 +238,7 @@ flask_app = Flask(__name__)
 # flask_app.logger.critical("!!!!!!!!!! BOT.PY HAS STARTED - LOGGER TEST !!!!!!!!!!") # New test log
 
 @flask_app.route('/')
+@flask_app.route('/health')
 def home():
     return "Bot is alive and kicking!", 200 # Endpoint for uptime monitor
 
@@ -244,9 +247,10 @@ async def _deliver_webhook_report(
     content: str,
     title: Optional[str] = None,
     payload: Optional[dict] = None,
+    files_data: Optional[list[tuple[str, bytes]]] = None,
 ) -> None:
     """
-    Send a report DM to the user.
+    Send a report DM to the user, optionally with file attachments.
     """
     try:
         user = bot.get_user(user_id)
@@ -319,14 +323,33 @@ async def _deliver_webhook_report(
                         file = discord.File(fp=chart, filename="activity_report.png")
                         embed.set_image(url="attachment://activity_report.png")
 
+        # Assemble file attachments
+        discord_files: list[discord.File] = []
+        if files_data:
+            for fname, fbytes in files_data:
+                discord_files.append(discord.File(fp=io.BytesIO(fbytes), filename=fname))
+        if file:
+            discord_files.append(file)
+
         allowed_mentions = discord.AllowedMentions.none()
-        if embed or file:
-            if file:
-                await user.send(content=message if message else None, embed=embed, file=file, allowed_mentions=allowed_mentions)
-            else:
-                await user.send(content=message if message else None, embed=embed, allowed_mentions=allowed_mentions)
+        content_to_send = message if message else None
+
+        if discord_files:
+            # Discord allows up to 10 files per message
+            await user.send(
+                content=content_to_send,
+                embed=embed,
+                files=discord_files[:10],
+                allowed_mentions=allowed_mentions,
+            )
+        elif embed:
+            await user.send(
+                content=content_to_send,
+                embed=embed,
+                allowed_mentions=allowed_mentions,
+            )
         else:
-            await user.send(message, allowed_mentions=allowed_mentions)
+            await user.send(content_to_send or "*(Empty webhook payload)*", allowed_mentions=allowed_mentions)
     except discord.Forbidden:
         log.warning(f"Webhook report: cannot DM user {user_id} (Forbidden).")
     except Exception as e:
@@ -335,15 +358,16 @@ async def _deliver_webhook_report(
 @flask_app.route("/webhook/report/<token>", methods=["POST"])
 def webhook_report(token: str):
     """
-    Receives a report payload and forwards it to the user who owns the token.
+    Receives a report payload (JSON or multipart/form-data) and forwards it to the user who owns the token.
+    Supports file attachments up to WEBHOOK_MAX_BYTES.
     """
     if not token:
         return jsonify({"ok": False, "error": "missing_token"}), 400
     if not getattr(bot, "db_manager", None):
         return jsonify({"ok": False, "error": "db_not_ready"}), 503
 
-    # Basic request size guard (default 50 KB, configurable)
-    max_bytes = int(getattr(config, "WEBHOOK_MAX_BYTES", 50 * 1024) or 50 * 1024)
+    # Request size guard (default 10 MB, configurable)
+    max_bytes = int(getattr(config, "WEBHOOK_MAX_BYTES", 10 * 1024 * 1024) or 10 * 1024 * 1024)
     if request.content_length is not None and request.content_length > max_bytes:
         return jsonify({"ok": False, "error": "payload_too_large"}), 413
 
@@ -372,18 +396,67 @@ def webhook_report(token: str):
     if not user_id:
         return jsonify({"ok": False, "error": "invalid_token"}), 404
 
+    # Extract attached files (multipart/form-data)
+    files_data: list[tuple[str, bytes]] = []
+    if request.files:
+        for key in request.files:
+            for storage in request.files.getlist(key):
+                if storage and storage.filename:
+                    clean_name = os.path.basename(storage.filename).strip() or "attachment"
+                    file_bytes = storage.read()
+                    if file_bytes:
+                        files_data.append((clean_name, file_bytes))
+
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         payload = {}
 
-    content = payload.get("content") or payload.get("message") or ""
-    title = payload.get("title")
-    if not isinstance(content, str) or not content.strip():
+    # Support base64-encoded file in JSON payload as well
+    if isinstance(payload.get("file_base64"), str) and payload.get("file_name"):
+        try:
+            raw_b64 = base64.b64decode(payload["file_base64"])
+            if raw_b64:
+                clean_name = os.path.basename(str(payload["file_name"])).strip() or "attachment"
+                files_data.append((clean_name, raw_b64))
+        except Exception:
+            pass
+
+    # Support list of base64 files in JSON payload
+    if isinstance(payload.get("files"), list):
+        for item in payload["files"]:
+            if isinstance(item, dict) and isinstance(item.get("content_base64"), str):
+                try:
+                    raw_b64 = base64.b64decode(item["content_base64"])
+                    if raw_b64:
+                        clean_name = os.path.basename(str(item.get("filename") or "attachment")).strip() or "attachment"
+                        files_data.append((clean_name, raw_b64))
+                except Exception:
+                    pass
+
+    # Double check total accumulated file size
+    total_files_size = sum(len(b) for _, b in files_data)
+    if total_files_size > max_bytes:
+        return jsonify({"ok": False, "error": "payload_too_large"}), 413
+
+    content = (
+        payload.get("content")
+        or payload.get("message")
+        or request.form.get("content")
+        or request.form.get("message")
+        or ""
+    )
+    title = payload.get("title") or request.form.get("title")
+
+    if not isinstance(content, str):
+        content = str(content)
+
+    # Require either non-empty content or at least one file
+    if not content.strip() and not files_data:
         return jsonify({"ok": False, "error": "missing_content"}), 400
 
     try:
         asyncio.run_coroutine_threadsafe(
-            _deliver_webhook_report(int(user_id), content.strip(), title, payload),
+            _deliver_webhook_report(int(user_id), content.strip(), title, payload, files_data=files_data),
             bot.loop,
         )
     except Exception as e:

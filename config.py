@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     SQLITE_DB_PATH: str = "data/app.db"
     WEBHOOK_BASE_URL: str = "http://localhost:5000"
     WEBHOOK_SHARED_SECRET: str = ""
-    WEBHOOK_MAX_BYTES: int = 50 * 1024
+    WEBHOOK_MAX_BYTES: int = 10 * 1024 * 1024  # Default 10 MB (Discord bot upload limit is typically 10-25 MB)
     WEBHOOK_RATE_LIMIT_PER_MIN: int = 30
     ALLOW_EXTERNAL_CHARTS: bool = True
 

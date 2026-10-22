@@ -1,11 +1,16 @@
 # cogs/settings.py
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import re # For DND time validation
 import logging # Import logging
 from typing import Optional
 import secrets
+import io
+import gzip
+import os
+import tempfile
+import datetime
 
 import config
 
@@ -125,10 +130,37 @@ async def timezone_autocomplete(interaction: discord.Interaction, current: str) 
         if current_lower in tz.lower()
     ][:25]
 
+def _generate_backup_archive(db_manager) -> bytes:
+    """
+    Creates a hot SQLite backup, compresses it with gzip, and returns the bytes.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        ok = db_manager.backup_db(tmp_path)
+        if not ok:
+            return b""
+        with open(tmp_path, "rb") as f_in:
+            raw_bytes = f_in.read()
+        return gzip.compress(raw_bytes)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 class SettingsCog(commands.Cog, name="Settings"):
     def __init__(self, bot, db_manager):
         self.bot = bot
         self.db_manager = db_manager # Injected dependency
+
+    def cog_load(self):
+        self.monthly_backup_task.start()
+
+    def cog_unload(self):
+        self.monthly_backup_task.cancel()
 
     async def _send_ctx(self, ctx: commands.Context, content: str, *, ephemeral: bool = True) -> None:
         """
@@ -406,7 +438,11 @@ class SettingsCog(commands.Cog, name="Settings"):
             "```\n"
             f"POST {link}\n"
             "Content-Type: application/json\n"
-            "{ \"content\": \"Hello from another app\" }\n"
+            '{ "content": "Hello from another app" }\n'
+            "```\n"
+            "Or send files via multipart form:\n"
+            "```bash\n"
+            f'curl -F "file=@report.pdf" -F "content=Optional message" {link}\n'
             "```\n"
             "Use `/settings webhook_link reset:true` to rotate the link."
         )
@@ -464,6 +500,83 @@ class SettingsCog(commands.Cog, name="Settings"):
         Generate a new per-user webhook link (invalidates the old one).
         """
         await self.webhook_link(ctx, reset=True)
+
+    @settings_group.command(name="backup_download", aliases=["backup_now", "db_backup"])
+    @app_commands.describe()
+    async def backup_download(self, ctx: commands.Context):
+        """Send a fresh database backup to your DMs (Owner only)."""
+        owner_id = int(getattr(config, "TIMER_OWNER_ID", 0) or 0)
+        if ctx.author.id != owner_id:
+            await self._send_ctx(ctx, "❌ This command is restricted to the bot owner.", ephemeral=True)
+            return
+
+        if getattr(ctx, "interaction", None):
+            await ctx.defer(ephemeral=True)
+
+        gz_data = await self.bot.loop.run_in_executor(None, _generate_backup_archive, self.db_manager)
+        if not gz_data:
+            await self._send_ctx(ctx, "❌ Failed to generate database backup.", ephemeral=True)
+            return
+
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+        file = discord.File(fp=io.BytesIO(gz_data), filename=f"app_backup_{timestamp}.sqlite.gz")
+        try:
+            await ctx.author.send(
+                content=f"📦 **Database Backup — {timestamp}**\nHere is your requested database backup ({len(gz_data) / 1024:.1f} KB).",
+                file=file,
+            )
+            await self._send_ctx(ctx, "✅ Backup has been sent to your DMs!", ephemeral=True)
+        except discord.Forbidden:
+            await self._send_ctx(ctx, "❌ Could not send you a DM. Please check your Discord privacy settings.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error delivering on-demand backup to owner: {e}", exc_info=True)
+            await self._send_ctx(ctx, f"❌ Failed to send backup: {e}", ephemeral=True)
+
+    @tasks.loop(hours=1)
+    async def monthly_backup_task(self):
+        """Sends a backup to the owner on the 1st of each month (once a month)."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if now.day != 1 or now.hour < 4:
+            return
+
+        owner_id = int(getattr(config, "TIMER_OWNER_ID", 0) or 0)
+        if not owner_id:
+            return
+
+        month_key = now.strftime("%Y-%m")
+        last_sent = await self.bot.loop.run_in_executor(
+            None, self.db_manager.get_user_preference, owner_id, "last_monthly_backup_sent", None
+        )
+        if last_sent == month_key:
+            return
+
+        await self.bot.loop.run_in_executor(
+            None, self.db_manager.set_user_preference, owner_id, "last_monthly_backup_sent", month_key
+        )
+
+        try:
+            user = self.bot.get_user(owner_id) or await self.bot.fetch_user(owner_id)
+            if not user:
+                logger.warning(f"Monthly backup: Owner user {owner_id} not found.")
+                return
+
+            gz_data = await self.bot.loop.run_in_executor(None, _generate_backup_archive, self.db_manager)
+            if not gz_data:
+                logger.error("Monthly backup: Failed to generate backup archive.")
+                return
+
+            file = discord.File(fp=io.BytesIO(gz_data), filename=f"app_backup_{month_key}-01.sqlite.gz")
+            await user.send(
+                content=f"📦 **Monthly Database Backup — {month_key}-01**\nHere is your automated monthly database backup archive ({len(gz_data) / 1024:.1f} KB).",
+                file=file,
+            )
+            logger.info(f"Monthly database backup sent to owner {owner_id} for {month_key}.")
+        except Exception as e:
+            logger.error(f"Failed to deliver monthly backup to owner: {e}", exc_info=True)
+
+    @monthly_backup_task.before_loop
+    async def before_monthly_backup_task(self):
+        await self.bot.wait_until_ready()
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(SettingsCog(bot, db_manager=bot.db_manager))
