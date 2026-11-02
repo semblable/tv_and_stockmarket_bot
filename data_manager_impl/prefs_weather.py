@@ -93,6 +93,94 @@ class PrefsWeatherMixin:
         result = self._execute_query(query, params, fetch_one=True)
         if result and isinstance(result.get("user_id"), str):
             return result["user_id"]
+
+        # If checking report_webhook_token, also check multi-webhook dictionaries in report_webhooks
+        if key == "report_webhook_token" and isinstance(value, str):
+            return self.get_user_id_for_report_token(value)
+
+        return None
+
+    def get_user_webhooks(self, user_id: Any) -> Dict[str, str]:
+        """
+        Returns a dict of {name: token} for the user.
+        Preserves and migrates legacy 'report_webhook_token' as 'default'.
+        """
+        user_id_str = str(user_id)
+        raw_webhooks = self.get_user_preference(user_id_str, "report_webhooks", None)
+        webhooks: Dict[str, str] = {}
+        if isinstance(raw_webhooks, dict):
+            for k, v in raw_webhooks.items():
+                if isinstance(v, str):
+                    webhooks[str(k).lower()] = v
+                elif isinstance(v, dict) and "token" in v:
+                    webhooks[str(k).lower()] = str(v["token"])
+
+        legacy_token = self.get_user_preference(user_id_str, "report_webhook_token", None)
+        if legacy_token and "default" not in webhooks:
+            webhooks["default"] = str(legacy_token)
+            self.set_user_preference(user_id_str, "report_webhooks", webhooks)
+
+        return webhooks
+
+    def set_user_webhook(self, user_id: Any, name: str, token: str) -> None:
+        """
+        Sets or updates a named webhook token for the user.
+        If name is 'default', also updates 'report_webhook_token' for backward compatibility.
+        """
+        user_id_str = str(user_id)
+        name_clean = (name or "default").strip().lower()
+        webhooks = self.get_user_webhooks(user_id_str)
+        webhooks[name_clean] = token
+        self.set_user_preference(user_id_str, "report_webhooks", webhooks)
+        if name_clean == "default":
+            self.set_user_preference(user_id_str, "report_webhook_token", token)
+
+    def delete_user_webhook(self, user_id: Any, name: str) -> bool:
+        """
+        Deletes a named webhook. Returns True if deleted, False if not found.
+        """
+        user_id_str = str(user_id)
+        name_clean = (name or "default").strip().lower()
+        webhooks = self.get_user_webhooks(user_id_str)
+        if name_clean in webhooks:
+            del webhooks[name_clean]
+            self.set_user_preference(user_id_str, "report_webhooks", webhooks)
+            if name_clean == "default":
+                self.delete_user_preference(user_id_str, "report_webhook_token")
+            return True
+        return False
+
+    def get_user_id_for_report_token(self, token: str) -> Optional[str]:
+        """
+        Finds the user_id that owns the given webhook token.
+        Checks both legacy 'report_webhook_token' and multi-token 'report_webhooks'.
+        """
+        if not token:
+            return None
+
+        # 1. Fast path: check single legacy preference directly via SQL
+        value_json = json.dumps(token)
+        query = "SELECT user_id FROM user_preferences WHERE pref_key = 'report_webhook_token' AND pref_value = :value_json"
+        result = self._execute_query(query, {"value_json": value_json}, fetch_one=True)
+        if result and isinstance(result.get("user_id"), str):
+            return result["user_id"]
+
+        # 2. Check multi-token dictionaries in report_webhooks
+        query = "SELECT user_id, pref_value FROM user_preferences WHERE pref_key = 'report_webhooks'"
+        rows = self._execute_query(query, fetch_all=True) or []
+        for row in rows:
+            try:
+                raw = row.get("pref_value")
+                if not raw:
+                    continue
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    for v in data.values():
+                        tok = v.get("token") if isinstance(v, dict) else v
+                        if tok == token:
+                            return str(row["user_id"])
+            except Exception:
+                continue
         return None
 
     # --- Currency Rates ---

@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: bot.Dockerfile
-    container_name: discordbot
+    container_name: bot-container
     restart: unless-stopped
     env_file:
       - .env
@@ -20,3 +20,32 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    networks:
+      bot-net:
+        aliases:
+          - bot-container
+          - discordbot
+
+  caddy:
+    image: caddy:alpine
+    container_name: caddy-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - discordbot
+    networks:
+      - bot-net
+
+networks:
+  bot-net:
+    name: bot-net
+
+volumes:
+  caddy_data:
+  caddy_config:

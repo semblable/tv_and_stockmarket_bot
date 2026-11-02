@@ -138,9 +138,10 @@ jobs:
           [ -n "$TIMER_AUTH_PASSWORD" ] && echo "TIMER_AUTH_PASSWORD=$TIMER_AUTH_PASSWORD" >> .env
           chmod 600 .env
 
-      - name: Copy .env to server
+      - name: Copy .env and Caddyfile to server
         run: |
           scp .env "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}:~/.env"
+          scp Caddyfile "${{ secrets.OCI_USERNAME }}@${{ secrets.OCI_HOST }}:~/Caddyfile"
 
       - name: Deploy over SSH (no action container)
         env:
@@ -153,6 +154,7 @@ jobs:
           chmod 600 ~/.env || true
           docker login \"$REGISTRY\" -u \"$ACTOR\" --password-stdin
           docker pull \"$IMAGE\"
+          docker network create bot-net 2>/dev/null || true
           docker stop -t 30 bot-container || true
           docker rm bot-container || true
           mkdir -p \"\$HOME/data\"
@@ -160,9 +162,26 @@ jobs:
           docker run -d \
             --name bot-container \
             --restart unless-stopped \
+            --network bot-net \
             -v \"\$HOME/data:/app/data\" \
             --env-file \"\$HOME/.env\" \
             -p 5000:5000 \
             \"$IMAGE\"
+          if ! docker ps -a --format \"{{.Names}}\" | grep -q \"^caddy-proxy$\"; then
+            docker run -d \
+              --name caddy-proxy \
+              --restart unless-stopped \
+              --network bot-net \
+              -p 80:80 \
+              -p 443:443 \
+              -v \"\$HOME/Caddyfile:/etc/caddy/Caddyfile:ro\" \
+              -v caddy_data:/data \
+              -v caddy_config:/config \
+              caddy:alpine
+          else
+            docker network connect bot-net caddy-proxy 2>/dev/null || true
+            docker cp \"\$HOME/Caddyfile\" caddy-proxy:/etc/caddy/Caddyfile
+            docker exec caddy-proxy caddy reload --config /etc/caddy/Caddyfile || true
+          fi
           docker image prune -f
           '"

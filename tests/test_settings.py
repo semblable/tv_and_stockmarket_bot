@@ -99,3 +99,93 @@ async def test_monthly_backup_task_sends_on_first_of_month(db_manager):
         mock_owner.send.reset_mock()
         await cog.monthly_backup_task()
         assert not mock_owner.send.called
+
+
+def test_data_manager_multi_webhook_support(db_manager):
+    user_id = 98765
+
+    # 1. Simulate legacy token already stored in DB
+    db_manager.set_user_preference(user_id, "report_webhook_token", "legacy_token_123")
+
+    # 2. get_user_webhooks should include "default" -> legacy_token_123
+    hooks = db_manager.get_user_webhooks(user_id)
+    assert "default" in hooks
+    assert hooks["default"] == "legacy_token_123"
+
+    # 3. Create a second webhook for linguaread
+    db_manager.set_user_webhook(user_id, "linguaread", "lingua_token_456")
+    hooks = db_manager.get_user_webhooks(user_id)
+    assert len(hooks) == 2
+    assert hooks["default"] == "legacy_token_123"
+    assert hooks["linguaread"] == "lingua_token_456"
+
+    # 4. Token lookup resolves user_id for both tokens
+    assert db_manager.get_user_id_for_report_token("legacy_token_123") == str(user_id)
+    assert db_manager.get_user_id_for_report_token("lingua_token_456") == str(user_id)
+    assert db_manager.get_user_id_for_report_token("unknown_token") is None
+
+    # 5. Deleting linguaread preserves default
+    deleted = db_manager.delete_user_webhook(user_id, "linguaread")
+    assert deleted is True
+    hooks = db_manager.get_user_webhooks(user_id)
+    assert "linguaread" not in hooks
+    assert "default" in hooks
+    assert db_manager.get_user_id_for_report_token("legacy_token_123") == str(user_id)
+    assert db_manager.get_user_id_for_report_token("lingua_token_456") is None
+
+
+@pytest.mark.asyncio
+async def test_webhook_commands_multiple_tokens(db_manager):
+    import asyncio
+    bot = MagicMock()
+    bot.loop = asyncio.get_event_loop()
+    cog = SettingsCog(bot, db_manager)
+
+    ctx = MagicMock()
+    ctx.author.id = 55555
+    ctx.send = AsyncMock()
+    ctx.interaction = None
+
+    # 1. Generate default link
+    await cog.webhook_link.callback(cog, ctx, name="default", reset=False)
+    assert ctx.send.called
+    msg1 = ctx.send.call_args[0][0]
+    assert "Your report webhook link (`default`)" in msg1
+
+    # Extract default token
+    hooks = db_manager.get_user_webhooks(55555)
+    default_token = hooks["default"]
+    assert default_token in msg1
+
+    # 2. Generate linguaread link without rotating default
+    ctx.send.reset_mock()
+    await cog.webhook_link.callback(cog, ctx, name="linguaread", reset=False)
+    assert ctx.send.called
+    msg2 = ctx.send.call_args[0][0]
+    assert "Your report webhook link (`linguaread`)" in msg2
+
+    hooks = db_manager.get_user_webhooks(55555)
+    assert len(hooks) == 2
+    assert hooks["default"] == default_token
+    assert "linguaread" in hooks
+    lingua_token = hooks["linguaread"]
+    assert lingua_token != default_token
+
+    # 3. List webhooks
+    ctx.send.reset_mock()
+    await cog.webhook_list.callback(cog, ctx)
+    assert ctx.send.called
+    list_msg = ctx.send.call_args[0][0]
+    assert "Your Active Webhooks (2)" in list_msg
+    assert "default" in list_msg
+    assert "linguaread" in list_msg
+
+    # 4. Delete linguaread webhook
+    ctx.send.reset_mock()
+    await cog.webhook_delete.callback(cog, ctx, name="linguaread")
+    assert ctx.send.called
+    assert "has been deleted" in ctx.send.call_args[0][0]
+
+    hooks = db_manager.get_user_webhooks(55555)
+    assert len(hooks) == 1
+    assert "default" in hooks

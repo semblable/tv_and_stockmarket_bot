@@ -1,0 +1,3 @@
+kamil-bot.duckdns.org {
+    reverse_proxy bot-container:5000
+}

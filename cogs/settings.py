@@ -99,7 +99,8 @@ def create_settings_embed(ctx, user_preferences, weather_schedules):
         name="🔗 Report Webhook Link",
         value=(
             f"Base URL: `{report_base_display}`\n"
-            f"`{ctx.prefix}settings webhook_link`\n"
+            f"`{ctx.prefix}settings webhook_link [name]`\n"
+            f"`{ctx.prefix}settings webhook_list`\n"
             f"`{ctx.prefix}settings webhook_base <url|clear>`"
         ),
         inline=False,
@@ -409,19 +410,33 @@ class SettingsCog(commands.Cog, name="Settings"):
             await ctx.send(f"✅ Timezone set to `{name}`.")
 
     @settings_group.command(name="webhook_link", aliases=["webhook", "report_link", "report_webhook"])
-    @app_commands.describe(reset="Generate a new link (invalidates the old one).")
-    async def webhook_link(self, ctx: commands.Context, reset: bool = False):
+    @app_commands.describe(
+        name="Webhook label/name (e.g. 'linguaread', 'server'). Defaults to 'default'.",
+        reset="Generate a new link for this label (invalidates old link for this label only).",
+    )
+    async def webhook_link(self, ctx: commands.Context, name: str = "default", reset: bool = False):
         """
-        Generate a per-user webhook link for receiving reports.
+        Generate or view a per-user webhook link for receiving reports.
+        Supports multiple named webhooks per account.
         """
         user_id = ctx.author.id
-        token = await self.bot.loop.run_in_executor(
-            None, self.db_manager.get_user_preference, user_id, "report_webhook_token", None
+        webhook_name = (name or "default").strip().lower()
+        if not re.match(r"^[a-zA-Z0-9_\-\.]{1,32}$", webhook_name):
+            await self._send_ctx(
+                ctx,
+                "❌ Invalid webhook name. Use 1-32 alphanumeric characters, dashes, or underscores.",
+                ephemeral=True,
+            )
+            return
+
+        webhooks = await self.bot.loop.run_in_executor(
+            None, self.db_manager.get_user_webhooks, user_id
         )
+        token = webhooks.get(webhook_name)
         if reset or not token:
             token = secrets.token_urlsafe(32)
             await self.bot.loop.run_in_executor(
-                None, self.db_manager.set_user_preference, user_id, "report_webhook_token", token
+                None, self.db_manager.set_user_webhook, user_id, webhook_name, token
             )
 
         pref_base_url = await self.bot.loop.run_in_executor(
@@ -432,7 +447,7 @@ class SettingsCog(commands.Cog, name="Settings"):
         link = f"{base_url}/webhook/report/{token}"
 
         message = (
-            "✅ Your report webhook link is ready:\n"
+            f"✅ Your report webhook link (`{webhook_name}`) is ready:\n"
             f"{link}\n\n"
             "Send a JSON POST like:\n"
             "```\n"
@@ -444,9 +459,64 @@ class SettingsCog(commands.Cog, name="Settings"):
             "```bash\n"
             f'curl -F "file=@report.pdf" -F "content=Optional message" {link}\n'
             "```\n"
-            "Use `/settings webhook_link reset:true` to rotate the link."
+            f"• Use `/settings webhook_link name:{webhook_name} reset:true` to rotate this link.\n"
+            "• Use `/settings webhook_list` to view all active webhooks."
         )
         await self._send_ctx(ctx, message, ephemeral=True)
+
+    @settings_group.command(name="webhook_list", aliases=["webhooks", "report_webhooks"])
+    async def webhook_list(self, ctx: commands.Context):
+        """
+        List all active report webhooks configured for your account.
+        """
+        user_id = ctx.author.id
+        webhooks = await self.bot.loop.run_in_executor(
+            None, self.db_manager.get_user_webhooks, user_id
+        )
+        if not webhooks:
+            await self._send_ctx(
+                ctx,
+                "ℹ️ You do not have any active webhooks yet. Use `/settings webhook_link` to create one.",
+                ephemeral=True,
+            )
+            return
+
+        pref_base_url = await self.bot.loop.run_in_executor(
+            None, self.db_manager.get_user_preference, user_id, "report_webhook_base_url", None
+        )
+        base_url = str(pref_base_url or getattr(config, "WEBHOOK_BASE_URL", "http://localhost:5000") or "http://localhost:5000").rstrip("/")
+
+        lines = [f"📋 **Your Active Webhooks ({len(webhooks)})**:"]
+        for w_name, token in sorted(webhooks.items()):
+            link = f"{base_url}/webhook/report/{token}"
+            lines.append(f"• **{w_name}**: `{link}`")
+
+        lines.append("\n*Manage with `/settings webhook_link [name]` or `/settings webhook_delete <name>`.*")
+        await self._send_ctx(ctx, "\n".join(lines), ephemeral=True)
+
+    @settings_group.command(name="webhook_delete", aliases=["webhook_remove", "report_webhook_delete"])
+    @app_commands.describe(name="Name of the webhook to delete.")
+    async def webhook_delete(self, ctx: commands.Context, name: str):
+        """
+        Delete a specific report webhook.
+        """
+        user_id = ctx.author.id
+        webhook_name = (name or "").strip().lower()
+        if not webhook_name:
+            await self._send_ctx(ctx, "❌ Please specify the webhook name to delete.", ephemeral=True)
+            return
+
+        deleted = await self.bot.loop.run_in_executor(
+            None, self.db_manager.delete_user_webhook, user_id, webhook_name
+        )
+        if deleted:
+            await self._send_ctx(ctx, f"✅ Webhook `{webhook_name}` has been deleted.", ephemeral=True)
+        else:
+            await self._send_ctx(
+                ctx,
+                f"❌ Webhook `{webhook_name}` was not found. Use `/settings webhook_list` to see existing webhooks.",
+                ephemeral=True,
+            )
 
     @settings_group.command(name="webhook_base", aliases=["webhook_base_url", "report_webhook_base"])
     @app_commands.describe(base_url="Base URL for your webhook link (e.g. https://mybot.example.com)")
@@ -495,11 +565,12 @@ class SettingsCog(commands.Cog, name="Settings"):
         await self._send_ctx(ctx, f"✅ Report webhook base URL set to: `{base}`", ephemeral=True)
 
     @settings_group.command(name="webhook_reset", aliases=["webhook_rotate", "report_webhook_reset"])
-    async def webhook_reset(self, ctx: commands.Context):
+    @app_commands.describe(name="Name of the webhook to reset (defaults to 'default').")
+    async def webhook_reset(self, ctx: commands.Context, name: str = "default"):
         """
         Generate a new per-user webhook link (invalidates the old one).
         """
-        await self.webhook_link(ctx, reset=True)
+        await self.webhook_link(ctx, name=name, reset=True)
 
     @settings_group.command(name="backup_download", aliases=["backup_now", "db_backup"])
     @app_commands.describe()
