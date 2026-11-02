@@ -96,6 +96,9 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Downcase REPO
         run: |
           echo "REPO_LC=${GITHUB_REPOSITORY,,}" >>${GITHUB_ENV}
@@ -174,14 +177,13 @@ jobs:
               --network bot-net \
               -p 80:80 \
               -p 443:443 \
-              -v \"\$HOME/Caddyfile:/etc/caddy/Caddyfile:ro\" \
+              -v \"\$HOME/Caddyfile:/etc/caddy/Caddyfile\" \
               -v caddy_data:/data \
               -v caddy_config:/config \
               caddy:alpine
           else
             docker network connect bot-net caddy-proxy 2>/dev/null || true
-            docker cp \"\$HOME/Caddyfile\" caddy-proxy:/etc/caddy/Caddyfile
-            docker exec caddy-proxy caddy reload --config /etc/caddy/Caddyfile || true
+            docker exec caddy-proxy caddy reload --config /etc/caddy/Caddyfile || docker restart caddy-proxy
           fi
           docker image prune -f
           '"
