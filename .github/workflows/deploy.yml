@@ -183,7 +183,9 @@ jobs:
               caddy:alpine
           else
             docker network connect bot-net caddy-proxy 2>/dev/null || true
-            docker exec caddy-proxy caddy reload --config /etc/caddy/Caddyfile || docker restart caddy-proxy
+            docker restart caddy-proxy
           fi
+          sleep 5
+          docker logs --tail 40 caddy-proxy
           docker image prune -f
           '"

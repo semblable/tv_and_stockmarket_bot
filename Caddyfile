@@ -1,3 +1,7 @@
+{
+    email kamil.u.1998@gmail.com
+}
+
 kamil-bot.duckdns.org {
     reverse_proxy bot-container:5000
 }
