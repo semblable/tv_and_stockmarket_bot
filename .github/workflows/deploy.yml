@@ -131,8 +131,10 @@ jobs:
             /^TIMER_OWNER_ID=/ { next }
             /^DISCORD_SYNC_SECRET=/ { next }
             /^TIMER_AUTH_PASSWORD=/ { next }
+            /^WEBHOOK_BASE_URL=/ { next }
             { print }
           ' .env > .env.tmp && mv .env.tmp .env
+          echo "WEBHOOK_BASE_URL=https://kamil-bot.duckdns.org" >> .env
           [ -n "$TMDB_API_KEY" ] && echo "TMDB_API_KEY=$TMDB_API_KEY" >> .env
           [ -n "$FIREBASE_DATABASE_URL" ] && echo "FIREBASE_DATABASE_URL=$FIREBASE_DATABASE_URL" >> .env
           [ -n "$FIREBASE_DATABASE_SECRET" ] && echo "FIREBASE_DATABASE_SECRET=$FIREBASE_DATABASE_SECRET" >> .env
